@@ -1,7 +1,20 @@
 <Project>
-  <!-- See https://aka.ms/dotnet/msbuild/customize for more details on customizing your build -->
-  <PropertyGroup>
-
-
-  </PropertyGroup>
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <IsPackable>false</IsPackable>
+        <ImplicitUsings>true</ImplicitUsings>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>disable</Nullable>
+        <RepositoryUrl>https://github.com/nostrfi/relay</RepositoryUrl>
+        <PackageTags>nostr, nostrfi</PackageTags>
+        <RootNamespace>Nostrfi</RootNamespace>
+        <PackageIcon>nostrfi.png</PackageIcon>
+        <Copyright>Copyright © $([System.DateTime]::Now.ToString("yyyy")) nostrfi.net</Copyright>
+    </PropertyGroup>
+    <ItemGroup>
+        <Content Include="$(MSBuildThisFileDirectory)nostrfi.png" Pack="true" PackagePath="/">
+            <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
 </Project>

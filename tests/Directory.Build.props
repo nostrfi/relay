@@ -1,0 +1,28 @@
+<Project>
+    <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
+    <PropertyGroup>
+        <IsPackable>False</IsPackable>
+        <IsTestProject>true</IsTestProject>
+        <RootNamespace>Nostrfi.Relay.Tests</RootNamespace>
+    </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="FluentValidation"/>
+        <PackageReference Include="FluentValidation.DependencyInjectionExtensions"/>
+        <PackageReference Include="FluentAssertions"/>
+        <PackageReference Include="Microsoft.NET.Test.Sdk"/>
+        <PackageReference Include="NSubstitute"/>
+        <PackageReference Include="xunit"/>
+        <PackageReference Include="xunit.runner.visualstudio"/>
+        <PackageReference Include="NBuilder"/>
+        <PackageReference Include="Moq"/>
+        <PackageReference Include="Shouldly"/>
+        <PackageReference Include="coverlet.collector"/>
+        <PackageReference Include="coverlet.msbuild"/>
+    </ItemGroup>
+    <ItemGroup>
+        <Using Include="Xunit"/>
+        <Using Include="FluentAssertions"/>
+        <Using Include="NSubstitute"/>
+        <Using Include="Shouldly"/>
+    </ItemGroup>
+</Project>
