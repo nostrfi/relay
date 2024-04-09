@@ -1,6 +1,6 @@
 <Project>
     <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
     <PropertyGroup>
-        <RootNamespace>Nostrfi.Relay</RootNamespace>
+        <RootNamespace>Nostrfi.Core</RootNamespace>
     </PropertyGroup>
 </Project>

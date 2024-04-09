@@ -1,8 +1,11 @@
 <Project>
-    <PropertyGroup>
-        <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    </PropertyGroup>
-    <ItemGroup>
-      
-    </ItemGroup>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Hosting" Version="2.2.7" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageVersion Include="Nostrfi.Relay.Persistence" Version="0.3.2" />
+  </ItemGroup>
 </Project>

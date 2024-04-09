@@ -2,4 +2,7 @@
     <PropertyGroup>
         <AssemblyName>Unit.Tests</AssemblyName>
     </PropertyGroup>
+    <ItemGroup>
+      <ProjectReference Include="..\..\src\Core\Core.csproj" />
+    </ItemGroup>
 </Project>
