@@ -6,6 +6,7 @@
     <PackageReference Include="Microsoft.AspNetCore.Hosting" Version="2.2.7" />
   </ItemGroup>
   <ItemGroup>
+    <PackageVersion Include="Ardalis.ApiEndpoints" Version="4.1.0" />
     <PackageVersion Include="Nostrfi.Relay.Persistence" Version="0.3.9" />
   </ItemGroup>
 </Project>

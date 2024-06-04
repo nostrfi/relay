@@ -3,4 +3,7 @@
     <PropertyGroup>
         <RootNamespace>Nostrfi.Relay</RootNamespace>
     </PropertyGroup>
+    <ItemGroup>
+        <PackageReference Include="Nostrfi.Relay.Persistence" />
+    </ItemGroup>
 </Project>
