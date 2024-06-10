@@ -4,5 +4,5 @@ namespace Nostrfi.Core.Events;
 
 public interface IEventSerializer
 {
-    Event Serialize(string message);
+    Event Deserialize(string message);
 }

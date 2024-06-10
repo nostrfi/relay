@@ -5,7 +5,7 @@ Content-Type: text/plain
 {
     "id": "4376c65d2f232afbe9b882a35baa4f6fe8667c4e684749af565f981833ed6a65",
     "pubkey": "6e468422dfb74a5738702a8823b9b28168abab8655faacb6853cd0ee15deee93",
-    "created_at": 1673347337,
+    "created_at": "1673347337",
     "kind": 1,
     "tags": [
         ["e", "3da979448d9ba263864c4d6f14984c423a3838364ec255f03c7904b1ae77f206"],
