@@ -12,7 +12,7 @@ public class UnixTimeStampJsonConvertor : JsonConverter<DateTimeOffset>
         {
             throw new JsonException(ModelsErrorMessages.NotANumber)
             {
-                Source = nameof(UnixTimeStampJsonConvertor.Read)
+                Source = nameof(Read)
             };
         }
         return DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64());

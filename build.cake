@@ -7,7 +7,7 @@ var target = Argument("target", "Default");
 var configuration = Argument("configuration", "Release");
 
 const string TEST_COVERAGE_OUTPUT_DIR = "coverage";
-var solution = "Database.sln";
+var solution = "Relay.sln";
 Task("Clean")
     .Does(() => {
  
