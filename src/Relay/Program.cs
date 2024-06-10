@@ -1,11 +1,13 @@
 using Nostrfi.Core;
+using Nostrfi.Core.Events;
 using Nostrfi.Relay.Persistence;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddNostrDatabase(builder.Configuration);
 builder.Services.AddControllers();
-builder.Services.AddSingleton<SocketHandler>();
+builder.Services.AddSingleton<IEventSerializer, EventSerializer>();
+builder.Services.AddSingleton<WebSocketHandler>();
 var app = builder.Build();
 
 app.UseNostrDatabase();

@@ -4,7 +4,7 @@
         <RootNamespace>Nostrfi.Relay.Unit.Tests</RootNamespace>
     </PropertyGroup>
     <ItemGroup>
-        <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory"/>
+      
         <PackageReference Include="Microsoft.EntityFrameworkCore.Relational"/>
 
     </ItemGroup>

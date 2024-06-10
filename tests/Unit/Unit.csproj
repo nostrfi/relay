@@ -4,5 +4,6 @@
     </PropertyGroup>
     <ItemGroup>
       <ProjectReference Include="..\..\src\Core\Core.csproj" />
+      <ProjectReference Include="..\..\src\Relay\Relay.csproj" />
     </ItemGroup>
 </Project>

@@ -3,7 +3,7 @@ using Nostrfi.Core;
 
 namespace Nostrfi.Relay;
 
-public class RelayController(SocketHandler handler) : ControllerBase
+public class RelayController(WebSocketHandler handler) : ControllerBase
 {
     [Route("/")]
     public async Task Socket()
