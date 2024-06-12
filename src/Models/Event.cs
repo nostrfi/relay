@@ -1,4 +1,5 @@
-﻿using System.Text.Json.Serialization;
+﻿using System.Text;
+using System.Text.Json.Serialization;
 using Nostrfi.Models.Convertors;
 
 namespace Nostrfi.Models;
@@ -48,5 +49,9 @@ public class Event
         /// </summary>
         [JsonPropertyName("tags")]
         public List<string[]> Tags { get; set; } = [];
-    
+
+        public override string ToString()
+        {
+            return System.Text.Json.JsonSerializer.Serialize(this);
+        }
 }

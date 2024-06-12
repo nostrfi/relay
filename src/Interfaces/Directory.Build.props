@@ -1,0 +1,7 @@
+<Project>
+    <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
+    <PropertyGroup>
+        <AssemblyName>Nostrfi.Core.Interfaces</AssemblyName>
+        <RootNamespace>Nostrfi.Core.Interfaces</RootNamespace>
+    </PropertyGroup>
+</Project>
