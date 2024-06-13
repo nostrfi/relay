@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Threading.Channels;
+using System.Xml.Linq;
 using Microsoft.Extensions.Logging;
 using Nostrfi.Core.Extensions;
+using Nostrfi.Models;
 
 namespace Nostrfi.Core;
 
@@ -11,7 +13,12 @@ public class ConnectionStateManager(ILogger<ConnectionStateManager> logger)
     private readonly ConcurrentDictionary<string, Channel<string>> _pendingMessages = new();
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _connectionChannels = new();
 
-    public ConcurrentDictionary<string, WebSocket> Connections => new();
+    public static ConcurrentDictionary<string, WebSocket> Connections => new();
+    public static MultiConcurrentDictionary<string, string> DictionaryToSubscriptions =
+        new();
+    public readonly MultiConcurrentDictionary<string, SubscriptionFilter[]> ConnectionSubscriptionsToFilters =
+        new();
+
     
     public void Add(string connectionId)
     {
@@ -22,12 +29,30 @@ public class ConnectionStateManager(ILogger<ConnectionStateManager> logger)
             _ = Process(connectionId, channel, cts.Token);
             /*
              * The _ = before the asynchronous method call Process denotes that the code does not
-             * require the use of the task result. This is a common practice when the result of the Task is not needed,
-             * and it makes the code cleaner by indicating that the returned Task is purposely being ignored.
+             * require the use of the task result. This is a common practice when the result of the Task is not needed, and it makes the code cleaner by indicating that the returned Task is purposely being ignored.
              */
         }
     }
+    public void Remove(string connectionId)
+    {
+        if (DictionaryToSubscriptions.Remove(connectionId, out var subscriptions))
+        {
+            foreach (var subscription in subscriptions)
+            {
+                ConnectionSubscriptionsToFilters.Remove($"{connectionId}-{subscription}");
+            }
+        }
 
+        if (_pendingMessages.Remove(connectionId, out var channel))
+        {
+            channel.Writer.TryComplete();
+        }
+        if (_connectionChannels.Remove(connectionId, out var cts))
+        {
+            cts.Cancel();
+        }
+    }
+    
     private async Task Process(string connectionId, Channel<string> channel, CancellationToken cancellationToken)
     {
         while (await channel.Reader.WaitToReadAsync(cancellationToken))
@@ -50,7 +75,7 @@ public class ConnectionStateManager(ILogger<ConnectionStateManager> logger)
             }
             else
             {
-                logger.LogWarning("sending message to a connection that no longer exists {Message}", message);
+                logger.LogWarning("connection no longer exists for: {Message}", message);
             }
         }
         catch when (cancellationToken.IsCancellationRequested)
