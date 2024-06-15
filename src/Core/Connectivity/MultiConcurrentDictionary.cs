@@ -90,18 +90,12 @@ public class MultiConcurrentDictionary<TKey, TValue> : IEnumerable<KeyValuePair<
 
             if (!shouldSpinAndRetry) return TryRemoveBagFromDictionary(key, bag);
             spinWait.SpinOnce();
-            continue;
-
         }
     }
 
     private static bool RemoveValueFromBag(Bag bag, TValue value)
     {
-        if (bag.IsDiscarded)
-        {
-            return true;
-        }
-
+        if (bag.IsDiscarded) return true;
         if (!bag.Remove(value)) return false;
 
         if (bag.Count == 0)
@@ -110,6 +104,7 @@ public class MultiConcurrentDictionary<TKey, TValue> : IEnumerable<KeyValuePair<
         }
 
         return false;
+
     }
 
     private bool TryRemoveBagFromDictionary(TKey key, Bag bag)
