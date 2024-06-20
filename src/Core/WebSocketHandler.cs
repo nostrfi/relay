@@ -14,6 +14,18 @@ public class WebSocketHandler(IEventSerializer serializer)
         var bufferSegment = new ArraySegment<byte>(_buffer);
 
         var receiveResult = await ReceiveAsync(ws, bufferSegment);
+
+        switch (receiveResult.MessageType)
+        {
+            case WebSocketMessageType.Text:
+                break;
+            case WebSocketMessageType.Close:
+                break;
+            case WebSocketMessageType.Binary:
+                break;
+        }
+        
+        
         if (receiveResult.MessageType == WebSocketMessageType.Text)
         {
             var message = Encoding.UTF8.GetString(bufferSegment.Array!, bufferSegment.Offset, receiveResult.Count);

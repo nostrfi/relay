@@ -11,6 +11,7 @@ public class RelayController(WebSocketHandler handler) : ControllerBase
         if (HttpContext.WebSockets.IsWebSocketRequest)
         {
             using var webSocket = await HttpContext.WebSockets.AcceptWebSocketAsync();
+          
             await handler.Handle(webSocket);
         }
         else
