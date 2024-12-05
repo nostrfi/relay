@@ -1,8 +1,5 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-
-<PropertyGroup>
-    <AssemblyName>Nostrfi.Core</AssemblyName>
-</PropertyGroup>
+  
 
 <ItemGroup>
   <EmbeddedResource Update="InformationMessage.resx">

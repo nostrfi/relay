@@ -1,4 +1,5 @@
 ﻿using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Nostrfi.Models.Convertors;
 
@@ -52,6 +53,12 @@ public class Event
 
         public override string ToString()
         {
-            return System.Text.Json.JsonSerializer.Serialize(this);
+            return JsonSerializer.Serialize(this, SerializationOptions);
         }
+        private static JsonSerializerOptions SerializationOptions => new()
+        {
+            ReferenceHandler = ReferenceHandler.Preserve,           
+            WriteIndented = true,                                  
+            PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+        };
 }

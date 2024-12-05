@@ -2,5 +2,6 @@
     <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))"/>
     <PropertyGroup>
         <RootNamespace>Nostrfi.Core</RootNamespace>
+        <AssemblyName>Nostrfi.Core</AssemblyName>
     </PropertyGroup>
 </Project>

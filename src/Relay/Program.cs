@@ -1,6 +1,7 @@
 using Nostrfi.Core;
 using Nostrfi.Core.Events;
-using Nostrfi.Relay.Persistence;
+using Nostrfi.Persistence;
+
 
 var builder = WebApplication.CreateBuilder(args);
 

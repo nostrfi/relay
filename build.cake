@@ -19,7 +19,10 @@ Task("Clean")
     {
         CleanDirectories("./coverage");
         CleanDirectories("./artifacts");
-        DotNetClean(solution);
+        GetFiles("./**/**/*.csproj").ToList().ForEach(project => {
+                      Information($"Cleaning: { project.ToString() }");
+                      DotNetClean(project.ToString());
+                    });  
     }
 });
 
@@ -111,33 +114,11 @@ Task("Test")
         ReportGenerator(glob, summaryDirectory, summarySettings);
 });
 
-Task("Pack")
- .IsDependentOn("Test")
- .Does(() => {
-   var version = GitVersion(new GitVersionSettings {
-             UpdateAssemblyInfo = true
-         });
-   var settings = new DotNetPackSettings
-    {
-        Configuration = configuration,
-        OutputDirectory = "./artifacts",
-        NoBuild = true,
-        NoRestore = true,
-        MSBuildSettings = new DotNetMSBuildSettings()
-                        .WithProperty("PackageVersion", version.NuGetVersionV2)
-                        .WithProperty("Copyright", $"© Copyright nostrfi.net {DateTime.Now.Year}")
-                        .WithProperty("Version", version.NuGetVersionV2)
-    }; 
-    
-    DotNetPack(solution, settings);
-     Information($"Packed : { solution }");
- });
 
 Task("Default")
        .IsDependentOn("Clean")
        .IsDependentOn("Restore")
        .IsDependentOn("Build")
-       .IsDependentOn("Test")
-       .IsDependentOn("Pack");
+       .IsDependentOn("Test");
        
 RunTarget(target);
