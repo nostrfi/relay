@@ -1,6 +1,6 @@
-using Nostrfi.Core;
+using Nostrfi.Core.Connectivity;
 
-namespace Nostrfi.Relay.Unit.Tests;
+namespace Nostrfi.Relay.Unit.Tests.Connectivity;
 
 public class MultiConcurrentDictionaryTests
 {

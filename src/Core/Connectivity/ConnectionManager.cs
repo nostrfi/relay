@@ -1,4 +1,4 @@
-namespace Nostrfi.Core;
+namespace Nostrfi.Core.Connectivity;
 
 public class NostrConnectionManager
 {

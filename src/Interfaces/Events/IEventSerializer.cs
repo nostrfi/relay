@@ -1,6 +1,6 @@
 using Nostrfi.Models;
 
-namespace Nostrfi.Core.Events;
+namespace Nostrfi.Core.Interfaces.Events;
 
 public interface IEventSerializer
 {

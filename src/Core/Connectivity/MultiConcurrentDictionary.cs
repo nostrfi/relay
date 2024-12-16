@@ -2,7 +2,7 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 
-namespace Nostrfi.Core;
+namespace Nostrfi.Core.Connectivity;
 
 public class MultiConcurrentDictionary<TKey, TValue> : IEnumerable<KeyValuePair<TKey, TValue[]>>
 {
