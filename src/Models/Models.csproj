@@ -12,8 +12,4 @@
       <DependentUpon>ModelsErrorMessages.resx</DependentUpon>
     </Compile>
   </ItemGroup>
-  <ItemGroup>
-    <PackageVersion Update="Serilog.Exceptions" Version="8.4.0" />
-    <PackageVersion Update="Serilog.Settings.Configuration" Version="8.0.4" />
-  </ItemGroup>
 </Project>

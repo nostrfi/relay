@@ -34,8 +34,6 @@ public class WebSocketMiddleware(RequestDelegate next, IWebsocketHandler webSock
                 }
             });
             
-           
-     
         }
 
         await next(context);
