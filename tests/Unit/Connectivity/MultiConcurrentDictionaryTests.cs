@@ -12,7 +12,7 @@ public class MultiConcurrentDictionaryTests
         _objectUnderTest.Add("key", "value");
 
         _objectUnderTest.ShouldSatisfyAllConditions(
-            x => x.Contains("key", "value").Should().BeTrue(),
+            x => x.Contains("key", "value").ShouldBeTrue(),
             x => x.Count.ShouldBe(1)
         );
     }
@@ -25,9 +25,9 @@ public class MultiConcurrentDictionaryTests
         _objectUnderTest.Add("key", "value3");
 
         _objectUnderTest.ShouldSatisfyAllConditions(
-            x => x.Contains("key", "value1").Should().BeTrue(),
-            x => x.Contains("key", "value2").Should().BeTrue(), 
-            x => x.Contains("key", "value3").Should().BeTrue(),
+            x => x.Contains("key", "value1").ShouldBeTrue(),
+            x => x.Contains("key", "value2").ShouldBeTrue(), 
+            x => x.Contains("key", "value3").ShouldBeTrue(),
             x => x.Count.ShouldBe(1));
     }
     [Fact]
@@ -38,9 +38,9 @@ public class MultiConcurrentDictionaryTests
         _objectUnderTest.Add("key3", "value3");
 
         _objectUnderTest.ShouldSatisfyAllConditions(
-            x => x.Contains("key1", "value1").Should().BeTrue(),
-            x => x.Contains("key2", "value2").Should().BeTrue(), 
-            x => x.Contains("key3", "value3").Should().BeTrue(),
+            x => x.Contains("key1", "value1").ShouldBeTrue(),
+            x => x.Contains("key2", "value2").ShouldBeTrue(), 
+            x => x.Contains("key3", "value3").ShouldBeTrue(),
             x => x.Count.ShouldBe(3));
     }
     
@@ -51,7 +51,7 @@ public class MultiConcurrentDictionaryTests
         _objectUnderTest.Remove("key");
 
         _objectUnderTest.ShouldSatisfyAllConditions(
-            x => x.Contains("key", "value").Should().BeFalse(),
+            x => x.Contains("key", "value").ShouldBeFalse(),
             x => x.Count.ShouldBe(0)
             );
     }
@@ -66,7 +66,7 @@ public class MultiConcurrentDictionaryTests
         if (_objectUnderTest.TryGetValues("key", out var values))
         {
             values.ShouldSatisfyAllConditions(
-                x => x.Length.Should().Be(3)
+                x => x.Length.ShouldBe(3)
                 );
         };
     }
@@ -78,7 +78,7 @@ public class MultiConcurrentDictionaryTests
         _objectUnderTest.Add("key", "value2");
         _objectUnderTest.Add("key", "value3");
 
-        _objectUnderTest.TryGetValues("key3", out var values).Should().BeFalse();
+        _objectUnderTest.TryGetValues("key3", out var values).ShouldBeFalse();
 
     }
 }

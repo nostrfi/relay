@@ -7,8 +7,21 @@ var configuration = Argument("configuration", "Release");
 
 const string TEST_COVERAGE_OUTPUT_DIR = "coverage";
 var solution = "Relay.sln";
+Setup<NostrfiBuildData>(setupContext =>
+{
+	return new NostrfiBuildData(
+		configuration: Argument("configuration", "Release"),
+        artifactsDirectory: Directory("./artifacts/"),
+        coverageDirectory: Directory("./coverage/"),
+        buildDirectories: new List<ConvertableDirectoryPath> {
+            Directory("./src/Core/bin/"),
+            Directory("./src/Interfaces/bin/"),
+            Directory("./src/Models/bin/"),
+            Directory("./src/Relay/bin/")
+        });
+});
 Task("Clean")
-    .Does(() => {
+    .Does<NostrfiBuildData>((data) => {
  
     if (BuildSystem.GitHubActions.IsRunningOnGitHubActions)
     {
@@ -16,12 +29,21 @@ Task("Clean")
     }
     else
     {
-        CleanDirectories("./coverage");
+      foreach(var dir in data.BuildDirs)
+      {
+          Information($"Cleaning: { dir + Directory(data.Configuration) }");
+          CleanDirectory(dir + Directory(data.Configuration));
+      }
+      Information($"Cleaning: { data.ArtifactsDirectory }");
+      CleanDirectory(data.ArtifactsDirectory);
+      Information($"Cleaning: { data.CoverageDirectory }");
+      CleanDirectory(data.CoverageDirectory);
+       /*  CleanDirectories("./coverage");
         CleanDirectories("./artifacts");
-        GetFiles("./**/**/*.csproj").ToList().ForEach(project => {
+        GetFiles(". *//** /* *//** /* *//*.csproj").ToList().ForEach(project => {
                       Information($"Cleaning: { project.ToString() }");
                       DotNetClean(project.ToString());
-                    });  
+                    });   */
     }
 });
 
@@ -121,3 +143,45 @@ Task("Default")
        .IsDependentOn("Test");
        
 RunTarget(target);
+
+public class NostrfiBuildData
+{
+       public string Configuration { get; }
+       public ConvertableDirectoryPath ArtifactsDirectory { get; }
+       public ConvertableDirectoryPath CoverageDirectory { get; }
+       public DotNetBuildSettings BuildSettings { get; }
+       public DotNetPackSettings PackSettings { get; }
+       public DotNetTestSettings TestSettings { get; }
+       public IReadOnlyList<ConvertableDirectoryPath> BuildDirs { get; }
+       
+       public NostrfiBuildData(string configuration,
+                                       ConvertableDirectoryPath artifactsDirectory,
+                                       ConvertableDirectoryPath coverageDirectory,
+                                       IReadOnlyList<ConvertableDirectoryPath> buildDirectories)
+                               	{
+                               		  Configuration = configuration;
+                                       ArtifactsDirectory = artifactsDirectory;
+                                       CoverageDirectory = coverageDirectory;
+                                       BuildDirs = buildDirectories;
+                               
+                                       BuildSettings = new DotNetBuildSettings {
+                                           Configuration = configuration,
+                                           NoRestore = true,
+                                           ArgumentCustomization = args => args.Append("/property:WarningLevel=0") // Until Warnings are fixed in StyleCop
+                                       };
+                               
+                                       PackSettings = new DotNetPackSettings
+                                       {
+                                           OutputDirectory = ArtifactsDirectory,
+                                           NoBuild = true,
+                                           Configuration = Configuration,
+                                       };
+                               
+                                       TestSettings = new DotNetTestSettings
+                                       {
+                                           NoBuild = true,
+                                           Configuration = Configuration
+                                       };
+                               	}
+                               	
+}
