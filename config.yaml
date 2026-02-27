@@ -1,0 +1,13 @@
+relay_info:
+  name: "Nostrfi Relay"
+  description: "A custom Nostr relay configured via YAML."
+  pubkey: "0000000000000000000000000000000000000000000000000000000000000001"
+  contact: "mailto:admin@example.com"
+  supported_nips: [1, 2, 9, 11, 22, 28, 40, 42, 70, 71, 77]
+  software: "https://github.com/nostrfi/relay"
+  version: "1.2.3"
+  limitation:
+    max_message_length: 65536
+    max_subscriptions: 100
+    auth_required: false
+    payment_required: false
