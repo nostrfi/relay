@@ -101,7 +101,7 @@ func NewRelayHandler(service service.RelayService, info RelayInfo) *RelayHandler
 		info.Description = "A minimal Nostr relay written in Go."
 	}
 	if len(info.SupportedNips) == 0 {
-		info.SupportedNips = []int{1, 2, 9, 11, 22, 28, 40, 42, 70, 71, 77}
+		info.SupportedNips = []int{1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77}
 	}
 	if info.Software == "" {
 		info.Software = "https://github.com/nostrfi/relay"
@@ -329,6 +329,21 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 		}
 		for _, ev := range events {
 			if !seenIDs[ev.ID] {
+				// NIP-17: Relays MAY protect message metadata by only serving kind:1059 events to users p-tagged on the event
+				if ev.Kind == 1059 {
+					isRecipient := false
+					for _, tag := range ev.Tags {
+						if len(tag) >= 2 && tag[0] == "p" && tag[1] == c.authPubkey {
+							isRecipient = true
+							break
+						}
+					}
+					// Also allow the author to see their own gift wrap
+					if !isRecipient && ev.PubKey != c.authPubkey {
+						continue
+					}
+				}
+
 				h.sendEvent(c, subID, ev)
 				seenIDs[ev.ID] = true
 			}
@@ -345,6 +360,20 @@ func (h *RelayHandler) broadcast(ev *nostr.Event) {
 			filters := sValue.([]nostr.Filter)
 			for _, f := range filters {
 				if f.Matches(ev) {
+					// NIP-17: Kind 1059 access control for live updates
+					if ev.Kind == 1059 {
+						isRecipient := false
+						for _, tag := range ev.Tags {
+							if len(tag) >= 2 && tag[0] == "p" && tag[1] == client.authPubkey {
+								isRecipient = true
+								break
+							}
+						}
+						if !isRecipient && ev.PubKey != client.authPubkey {
+							return true // continue to next subscription
+						}
+					}
+
 					h.sendEvent(client, subID, ev)
 					break
 				}

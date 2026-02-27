@@ -8,6 +8,7 @@ A robust and modern Nostr relay written in Go, supporting a wide range of Nostr 
 - **NIP-02**: Contact List and Follows
 - **NIP-09**: Event Deletion
 - **NIP-11**: Relay Information Document
+- **NIP-17**: Private Direct Messages
 - **NIP-22**: Comments
 - **NIP-28**: Public Chat
 - **NIP-40**: Expiration Timestamp
@@ -85,6 +86,16 @@ Initiate a sync using the `NEG-OPEN` message:
 ["NEG-OPEN", "sync_id", {"authors": ["<pubkey>"]}, "<hex_encoded_negentropy_msg>"]
 ```
 
+#### NIP-17: Private Direct Messages
+The relay protects message metadata by only serving Kind 1059 Gift Wrap events to the recipient (tagged `p`) or the sender.
+NIP-42 Authentication is required to retrieve these events.
+1. Connect and receive `AUTH` challenge.
+2. Authenticate using Kind 22242 event.
+3. Subscribe to Kind 1059 events:
+   ```json
+   ["REQ", "dm_sub", {"kinds": [1059], "#p": ["<your_pubkey>"]}]
+   ```
+
 ---
 
 ## Configuration
@@ -95,7 +106,7 @@ The relay can be configured via `config.yaml` in the root directory. You can cus
 relay_info:
   name: "My Custom Relay"
   description: "A specialized Nostr relay."
-  supported_nips: [1, 2, 9, 11, 22, 28, 40, 42, 70, 71, 77]
+  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
 ```
 
 ## Database

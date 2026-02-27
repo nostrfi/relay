@@ -319,6 +319,7 @@ func TestNip11(t *testing.T) {
 
 	assert.Equal(t, "Nostr Relay", info.Name)
 	assert.Contains(t, info.SupportedNips, 11)
+	assert.Contains(t, info.SupportedNips, 17)
 	assert.Contains(t, info.SupportedNips, 22)
 }
 
@@ -1158,4 +1159,127 @@ func TestNip77(t *testing.T) {
 	}
 	assert.True(t, found3, "Event 3 ID should be in needIDs")
 	assert.True(t, found4, "Event 4 ID should be in needIDs")
+}
+
+func TestNip17(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	// Bob (receiver)
+	skBob := nostr.GeneratePrivateKey()
+	pkBob, _ := nostr.GetPublicKey(skBob)
+
+	// 1. Publish Bob's DM Relay List (Kind 10050)
+	cBob := connectTestRelay(t, server)
+	defer cBob.Close()
+
+	ev10050 := nostr.Event{
+		PubKey:    pkBob,
+		CreatedAt: nostr.Now(),
+		Kind:      10050,
+		Tags:      nostr.Tags{{"relay", "ws://localhost:8080"}},
+		Content:   "",
+	}
+	ev10050.Sign(skBob)
+	msg10050, _ := json.Marshal([]any{"EVENT", ev10050})
+	cBob.WriteMessage(websocket.TextMessage, msg10050)
+	cBob.readOK(t)
+
+	// 2. Alice publishes a Gift Wrap (Kind 1059) for Bob
+	cAlice := connectTestRelay(t, server)
+	defer cAlice.Close()
+
+	giftWrap := nostr.Event{
+		PubKey:    nostr.GeneratePrivateKey()[:32], // random pubkey as per NIP-59
+		CreatedAt: nostr.Now(),
+		Kind:      1059,
+		Tags:      nostr.Tags{{"p", pkBob}},
+		Content:   "encrypted_content",
+	}
+	// We use a random key to sign the gift wrap
+	skRandom := nostr.GeneratePrivateKey()
+	giftWrap.PubKey, _ = nostr.GetPublicKey(skRandom)
+	giftWrap.Sign(skRandom)
+
+	msgGift, _ := json.Marshal([]any{"EVENT", giftWrap})
+	cAlice.WriteMessage(websocket.TextMessage, msgGift)
+	cAlice.readOK(t)
+
+	// 3. Eve tries to find the Gift Wrap (should NOT see it because she is not authenticated)
+	cEve := connectTestRelay(t, server)
+	defer cEve.Close()
+
+	subID := "eve_sub"
+	req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{Kinds: []int{1059}, Tags: nostr.TagMap{"p": []string{pkBob}}}})
+	cEve.WriteMessage(websocket.TextMessage, req)
+
+	foundEve := false
+	for {
+		_, msg, _ := cEve.ReadMessage()
+		var raw []json.RawMessage
+		json.Unmarshal(msg, &raw)
+		var msgType string
+		json.Unmarshal(raw[0], &msgType)
+		if msgType == "EVENT" {
+			foundEve = true
+		} else if msgType == "EOSE" {
+			break
+		}
+	}
+	assert.False(t, foundEve, "Eve should NOT see Bob's gift wrap when unauthenticated")
+
+	// 4. Bob authenticates and tries to find the Gift Wrap (SHOULD see it)
+	// Bob is already connected as cBob, but we need to authenticate him
+	// read initial challenge
+	u, _ := url.Parse(server.URL)
+	u.Scheme = "ws"
+	cBob2, _, _ := websocket.DefaultDialer.Dial(u.String(), nil)
+	defer cBob2.Close()
+
+	var authChallenge string
+	for {
+		_, msg, _ := cBob2.ReadMessage()
+		var raw []any
+		json.Unmarshal(msg, &raw)
+		if raw[0] == "AUTH" {
+			authChallenge = raw[1].(string)
+			break
+		}
+	}
+
+	authEv := nostr.Event{
+		PubKey:    pkBob,
+		CreatedAt: nostr.Now(),
+		Kind:      22242,
+		Tags:      nostr.Tags{{"challenge", authChallenge}, {"relay", server.URL}},
+		Content:   "",
+	}
+	authEv.Sign(skBob)
+	authMsg, _ := json.Marshal([]any{"AUTH", authEv})
+	cBob2.WriteMessage(websocket.TextMessage, authMsg)
+	// No response for AUTH unless we try to do something
+
+	// Now Bob requests his gift wraps
+	subIDBob := "bob_sub"
+	reqBob, _ := json.Marshal([]any{"REQ", subIDBob, nostr.Filter{Kinds: []int{1059}, Tags: nostr.TagMap{"p": []string{pkBob}}}})
+	cBob2.WriteMessage(websocket.TextMessage, reqBob)
+
+	foundBob := false
+	for {
+		_, msg, _ := cBob2.ReadMessage()
+		var raw []json.RawMessage
+		json.Unmarshal(msg, &raw)
+		var msgType string
+		json.Unmarshal(raw[0], &msgType)
+		if msgType == "EVENT" {
+			var ev nostr.Event
+			json.Unmarshal(raw[2], &ev)
+			if ev.ID == giftWrap.ID {
+				foundBob = true
+			}
+		} else if msgType == "EOSE" {
+			break
+		}
+	}
+	assert.True(t, foundBob, "Bob SHOULD see his own gift wrap after authentication")
 }
