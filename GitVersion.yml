@@ -1,37 +1,21 @@
-# GitVersion configuration for Nostrfi Relay
+# GitVersion 6.x configuration for Nostrfi Relay
 # https://gitversion.net/docs/reference/configuration
 #
-# Mode: Mainline — every commit on main produces an incrementing version.
-# Tags: v-prefixed (e.g. v1.2.3). Pre-release labels for non-tagged builds.
+# Uses the built-in GitHubFlow/v1 workflow with overrides:
+# - v-prefixed tags (v1.2.3)
+# - main branch: ContinuousDeployment mode (every commit -> unique version)
+# - Conventional commit +semver: messages for bump control
 
-tag-prefix: v
-major-version-bump-message: ^\s*(breaking|major)\b
-minor-version-bump-message: ^\s*(feature|minor)\b
-patch-version-bump-message: ^\s*(fix|patch)\b
-no-bump-message: ^\s*(chore|docs|style|refactor|test)\b
-assembly-versioning-scheme: MajorMinorPatch
-assembly-file-versioning-scheme: MajorMinorPatchTag
-tag-pre-release-weight: 60000
+workflow: GitHubFlow/v1
+tag-prefix: "[vV]"
 commit-message-incrementing: Enabled
-increment-strategy: inherit
+major-version-bump-message: '\+semver:\s?(breaking|major)'
+minor-version-bump-message: '\+semver:\s?(feature|minor)'
+patch-version-bump-message: '\+semver:\s?(fix|patch)'
+no-bump-message: '\+semver:\s?(none|skip)'
+
 branches:
-  master:
-    regex: ^master$|^main$
-    mode: Mainline
-    tag: ""
+  main:
+    mode: ContinuousDeployment
+    label: ""
     increment: Patch
-    prevent-increment-of-merged-branch-version: false
-    track-merge-target: false
-    is-mainline: true
-    tracks-release-branches: false
-    is-release-branch: false
-  pull-request:
-    regex: ^(pull|pull\-requests|pr)[/-]
-    mode: ContinuousDelivery
-    tag: PullRequest
-    increment: Inherit
-    prevent-increment-of-merged-branch-version: false
-    label-number-pattern: '[/-](?<number>\d+)'
-    is-mainline: false
-    tracks-release-branches: false
-    is-release-branch: false
