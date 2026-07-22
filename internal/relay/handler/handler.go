@@ -79,6 +79,24 @@ func LoadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
+// WriteConfig writes the relay info back to config.yaml, updating the version
+// field with the build-time injected version. This keeps the on-disk config
+// in sync with the running binary. It uses the viper config path already set
+// by LoadConfig, or defaults to the current directory.
+func WriteConfig(buildVersion string) error {
+	if buildVersion == "" || buildVersion == "dev" {
+		return nil
+	}
+
+	viper.Set("relay_info.version", buildVersion)
+
+	configFile := viper.ConfigFileUsed()
+	if configFile == "" {
+		configFile = "config.yaml"
+	}
+	return viper.WriteConfigAs(configFile)
+}
+
 type Client struct {
 	handler       *RelayHandler
 	conn          *websocket.Conn
@@ -95,7 +113,7 @@ type NegentropySession struct {
 	storage *negentropy.Negentropy
 }
 
-func NewRelayHandler(service service.RelayService, info RelayInfo) *RelayHandler {
+func NewRelayHandler(service service.RelayService, info RelayInfo, buildVersion string) *RelayHandler {
 	if info.Name == "" {
 		info.Name = "Nostr Relay"
 	}
@@ -108,8 +126,11 @@ func NewRelayHandler(service service.RelayService, info RelayInfo) *RelayHandler
 	if info.Software == "" {
 		info.Software = "https://github.com/nostrfi/relay"
 	}
+	if buildVersion != "" && buildVersion != "dev" {
+		info.Version = buildVersion
+	}
 	if info.Version == "" {
-		info.Version = "1.0.0"
+		info.Version = "dev"
 	}
 
 	return &RelayHandler{
