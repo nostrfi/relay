@@ -89,13 +89,6 @@ jobs:
       - name: Test
         run: go test -v -race -coverprofile=coverage.out ./tests/...
 
-      - name: Bump config.yaml version
-        run: |
-          VERSION="${{ needs.version.outputs.semVer }}"
-          sed -i "s/^  version:.*/  version: \"$VERSION\"/" config.yaml
-          echo "Bumped config.yaml version to $VERSION"
-          grep version config.yaml
-
       - name: Upload coverage
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
@@ -103,14 +96,6 @@ jobs:
           name: coverage-${{ needs.version.outputs.semVer }}
           path: coverage.out
           retention-days: 14
-
-      - name: Upload config.yaml (version-bumped)
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-${{ needs.version.outputs.semVer }}
-          path: config.yaml
-          retention-days: 7
 
       # Docker metadata — uses GitVersion outputs for tagging
       - name: Docker metadata
@@ -147,12 +132,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Bump config.yaml version
-        run: |
-          VERSION="${{ needs.version.outputs.semVer }}"
-          sed -i "s/^  version:.*/  version: \"$VERSION\"/" config.yaml
-          echo "Bumped config.yaml version to $VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

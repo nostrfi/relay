@@ -35,7 +35,7 @@ type RelayInfo struct {
 	Contact       string           `json:"contact,omitzero" mapstructure:"contact"`
 	SupportedNips []int            `json:"supported_nips,omitzero" mapstructure:"supported_nips"`
 	Software      string           `json:"software,omitzero" mapstructure:"software"`
-	Version       string           `json:"version,omitzero" mapstructure:"version"`
+	Version       string           `json:"version,omitzero"` // set from build-time ldflags only, not config
 	Limitation    *RelayLimitation `json:"limitation,omitzero" mapstructure:"limitation"`
 }
 
@@ -79,24 +79,6 @@ func LoadConfig() (*Config, error) {
 	return &cfg, nil
 }
 
-// WriteConfig writes the relay info back to config.yaml, updating the version
-// field with the build-time injected version. This keeps the on-disk config
-// in sync with the running binary. It uses the viper config path already set
-// by LoadConfig, or defaults to the current directory.
-func WriteConfig(buildVersion string) error {
-	if buildVersion == "" || buildVersion == "dev" {
-		return nil
-	}
-
-	viper.Set("relay_info.version", buildVersion)
-
-	configFile := viper.ConfigFileUsed()
-	if configFile == "" {
-		configFile = "config.yaml"
-	}
-	return viper.WriteConfigAs(configFile)
-}
-
 type Client struct {
 	handler       *RelayHandler
 	conn          *websocket.Conn
@@ -126,9 +108,7 @@ func NewRelayHandler(service service.RelayService, info RelayInfo, buildVersion 
 	if info.Software == "" {
 		info.Software = "https://github.com/nostrfi/relay"
 	}
-	if buildVersion != "" && buildVersion != "dev" {
-		info.Version = buildVersion
-	}
+	info.Version = buildVersion
 	if info.Version == "" {
 		info.Version = "dev"
 	}

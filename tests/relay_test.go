@@ -268,7 +268,6 @@ func TestConfig(t *testing.T) {
 relay_info:
   name: "Config Test Relay"
   description: "Testing YAML config"
-  version: "2.0.0"
 `
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
@@ -287,58 +286,8 @@ relay_info:
 
 	assert.Equal(t, "Config Test Relay", cfg.RelayInfo.Name)
 	assert.Equal(t, "Testing YAML config", cfg.RelayInfo.Description)
-	assert.Equal(t, "2.0.0", cfg.RelayInfo.Version)
-}
-
-func TestWriteConfig(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "relay-writeconfig-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	configPath := filepath.Join(tmpDir, "config.yaml")
-	configContent := `relay_info:
-  name: "Write Test Relay"
-  description: "Testing WriteConfig"
-  version: "0.0.1"
-`
-	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
-		t.Fatalf("failed to write config file: %v", err)
-	}
-
-	// LoadConfig sets up viper with the config path
-	viper.Reset()
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(tmpDir)
-
-	if _, err := handler.LoadConfig(); err != nil {
-		t.Fatalf("LoadConfig failed: %v", err)
-	}
-
-	// WriteConfig should update the version field on disk
-	if err := handler.WriteConfig("5.5.5"); err != nil {
-		t.Fatalf("WriteConfig failed: %v", err)
-	}
-
-	// Read back the file and verify the version was updated
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("failed to read config back: %v", err)
-	}
-	assert.Contains(t, string(data), "5.5.5")
-	assert.Contains(t, string(data), "Write Test Relay") // other fields preserved
-
-	// WriteConfig with "dev" should be a no-op
-	if err := handler.WriteConfig("dev"); err != nil {
-		t.Fatalf("WriteConfig(dev) failed: %v", err)
-	}
-	data, err = os.ReadFile(configPath)
-	if err != nil {
-		t.Fatalf("failed to read config after dev write: %v", err)
-	}
-	assert.Contains(t, string(data), "5.5.5") // should still be 5.5.5, not changed
+	// Version is not configurable via YAML — it comes from the binary
+	assert.Equal(t, "", cfg.RelayInfo.Version)
 }
 
 func TestLandingPage(t *testing.T) {

@@ -1,0 +1,4 @@
+relay_info:
+    description: Testing WriteConfig
+    name: Write Test Relay
+    version: 5.5.5

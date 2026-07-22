@@ -30,11 +30,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 2b. Write build version back to config.yaml so the file stays in sync
-	if err := handler.WriteConfig(version); err != nil {
-		slog.Warn("failed to write version to config.yaml", "error", err)
-	}
-
 	// 3. Initialize Repository
 	repo, err := repository.NewDuckDBRepository("db/relay.db")
 	if err != nil {
