@@ -549,7 +549,8 @@ const landingPageHTML = `<!DOCTYPE html>
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
   .grid div { padding: 0.6rem 0; }
   .grid .label { color: var(--muted); font-size: 0.9rem; }
-  .grid .value { font-weight: 500; }
+  .grid .value { font-weight: 500; word-break: break-all; overflow-wrap: anywhere; }
+  .grid .value code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; overflow-wrap: anywhere; }
   .nips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .nip { display: inline-flex; align-items: center; padding: 0.3rem 0.7rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; font-weight: 500; color: var(--accent); }
   a { color: var(--accent); text-decoration: none; }
@@ -572,7 +573,10 @@ const landingPageHTML = `<!DOCTYPE html>
         <div><span class="label">Software</span><br><span class="value"><a href="{{.Software}}" target="_blank" rel="noopener">{{.Software}}</a></span></div>
         <div><span class="label">Version</span><br><span class="value">{{.Version}}</span></div>
         <div><span class="label">Contact</span><br><span class="value">{{.Contact}}</span></div>
-        <div><span class="label">Operator</span><br><span class="value"><code>{{.Pubkey}}</code></span></div>
+      </div>
+      <div style="margin-top: 0.75rem; padding-top: 0.6rem; border-top: 1px solid var(--border);">
+        <span class="label">Operator</span><br>
+        <span class="value"><code>{{.Pubkey}}</code></span>
       </div>
       <p>Connect via WebSocket to use this relay:</p>
       <a class="connect" href="/" id="connectBtn">Connect</a>
