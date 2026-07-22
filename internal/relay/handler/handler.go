@@ -5,13 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/spf13/viper"
 	"html/template"
 	"log/slog"
 	"net/http"
 	"relay/internal/relay/service"
 	"strings"
 	"sync"
+
+	"github.com/spf13/viper"
 
 	"github.com/gorilla/websocket"
 	negentropy "github.com/illuzen/go-negentropy"
