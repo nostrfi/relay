@@ -14,9 +14,14 @@ import (
 	"time"
 )
 
+// version is injected at build time via -ldflags "-X main.version=..."
+var version = "dev"
+
 func main() {
 	// 1. Configure Logger
 	logger.Configure()
+
+	slog.Info("Starting relay", "version", version)
 
 	// 2. Load Configuration
 	cfg, err := handler.LoadConfig()

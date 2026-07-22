@@ -12,8 +12,13 @@ RUN go mod download
 # Copy source
 COPY . .
 
-# Build a static-ish binary (DuckDB ships CGO via prebuilt libs, so not fully static)
-RUN CGO_ENABLED=1 go build -o /relay ./cmd/relay
+# Optional build arg for version injection (provided by CI via GitVersion)
+ARG VERSION=dev
+
+# Build with version injection (DuckDB ships CGO via prebuilt libs, so not fully static)
+RUN CGO_ENABLED=1 go build \
+      -ldflags="-s -w -X main.version=${VERSION}" \
+      -o /relay ./cmd/relay
 
 # ---- Runtime ----
 FROM debian:bookworm-slim

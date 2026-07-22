@@ -1,0 +1,37 @@
+# GitVersion configuration for Nostrfi Relay
+# https://gitversion.net/docs/reference/configuration
+#
+# Mode: Mainline — every commit on main produces an incrementing version.
+# Tags: v-prefixed (e.g. v1.2.3). Pre-release labels for non-tagged builds.
+
+tag-prefix: v
+major-version-bump-message: ^\s*(breaking|major)\b
+minor-version-bump-message: ^\s*(feature|minor)\b
+patch-version-bump-message: ^\s*(fix|patch)\b
+no-bump-message: ^\s*(chore|docs|style|refactor|test)\b
+assembly-versioning-scheme: MajorMinorPatch
+assembly-file-versioning-scheme: MajorMinorPatchTag
+tag-pre-release-weight: 60000
+commit-message-incrementing: Enabled
+increment-strategy: inherit
+branches:
+  master:
+    regex: ^master$|^main$
+    mode: Mainline
+    tag: ""
+    increment: Patch
+    prevent-increment-of-merged-branch-version: false
+    track-merge-target: false
+    is-mainline: true
+    tracks-release-branches: false
+    is-release-branch: false
+  pull-request:
+    regex: ^(pull|pull\-requests|pr)[/-]
+    mode: ContinuousDelivery
+    tag: PullRequest
+    increment: Inherit
+    prevent-increment-of-merged-branch-version: false
+    label-number-pattern: '[/-](?<number>\d+)'
+    is-mainline: false
+    tracks-release-branches: false
+    is-release-branch: false

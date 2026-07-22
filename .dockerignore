@@ -1,0 +1,56 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+relay
+*.test
+
+# Go workspace
+go.work
+go.work.sum
+vendor/
+
+# DuckDB database files
+db/*.db
+db/*.db.wal
+
+# Environment and config overrides
+.env
+.env.local
+config.local.yaml
+
+# IDE
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+*~
+.directory
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Git
+.git/
+.gitignore
+
+# Junie / AI agent metadata
+.junie/
+
+# CI / Docker
+.github/
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Coverage
+*.out
+coverage.txt
+coverage.html
