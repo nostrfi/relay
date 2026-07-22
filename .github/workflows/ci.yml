@@ -165,8 +165,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout
+      - name: Checkout (full history)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -185,18 +187,39 @@ jobs:
             -o dist/relay-linux-amd64 ./cmd/relay
           tar -czf dist/relay-linux-amd64.tar.gz -C dist relay-linux-amd64
 
+      - name: Generate changelog
+        id: changelog
+        run: |
+          CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n1)
+
+          {
+            echo "## Nostrfi Relay ${CURRENT_TAG}"
+            echo
+            echo "**Full version:** ${{ needs.version.outputs.informationalVersion }}"
+            echo "**Commits since last version source:** ${{ needs.version.outputs.commitsSinceVersionSource }}"
+            echo
+            echo "---"
+            echo
+            echo "## Changelog"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              echo "Changes since \`${PREV_TAG}\`:"
+              echo
+              git log "${PREV_TAG}..HEAD" --no-merges --pretty=format:"- %s (%h)"
+              echo
+            else
+              echo "Initial release."
+            fi
+          } > release-notes.md
+
+          cat release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ needs.version.outputs.semVer }}
-          generate_release_notes: true
-          body: |
-            ## Nostrfi Relay v${{ needs.version.outputs.semVer }}
-
-            **Full version:** ${{ needs.version.outputs.informationalVersion }}
-            **Commits since last version source:** ${{ needs.version.outputs.commitsSinceVersionSource }}
-
-            ---
+          body_path: release-notes.md
           files: dist/*.tar.gz
           draft: false
           prerelease: ${{ needs.version.outputs.isPrerelease == 'true' }}
