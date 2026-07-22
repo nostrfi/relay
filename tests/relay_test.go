@@ -290,6 +290,39 @@ relay_info:
 	assert.Equal(t, "2.0.0", cfg.RelayInfo.Version)
 }
 
+func TestLandingPage(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	client := server.Client()
+	req, err := http.NewRequest("GET", server.URL, nil)
+	if err != nil {
+		t.Fatalf("failed to create request: %v", err)
+	}
+	// Simulate a regular browser request (no WebSocket headers, no nostr+json accept)
+	req.Header.Set("Accept", "text/html")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+
+	body := make([]byte, 8192)
+	n, _ := resp.Body.Read(body)
+	body = body[:n]
+
+	assert.Contains(t, string(body), "<!DOCTYPE html>")
+	assert.Contains(t, string(body), "Nostr Relay")
+	assert.Contains(t, string(body), "Supported NIPs")
+	assert.Contains(t, string(body), "NIP-1")
+	assert.Contains(t, string(body), "NIP-11")
+	assert.Contains(t, string(body), "Connect")
+}
+
 func TestNip11(t *testing.T) {
 	server, _, cleanup := startTestRelay(t)
 	defer cleanup()

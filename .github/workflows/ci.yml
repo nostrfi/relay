@@ -121,9 +121,7 @@ jobs:
           tags: |
             # Full semver: 1.2.3 or 1.2.3-alpha.1
             type=raw,value=${{ needs.version.outputs.semVer }}
-            # Major.Minor: 1.2
-            type=raw,value=${{ needs.version.outputs.majorMinorPatch }}
-            # Major only: 1
+            # Major.Minor.Patch (same as semver for stable, without prerelease suffix)
             type=raw,value=${{ needs.version.outputs.majorMinorPatch }}
             # Git short SHA
             type=raw,value=sha-${{ needs.version.outputs.sha }}

@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/spf13/viper"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"relay/internal/relay/service"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -123,6 +125,12 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Access-Control-Allow-Headers", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		json.NewEncoder(w).Encode(h.relayInfo)
+		return
+	}
+
+	// Serve HTML landing page for non-WebSocket browser requests
+	if !isWebSocketUpgrade(req) {
+		h.serveLandingPage(w, req)
 		return
 	}
 
@@ -506,3 +514,106 @@ func (h *RelayHandler) sendNegMsg(c *Client, subID string, msgHex string) {
 	defer c.mu.Unlock()
 	c.conn.WriteMessage(websocket.TextMessage, msg)
 }
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+}
+
+func (h *RelayHandler) serveLandingPage(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := landingPageTpl.Execute(w, h.relayInfo); err != nil {
+		slog.Error("landing page template error", "error", err)
+	}
+}
+
+var landingPageTpl = template.Must(template.New("landing").Parse(landingPageHTML))
+
+const landingPageHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Name}}</title>
+<style>
+  :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #7c3aed; --accent-hover: #8b5cf6; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; min-height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 3rem 1.5rem 2rem; text-align: center; }
+  header h1 { font-size: 2.5rem; font-weight: 700; letter-spacing: -0.03em; }
+  header p { color: var(--muted); font-size: 1.15rem; margin-top: 0.5rem; }
+  main { max-width: 720px; margin: 0 auto; padding: 1rem 1.5rem 3rem; width: 100%; flex: 1; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .card h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+  .grid div { padding: 0.6rem 0; }
+  .grid .label { color: var(--muted); font-size: 0.9rem; }
+  .grid .value { font-weight: 500; }
+  .nips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .nip { display: inline-flex; align-items: center; padding: 0.3rem 0.7rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; font-weight: 500; color: var(--accent); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-hover); text-decoration: underline; }
+  .connect { display: inline-block; margin-top: 1rem; padding: 0.7rem 1.5rem; background: var(--accent); color: #fff; border-radius: 8px; font-weight: 600; transition: background 0.2s; }
+  .connect:hover { background: var(--accent-hover); text-decoration: none; }
+  footer { text-align: center; padding: 1.5rem; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
+  @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } header h1 { font-size: 1.8rem; } }
+</style>
+</head>
+<body>
+  <header>
+    <h1>{{.Name}}</h1>
+    <p>{{.Description}}</p>
+  </header>
+  <main>
+    <div class="card">
+      <h2>Relay Information</h2>
+      <div class="grid">
+        <div><span class="label">Software</span><br><span class="value"><a href="{{.Software}}" target="_blank" rel="noopener">{{.Software}}</a></span></div>
+        <div><span class="label">Version</span><br><span class="value">{{.Version}}</span></div>
+        <div><span class="label">Contact</span><br><span class="value">{{.Contact}}</span></div>
+        <div><span class="label">Operator</span><br><span class="value"><code>{{.Pubkey}}</code></span></div>
+      </div>
+      <p>Connect via WebSocket to use this relay:</p>
+      <a class="connect" href="/" id="connectBtn">Connect</a>
+    </div>
+
+    <div class="card">
+      <h2>Supported NIPs</h2>
+      <div class="nips">
+      {{range .SupportedNips}}
+        <span class="nip">NIP-{{.}}</span>
+      {{end}}
+      </div>
+    </div>
+
+    {{if .Limitation}}
+    <div class="card">
+      <h2>Limitations</h2>
+      <div class="grid">
+        <div><span class="label">Max Message Length</span><br><span class="value">{{.Limitation.MaxMessageLength}}</span></div>
+        <div><span class="label">Max Subscriptions</span><br><span class="value">{{.Limitation.MaxSubscriptions}}</span></div>
+        <div><span class="label">Auth Required</span><br><span class="value">{{.Limitation.AuthRequired}}</span></div>
+        <div><span class="label">Payment Required</span><br><span class="value">{{.Limitation.PaymentRequired}}</span></div>
+      </div>
+    </div>
+    {{end}}
+  </main>
+  <footer>
+    <p>{{.Name}} &middot; <a href="{{.Software}}" target="_blank" rel="noopener">Source</a></p>
+  </footer>
+  <script>
+    document.getElementById('connectBtn').addEventListener('click', function(e) {
+      e.preventDefault();
+      var wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+      try {
+        var ws = new WebSocket(wsUrl);
+        ws.onopen = function() { document.getElementById('connectBtn').textContent = 'Connected'; };
+        ws.onerror = function() { document.getElementById('connectBtn').textContent = 'Connection failed'; };
+        ws.onclose = function() { document.getElementById('connectBtn').textContent = 'Connect'; };
+      } catch(err) {
+        alert('WebSocket connection failed: ' + err);
+      }
+    });
+  </script>
+</body>
+</html>`
