@@ -575,12 +575,10 @@ const landingPageHTML = `<!DOCTYPE html>
         <div><span class="label">Version</span><br><span class="value">{{.Version}}</span></div>
         <div><span class="label">Contact</span><br><span class="value">{{.Contact}}</span></div>
       </div>
-      <div style="margin-top: 0.75rem; padding-top: 0.6rem; border-top: 1px solid var(--border);">
+      <div style="margin-top: 0.75rem; padding-top: 0.6rem;">
         <span class="label">Operator</span><br>
         <span class="value"><code>{{.Pubkey}}</code></span>
       </div>
-      <p>Connect via WebSocket to use this relay:</p>
-      <a class="connect" href="/" id="connectBtn">Connect</a>
     </div>
 
     <div class="card">
@@ -607,19 +605,5 @@ const landingPageHTML = `<!DOCTYPE html>
   <footer>
     <p>{{.Name}} &middot; <a href="{{.Software}}" target="_blank" rel="noopener">Source</a></p>
   </footer>
-  <script>
-    document.getElementById('connectBtn').addEventListener('click', function(e) {
-      e.preventDefault();
-      var wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
-      try {
-        var ws = new WebSocket(wsUrl);
-        ws.onopen = function() { document.getElementById('connectBtn').textContent = 'Connected'; };
-        ws.onerror = function() { document.getElementById('connectBtn').textContent = 'Connection failed'; };
-        ws.onclose = function() { document.getElementById('connectBtn').textContent = 'Connect'; };
-      } catch(err) {
-        alert('WebSocket connection failed: ' + err);
-      }
-    });
-  </script>
 </body>
 </html>`
