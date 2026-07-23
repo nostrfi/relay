@@ -320,7 +320,7 @@ func TestLandingPage(t *testing.T) {
 	assert.Contains(t, string(body), "Supported NIPs")
 	assert.Contains(t, string(body), "NIP-1")
 	assert.Contains(t, string(body), "NIP-11")
-	assert.Contains(t, string(body), "Connect")
+	assert.NotContains(t, string(body), "Connect")
 	assert.Contains(t, string(body), "test") // build version injected via NewRelayHandler
 }
 

@@ -556,8 +556,6 @@ const landingPageHTML = `<!DOCTYPE html>
   .nip { display: inline-flex; align-items: center; padding: 0.3rem 0.7rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.9rem; font-weight: 500; color: var(--accent); }
   a { color: var(--accent); text-decoration: none; }
   a:hover { color: var(--accent-hover); text-decoration: underline; }
-  .connect { display: inline-block; margin-top: 1rem; padding: 0.7rem 1.5rem; background: var(--accent); color: #fff; border-radius: 8px; font-weight: 600; transition: background 0.2s; }
-  .connect:hover { background: var(--accent-hover); text-decoration: none; }
   footer { text-align: center; padding: 1.5rem; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); }
   @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } header h1 { font-size: 1.8rem; } }
 </style>
@@ -589,8 +587,6 @@ const landingPageHTML = `<!DOCTYPE html>
       {{end}}
       </div>
     </div>
-
-    <a href="nostr:{{.Pubkey}}" class="connect">Connect</a>
 
     {{if .Limitation}}
     <div class="card">
