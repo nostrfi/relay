@@ -590,6 +590,8 @@ const landingPageHTML = `<!DOCTYPE html>
       </div>
     </div>
 
+    <a href="nostr:{{.Pubkey}}" class="connect">Connect</a>
+
     {{if .Limitation}}
     <div class="card">
       <h2>Limitations</h2>
