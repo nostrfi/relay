@@ -24,3 +24,11 @@ resource_limits:
   max_connections: 1000
   messages_per_second: 20
   events_per_second: 5
+
+auth:
+  relay_url: "" # set to this relay's canonical wss:// URL to enable NIP-42 endpoint binding
+  max_event_age_seconds: 600 # NIP-42 AUTH events older or further in the future than this are rejected
+
+websocket:
+  mode: "development" # "development" allows any Origin; set "production" for internet-facing deployment
+  allowed_origins: [] # required (non-empty) when mode is "production"
