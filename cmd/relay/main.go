@@ -25,26 +25,29 @@ func main() {
 
 	logger.Configure()
 
-	if *backupDir != "" {
-		runBackup(*backupDir)
-		return
-	}
-	if *restoreDir != "" {
-		runRestore(*restoreDir)
-		return
-	}
-
-	slog.Info("Starting relay", "version", version)
-
-	// 2. Load Configuration
+	// Configuration is loaded before the -backup/-restore flags are handled:
+	// both now read the database path from config rather than a hardcoded
+	// constant, so a broken config.yaml blocks them too, consistently with
+	// normal startup.
 	cfg, err := handler.LoadConfig()
 	if err != nil {
 		slog.Error("failed to load configuration", "error", err)
 		os.Exit(1)
 	}
 
+	if *backupDir != "" {
+		runBackup(cfg.Storage.DBPath, *backupDir)
+		return
+	}
+	if *restoreDir != "" {
+		runRestore(cfg.Storage.DBPath, *restoreDir)
+		return
+	}
+
+	slog.Info("Starting relay", "version", version)
+
 	// 3. Initialize Repository
-	repo, err := repository.NewDuckDBRepository(dbPath)
+	repo, err := repository.NewDuckDBRepository(cfg.Storage.DBPath)
 	if err != nil {
 		slog.Error("failed to open storage", "error", err)
 		os.Exit(1)
@@ -58,8 +61,8 @@ func main() {
 
 	// 6. Setup Server
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: relayHandler,
+		Addr:    cfg.Server.ListenAddr,
+		Handler: handler.NewMux(relayHandler, repo.Ping),
 	}
 
 	// 6a. Start the background maintenance worker (expired-event purge and
@@ -73,7 +76,7 @@ func main() {
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		slog.Info("Starting relay on :8080")
+		slog.Info("Starting relay", "listen_addr", cfg.Server.ListenAddr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("failed to start server", "error", err)
 			os.Exit(1)
@@ -87,7 +90,7 @@ func main() {
 	// 8. Graceful Shutdown Execution
 	stopMaintenance()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.Server.ShutdownTimeoutSeconds)*time.Second)
 	defer cancel()
 
 	if err := server.Shutdown(ctx); err != nil {

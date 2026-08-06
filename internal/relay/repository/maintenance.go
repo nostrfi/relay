@@ -53,3 +53,10 @@ func (r *duckDBRepository) Checkpoint(ctx context.Context) error {
 	_, err := r.db.ExecContext(ctx, "VACUUM")
 	return err
 }
+
+// Ping verifies the database connection is reachable, for use by readiness
+// checks. It does not verify schema state — RunMigrations already runs at
+// startup and would have aborted startup on failure.
+func (r *duckDBRepository) Ping(ctx context.Context) error {
+	return r.db.PingContext(ctx)
+}

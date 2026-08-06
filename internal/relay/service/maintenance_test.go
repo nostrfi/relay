@@ -35,7 +35,8 @@ func (f *fakeRepository) Checkpoint(ctx context.Context) error {
 	f.checkpointCalls.Add(1)
 	return nil
 }
-func (f *fakeRepository) Close() error { return nil }
+func (f *fakeRepository) Ping(ctx context.Context) error { return nil }
+func (f *fakeRepository) Close() error                   { return nil }
 
 func TestMaintenanceServiceRunsOnInterval(t *testing.T) {
 	repo := &fakeRepository{}
