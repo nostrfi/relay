@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,8 +19,20 @@ import (
 var version = "dev"
 
 func main() {
-	// 1. Configure Logger
+	backupDir := flag.String("backup", "", "export the database to this directory and exit")
+	restoreDir := flag.String("restore", "", "import a backup created with -backup into a fresh database and exit")
+	flag.Parse()
+
 	logger.Configure()
+
+	if *backupDir != "" {
+		runBackup(*backupDir)
+		return
+	}
+	if *restoreDir != "" {
+		runRestore(*restoreDir)
+		return
+	}
 
 	slog.Info("Starting relay", "version", version)
 
@@ -31,7 +44,7 @@ func main() {
 	}
 
 	// 3. Initialize Repository
-	repo, err := repository.NewDuckDBRepository("db/relay.db")
+	repo, err := repository.NewDuckDBRepository(dbPath)
 	if err != nil {
 		slog.Error("failed to open storage", "error", err)
 		os.Exit(1)
@@ -49,7 +62,13 @@ func main() {
 		Handler: relayHandler,
 	}
 
-	// 6. Graceful Shutdown Setup
+	// 6a. Start the background maintenance worker (expired-event purge and
+	// checkpoint), stopped alongside the server on shutdown.
+	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
+	maintenance := service.NewMaintenanceService(repo, time.Duration(cfg.Retention.PurgeIntervalSeconds)*time.Second)
+	go maintenance.Run(maintenanceCtx)
+
+	// 6b. Graceful Shutdown Setup
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
@@ -66,6 +85,8 @@ func main() {
 	slog.Info("Shutting down relay...")
 
 	// 8. Graceful Shutdown Execution
+	stopMaintenance()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

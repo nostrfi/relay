@@ -159,3 +159,30 @@ websocket:
 ## Database
 
 The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `db/relay.db`.
+
+### Schema migrations
+
+Schema changes are applied by a versioned migration runner (`internal/relay/repository/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
+
+### Retention and maintenance
+
+```yaml
+retention:
+  purge_interval_seconds: 3600 # how often expired events (and their tags) are deleted and the database checkpointed
+```
+
+A background worker deletes events whose NIP-40 `expiration` has passed (and their `tags` rows) on this interval, then runs DuckDB's `CHECKPOINT` and `VACUUM`. Reads already exclude expired events; this is what reclaims the underlying rows instead of leaving them stored forever. Set `purge_interval_seconds: 0` to disable the worker. Each sweep is logged (`purged_events`, `duration`).
+
+### Backup and restore
+
+```sh
+# Export the database to a directory (DuckDB's native EXPORT DATABASE, Parquet format)
+go run ./cmd/relay -backup /path/to/backup-dir
+
+# Import a backup into a fresh database and verify it
+go run ./cmd/relay -restore /path/to/backup-dir
+```
+
+Both flags run the requested operation and exit — they do not start the server. `-backup` writes a `backup-manifest.json` (event and tag row counts) alongside the DuckDB export; `-restore` reads that manifest back, imports the backup, and fails loudly if the restored row counts don't match or a smoke-test query fails. `-restore` refuses to run if `db/relay.db` already exists, so it never silently merges with or overwrites a live database — move or remove the existing file first.
+
+This tool is deliberately not scheduled or triggered automatically by the relay itself: running it on a schedule, storing backups off-host, and defining a recovery point objective around that cadence are deployment-layer responsibilities. **Recovery time objective**: restart time plus however long `-restore` takes against your data volume — measure this for your own dataset size as part of your runbook, since it scales with database size and has not been benchmarked at production scale here.

@@ -32,3 +32,6 @@ auth:
 websocket:
   mode: "development" # "development" allows any Origin; set "production" for internet-facing deployment
   allowed_origins: [] # required (non-empty) when mode is "production"
+
+retention:
+  purge_interval_seconds: 3600 # how often expired events (and their tags) are deleted and the database checkpointed
