@@ -109,6 +109,24 @@ relay_info:
   supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
 ```
 
+### Server and storage
+
+```yaml
+server:
+  listen_addr: ":8080"             # HTTP/WebSocket listener address
+  shutdown_timeout_seconds: 5      # graceful-shutdown deadline
+
+storage:
+  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags
+```
+
+All three settings default to the values shown above when unset. `storage.db_path` is read by `-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
+
+### Health and readiness
+
+- **`/healthz`** always returns `200` if the process can respond at all — it does not check any dependency, so it reflects process health only.
+- **`/readyz`** returns `200` if the database is reachable (a bounded 2-second ping) and `503` otherwise — use this for load-balancer/orchestrator readiness checks and container health checks (see `docker-compose.yml`).
+
 ### Resource limits
 
 Every field under `relay_info.limitation` is enforced on the request path, not just advertised. Set a field to `0` (or omit it) to leave that dimension unenforced.

@@ -11,5 +11,6 @@ type Repository interface {
 	QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*nostr.Event, error)
 	PurgeExpired(ctx context.Context) (int64, error)
 	Checkpoint(ctx context.Context) error
+	Ping(ctx context.Context) error
 	Close() error
 }

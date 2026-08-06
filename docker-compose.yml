@@ -16,7 +16,7 @@ services:
     environment:
       - LOG_LEVEL=info
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:8080/ | grep -q '\"name\"'"]
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/readyz"]
       interval: 15s
       timeout: 5s
       retries: 3

@@ -11,15 +11,11 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 )
 
-// dbPath is the fixed database location shared by normal startup, backup,
-// and restore. Making this configurable is out of scope here (see workspace
-// issue #6, "make listener, public relay URL, data path ... explicit").
-const dbPath = "db/relay.db"
-
-// runBackup exports the database to dir and exits. Intended to be run while
-// the server is stopped or against a replica; DuckDB's EXPORT DATABASE does
-// not coordinate with a concurrently writing process in another connection.
-func runBackup(dir string) {
+// runBackup exports the database at dbPath to dir and exits. Intended to be
+// run while the server is stopped or against a replica; DuckDB's EXPORT
+// DATABASE does not coordinate with a concurrently writing process in
+// another connection.
+func runBackup(dbPath, dir string) {
 	db, err := sql.Open("duckdb", dbPath)
 	if err != nil {
 		slog.Error("failed to open storage for backup", "error", err)
@@ -48,7 +44,7 @@ func runBackup(dir string) {
 // It refuses to run if dbPath already exists, so a live database is never
 // silently merged with restored data; the operator must move or remove the
 // existing file first, as documented in the runbook.
-func runRestore(dir string) {
+func runRestore(dbPath, dir string) {
 	if _, err := os.Stat(dbPath); err == nil {
 		slog.Error("refusing to restore: database file already exists; move or remove it first", "path", dbPath)
 		os.Exit(1)

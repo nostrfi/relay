@@ -113,12 +113,26 @@ type RetentionConfig struct {
 	PurgeIntervalSeconds int `mapstructure:"purge_interval_seconds"`
 }
 
+// ServerConfig controls the HTTP/WebSocket listener and shutdown behavior.
+type ServerConfig struct {
+	ListenAddr             string `mapstructure:"listen_addr"`
+	ShutdownTimeoutSeconds int    `mapstructure:"shutdown_timeout_seconds"`
+}
+
+// StorageConfig controls where the DuckDB database file lives. Shared by
+// normal startup and the -backup/-restore flags (see cmd/relay/backup.go).
+type StorageConfig struct {
+	DBPath string `mapstructure:"db_path"`
+}
+
 type Config struct {
 	RelayInfo      RelayInfo       `mapstructure:"relay_info"`
 	ResourceLimits ResourceLimits  `mapstructure:"resource_limits"`
 	Auth           AuthConfig      `mapstructure:"auth"`
 	Websocket      WebsocketConfig `mapstructure:"websocket"`
 	Retention      RetentionConfig `mapstructure:"retention"`
+	Server         ServerConfig    `mapstructure:"server"`
+	Storage        StorageConfig   `mapstructure:"storage"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -158,6 +172,16 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Retention.PurgeIntervalSeconds == 0 {
 		cfg.Retention.PurgeIntervalSeconds = 3600
+	}
+
+	if cfg.Server.ListenAddr == "" {
+		cfg.Server.ListenAddr = ":8080"
+	}
+	if cfg.Server.ShutdownTimeoutSeconds == 0 {
+		cfg.Server.ShutdownTimeoutSeconds = 5
+	}
+	if cfg.Storage.DBPath == "" {
+		cfg.Storage.DBPath = "db/relay.db"
 	}
 
 	return &cfg, nil

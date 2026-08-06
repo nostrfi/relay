@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -2091,4 +2092,126 @@ websocket:
 	assert.Equal(t, "production", cfg.Websocket.Mode)
 	assert.Equal(t, []string{"https://client.example"}, cfg.Websocket.AllowedOrigins)
 	assert.Equal(t, 600, cfg.Auth.MaxEventAgeSeconds, "default freshness window should apply")
+}
+
+func TestConfigServerStorageDefaults(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("relay_info:\n  name: \"Defaults Test Relay\"\n"), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	cfg, err := handler.LoadConfig()
+	if err != nil {
+		t.Fatalf("expected config to load: %v", err)
+	}
+	assert.Equal(t, ":8080", cfg.Server.ListenAddr, "unset listen_addr should default to the historical hardcoded value")
+	assert.Equal(t, 5, cfg.Server.ShutdownTimeoutSeconds, "unset shutdown timeout should default to the historical hardcoded value")
+	assert.Equal(t, "db/relay.db", cfg.Storage.DBPath, "unset db_path should default to the historical hardcoded value")
+}
+
+func TestConfigServerStorageOverrides(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+server:
+  listen_addr: "127.0.0.1:9090"
+  shutdown_timeout_seconds: 15
+storage:
+  db_path: "/var/lib/relay/custom.db"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	cfg, err := handler.LoadConfig()
+	if err != nil {
+		t.Fatalf("expected config to load: %v", err)
+	}
+	assert.Equal(t, "127.0.0.1:9090", cfg.Server.ListenAddr)
+	assert.Equal(t, 15, cfg.Server.ShutdownTimeoutSeconds)
+	assert.Equal(t, "/var/lib/relay/custom.db", cfg.Storage.DBPath)
+}
+
+func TestHealthz(t *testing.T) {
+	mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), func(context.Context) error { return nil })
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestReadyz(t *testing.T) {
+	t.Run("ready when the dependency check succeeds", func(t *testing.T) {
+		mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), func(context.Context) error { return nil })
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		resp, err := http.Get(server.URL + "/readyz")
+		if err != nil {
+			t.Fatalf("GET /readyz: %v", err)
+		}
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("not ready when the dependency check fails", func(t *testing.T) {
+		mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), func(context.Context) error {
+			return fmt.Errorf("database unreachable")
+		})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		resp, err := http.Get(server.URL + "/readyz")
+		if err != nil {
+			t.Fatalf("GET /readyz: %v", err)
+		}
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	})
+}
+
+func TestReadyzWithRealRepositoryClosed(t *testing.T) {
+	_, repo, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	// Prove readyz reflects a genuinely unreachable database, not just a
+	// stubbed failure.
+	repo.Close()
+
+	mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), repo.Ping)
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz: %v", err)
+	}
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 }

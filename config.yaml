@@ -35,3 +35,10 @@ websocket:
 
 retention:
   purge_interval_seconds: 3600 # how often expired events (and their tags) are deleted and the database checkpointed
+
+server:
+  listen_addr: ":8080"
+  shutdown_timeout_seconds: 5
+
+storage:
+  db_path: "db/relay.db" # shared by normal startup and the -backup/-restore flags
