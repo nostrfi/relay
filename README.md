@@ -127,6 +127,22 @@ All three settings default to the values shown above when unset. `storage.db_pat
 - **`/healthz`** always returns `200` if the process can respond at all — it does not check any dependency, so it reflects process health only.
 - **`/readyz`** returns `200` if the database is reachable (a bounded 2-second ping) and `503` otherwise — use this for load-balancer/orchestrator readiness checks and container health checks (see `docker-compose.yml`).
 
+### Metrics
+
+`/metrics` exposes Prometheus-format metrics (`github.com/prometheus/client_golang`):
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `relay_connections_active` | Gauge | — | Current open WebSocket connections |
+| `relay_messages_total` | Counter | `type` | Messages received, by protocol message type |
+| `relay_rejections_total` | Counter | `reason` | Rejected messages/events, by rejection reason |
+| `relay_subscriptions_active` | Gauge | — | Current active `REQ` subscriptions across all connections |
+| `relay_query_duration_seconds` | Histogram | `query` (`req`/`negentropy`) | Repository query duration |
+| `relay_events_stored_total` | Counter | — | Events successfully persisted |
+| `relay_save_failures_total` | Counter | — | Event save failures |
+
+The `type` and `reason` labels are bounded to the relay's known protocol message types and NIP-01 rejection prefixes — anything else is reported as `unknown` rather than the raw client-supplied string, so a client can't inflate the metrics' cardinality by sending arbitrary garbage values. No metric or label ever includes event content, pubkeys, or other high-cardinality/sensitive values.
+
 ### Resource limits
 
 Every field under `relay_info.limitation` is enforced on the request path, not just advertised. Set a field to `0` (or omit it) to leave that dimension unenforced.

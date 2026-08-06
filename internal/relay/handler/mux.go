@@ -4,19 +4,23 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const readinessPingTimeout = 2 * time.Second
 
-// NewMux routes /healthz and /readyz alongside relayHandler, which continues
-// to handle every other path (NIP-11, WebSocket upgrades, the landing page)
-// exactly as before. Kept in this package rather than assembled inline in
-// cmd/relay/main.go so tests/relay_test.go — which cannot import a main
-// package — can exercise the exact routing used in production.
+// NewMux routes /healthz, /readyz, and /metrics alongside relayHandler,
+// which continues to handle every other path (NIP-11, WebSocket upgrades,
+// the landing page) exactly as before. Kept in this package rather than
+// assembled inline in cmd/relay/main.go so tests/relay_test.go — which
+// cannot import a main package — can exercise the exact routing used in
+// production.
 func NewMux(relayHandler http.Handler, ping func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
 	mux.HandleFunc("/readyz", readyz(ping))
+	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/", relayHandler)
 	return mux
 }

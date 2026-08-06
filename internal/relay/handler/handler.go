@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"relay/internal/relay/service"
+	"relay/pkg/metrics"
 	"slices"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ type RelayHandler struct {
 	websocket      WebsocketConfig
 	upgrader       websocket.Upgrader
 	connCount      atomic.Int64
+	subCount       atomic.Int64
 }
 
 type RelayInfo struct {
@@ -289,21 +291,24 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Reserve a connection slot atomically before upgrading. Checking the
 	// count and incrementing it as two separate steps leaves a race window
 	// where concurrent requests can all pass the check before any of them
-	// is counted, letting more than MaxConnections through.
-	if h.resourceLimits.MaxConnections > 0 {
-		if h.connCount.Add(1) > int64(h.resourceLimits.MaxConnections) {
-			h.connCount.Add(-1)
-			http.Error(w, "restricted: too many connections", http.StatusServiceUnavailable)
-			return
-		}
+	// is counted, letting more than MaxConnections through. The counter
+	// itself is always maintained (metrics need it to be accurate even when
+	// no cap is configured); only the rejection check is gated on
+	// MaxConnections > 0.
+	current := h.connCount.Add(1)
+	metrics.ConnectionsActive.Inc()
+	if h.resourceLimits.MaxConnections > 0 && current > int64(h.resourceLimits.MaxConnections) {
+		h.connCount.Add(-1)
+		metrics.ConnectionsActive.Dec()
+		http.Error(w, "restricted: too many connections", http.StatusServiceUnavailable)
+		return
 	}
 
 	conn, err := h.upgrader.Upgrade(w, req, nil)
 	if err != nil {
 		slog.Error("upgrade error", "error", err)
-		if h.resourceLimits.MaxConnections > 0 {
-			h.connCount.Add(-1)
-		}
+		h.connCount.Add(-1)
+		metrics.ConnectionsActive.Dec()
 		return
 	}
 
@@ -325,8 +330,11 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	defer func() {
 		h.clients.Delete(client)
-		if h.resourceLimits.MaxConnections > 0 {
-			h.connCount.Add(-1)
+		h.connCount.Add(-1)
+		metrics.ConnectionsActive.Dec()
+		if n := countSubscriptions(client); n > 0 {
+			h.subCount.Add(-int64(n))
+			metrics.SubscriptionsActive.Sub(float64(n))
 		}
 		conn.Close()
 	}()
@@ -356,20 +364,22 @@ func newLimiter(perSecond int) *rate.Limiter {
 func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 	var raw []json.RawMessage
 	if err := json.Unmarshal(msg, &raw); err != nil {
-		h.sendNotice(c, "error: invalid JSON")
+		h.sendNotice(c, prefixInvalid+": invalid JSON")
 		return
 	}
 
 	if len(raw) < 2 {
-		h.sendNotice(c, "error: invalid message format")
+		h.sendNotice(c, prefixInvalid+": invalid message format")
 		return
 	}
 
 	var msgType string
 	if err := json.Unmarshal(raw[0], &msgType); err != nil {
-		h.sendNotice(c, "error: invalid message type")
+		h.sendNotice(c, prefixInvalid+": invalid message type")
 		return
 	}
+
+	metrics.MessagesTotal.WithLabelValues(metrics.KnownMessageType(msgType)).Inc()
 
 	switch msgType {
 	case "EVENT":
@@ -386,6 +396,7 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 			return
 		}
 		limitation := h.relayInfo.Limitation
+		_, subExisted := c.subscriptions.Load(subID)
 		if limitation != nil && limitation.MaxSubidLength > 0 && len(subID) > limitation.MaxSubidLength {
 			h.sendClosed(c, subID, fmt.Sprintf("%s: subscription id longer than %d characters", prefixInvalid, limitation.MaxSubidLength))
 			return
@@ -402,7 +413,7 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 			return
 		}
 		if limitation != nil && limitation.MaxSubscriptions > 0 {
-			if _, exists := c.subscriptions.Load(subID); !exists && countSubscriptions(c) >= limitation.MaxSubscriptions {
+			if !subExisted && countSubscriptions(c) >= limitation.MaxSubscriptions {
 				h.sendClosed(c, subID, fmt.Sprintf("%s: too many subscriptions, max %d", prefixRestricted, limitation.MaxSubscriptions))
 				return
 			}
@@ -414,14 +425,21 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 				}
 			}
 		}
+		if !subExisted {
+			h.subCount.Add(1)
+			metrics.SubscriptionsActive.Inc()
+		}
 		h.handleReq(c, subID, filters)
 	case "CLOSE":
 		var subID string
 		if err := json.Unmarshal(raw[1], &subID); err != nil {
-			h.sendNotice(c, "error: invalid subscription ID")
+			h.sendNotice(c, prefixInvalid+": invalid subscription ID")
 			return
 		}
-		c.subscriptions.Delete(subID)
+		if _, existed := c.subscriptions.LoadAndDelete(subID); existed {
+			h.subCount.Add(-1)
+			metrics.SubscriptionsActive.Dec()
+		}
 	case "AUTH":
 		var ev nostr.Event
 		if err := json.Unmarshal(raw[1], &ev); err != nil {
@@ -475,33 +493,36 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 	case "NEG-OPEN":
 		var subID string
 		if err := json.Unmarshal(raw[1], &subID); err != nil {
-			h.sendNegErr(c, "", "invalid: invalid subscription ID")
+			h.sendNegErr(c, "", prefixInvalid+": invalid subscription ID")
 			return
 		}
 		var filter nostr.Filter
 		if err := json.Unmarshal(raw[2], &filter); err != nil {
-			h.sendNegErr(c, subID, "invalid: invalid filter")
+			h.sendNegErr(c, subID, prefixInvalid+": invalid filter")
 			return
 		}
 		var initialMsg string
 		if err := json.Unmarshal(raw[3], &initialMsg); err != nil {
-			h.sendNegErr(c, subID, "invalid: invalid initial message")
+			h.sendNegErr(c, subID, prefixInvalid+": invalid initial message")
 			return
 		}
-		slog.Info("NEG-OPEN received", "subID", subID, "initialMsg", initialMsg)
+		// Debug only, and never the raw payload: this fires on every
+		// reconciliation message and the hex vector is high-volume metadata,
+		// not something worth Info-level disclosure.
+		slog.Debug("NEG-OPEN received", "sub_id", subID)
 		h.handleNegOpen(c, subID, filter, initialMsg)
 	case "NEG-MSG":
 		var subID string
 		if err := json.Unmarshal(raw[1], &subID); err != nil {
-			h.sendNegErr(c, "", "invalid: invalid subscription ID")
+			h.sendNegErr(c, "", prefixInvalid+": invalid subscription ID")
 			return
 		}
 		var msgHex string
 		if err := json.Unmarshal(raw[2], &msgHex); err != nil {
-			h.sendNegErr(c, subID, "invalid: invalid message hex")
+			h.sendNegErr(c, subID, prefixInvalid+": invalid message hex")
 			return
 		}
-		slog.Info("NEG-MSG received", "subID", subID, "msgHex", msgHex)
+		slog.Debug("NEG-MSG received", "sub_id", subID)
 		h.handleNegMsg(c, subID, msgHex)
 	case "NEG-CLOSE":
 		var subID string
@@ -575,14 +596,17 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 	success, err := h.service.SaveEvent(context.Background(), ev)
 	if err != nil {
 		slog.Error("save event failed", "event_id", ev.ID, "error", err)
+		metrics.SaveFailuresTotal.Inc()
 		h.sendOK(c, ev.ID, false, prefixError+": failed to save event")
 		return
 	}
 
 	if success {
+		metrics.EventsStoredTotal.Inc()
 		h.sendOK(c, ev.ID, true, "")
 		h.broadcast(ev)
 	} else {
+		metrics.SaveFailuresTotal.Inc()
 		h.sendOK(c, ev.ID, false, prefixError+": failed to save event")
 	}
 }
@@ -627,7 +651,9 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 
 	seenIDs := make(map[string]bool)
 	for _, f := range filters {
+		start := time.Now()
 		events, err := h.service.QueryEvents(context.Background(), f)
+		metrics.QueryDuration.WithLabelValues("req").Observe(time.Since(start).Seconds())
 		if err != nil {
 			slog.Error("query error", "error", err)
 			continue
@@ -696,7 +722,9 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 		return
 	}
 
+	start := time.Now()
 	events, err := h.service.QueryEventsSorted(context.Background(), filter)
+	metrics.QueryDuration.WithLabelValues("negentropy").Observe(time.Since(start).Seconds())
 	if err != nil {
 		slog.Error("negentropy query failed", "sub_id", subID, "error", err)
 		h.sendNegErr(c, subID, prefixError+": could not build reconciliation set")
@@ -785,11 +813,28 @@ func (h *RelayHandler) sendEvent(c *Client, subID string, ev *nostr.Event) {
 }
 
 func (h *RelayHandler) sendOK(c *Client, eventID string, ok bool, reason string) {
+	if !ok {
+		recordRejection(reason)
+	}
 	msg, _ := json.Marshal([]any{"OK", eventID, ok, reason})
 	h.write(c, msg)
 }
 
+// recordRejection extracts the leading NIP-01 prefix from reason (the text
+// before the first ":") and increments RejectionsTotal, bounded to the
+// relay's known prefix vocabulary regardless of what the caller passes in.
+func recordRejection(reason string) {
+	prefix := reason
+	if i := strings.Index(reason, ":"); i >= 0 {
+		prefix = reason[:i]
+	}
+	metrics.RejectionsTotal.WithLabelValues(metrics.KnownRejectionReason(prefix)).Inc()
+}
+
+// sendNotice is used only for rejection/error notices in this handler; every
+// call records a rejection.
 func (h *RelayHandler) sendNotice(c *Client, message string) {
+	recordRejection(message)
 	msg, _ := json.Marshal([]any{"NOTICE", message})
 	h.write(c, msg)
 }
@@ -807,18 +852,20 @@ func (h *RelayHandler) sendEOSE(c *Client, subID string) {
 // sendClosed sends a NIP-01 CLOSED message and drops the subscription, used
 // when a REQ is rejected instead of served.
 func (h *RelayHandler) sendClosed(c *Client, subID string, reason string) {
+	recordRejection(reason)
 	c.subscriptions.Delete(subID)
 	msg, _ := json.Marshal([]any{"CLOSED", subID, reason})
 	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendNegErr(c *Client, subID string, reason string) {
+	recordRejection(reason)
 	msg, _ := json.Marshal([]any{"NEG-ERR", subID, reason})
 	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendNegMsg(c *Client, subID string, msgHex string) {
-	slog.Info("Sending NEG-MSG", "subID", subID, "msgHex", msgHex)
+	slog.Debug("Sending NEG-MSG", "sub_id", subID)
 	msg, _ := json.Marshal([]any{"NEG-MSG", subID, msgHex})
 	h.write(c, msg)
 }
