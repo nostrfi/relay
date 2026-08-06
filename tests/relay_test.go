@@ -1,9 +1,11 @@
 package tests
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,6 +35,11 @@ func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func
 
 func startTestRelayWithLimits(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits) (*httptest.Server, repository.Repository, func()) {
 	t.Helper()
+	return startTestRelayFull(t, info, limits, handler.AuthConfig{}, handler.WebsocketConfig{})
+}
+
+func startTestRelayFull(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits, auth handler.AuthConfig, ws handler.WebsocketConfig) (*httptest.Server, repository.Repository, func()) {
+	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
 	if err != nil {
@@ -47,7 +54,7 @@ func startTestRelayWithLimits(t *testing.T, info handler.RelayInfo, limits handl
 	}
 
 	svc := service.NewRelayService(repo)
-	h := handler.NewRelayHandlerWithLimits(svc, info, limits, "test")
+	h := handler.NewRelayHandlerFull(svc, info, limits, auth, ws, "test")
 	server := httptest.NewServer(h)
 
 	cleanup := func() {
@@ -1347,6 +1354,11 @@ func TestNip17(t *testing.T) {
 func signedEvent(t *testing.T, kind int, content string, tags nostr.Tags) nostr.Event {
 	t.Helper()
 	sk := nostr.GeneratePrivateKey()
+	return signedEventWithKey(t, sk, kind, content, tags)
+}
+
+func signedEventWithKey(t *testing.T, sk string, kind int, content string, tags nostr.Tags) nostr.Event {
+	t.Helper()
 	pk, _ := nostr.GetPublicKey(sk)
 	ev := nostr.Event{
 		PubKey:    pk,
@@ -1357,6 +1369,49 @@ func signedEvent(t *testing.T, kind int, content string, tags nostr.Tags) nostr.
 	}
 	if err := ev.Sign(sk); err != nil {
 		t.Fatalf("sign event: %v", err)
+	}
+	return ev
+}
+
+// connectTestRelayWithChallenge dials the relay and returns the connection
+// along with the initial NIP-42 AUTH challenge, without discarding it.
+func connectTestRelayWithChallenge(t *testing.T, server *httptest.Server) (*testClient, string) {
+	t.Helper()
+	u, _ := url.Parse(server.URL)
+	u.Scheme = "ws"
+	dialer := websocket.Dialer{}
+	c, _, err := dialer.Dial(u.String(), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read AUTH challenge: %v", err)
+	}
+	var raw []any
+	if err := json.Unmarshal(msg, &raw); err != nil {
+		t.Fatalf("unmarshal AUTH challenge: %v", err)
+	}
+	if raw[0] != "AUTH" {
+		t.Fatalf("expected initial AUTH challenge, got %v", raw)
+	}
+	return &testClient{c}, raw[1].(string)
+}
+
+func buildAuthEvent(t *testing.T, sk, challenge, relayTag string, createdAt nostr.Timestamp) nostr.Event {
+	t.Helper()
+	pk, _ := nostr.GetPublicKey(sk)
+	ev := nostr.Event{
+		PubKey:    pk,
+		CreatedAt: createdAt,
+		Kind:      22242,
+		Tags: nostr.Tags{
+			{"challenge", challenge},
+			{"relay", relayTag},
+		},
+	}
+	if err := ev.Sign(sk); err != nil {
+		t.Fatalf("sign AUTH event: %v", err)
 	}
 	return ev
 }
@@ -1721,4 +1776,319 @@ relay_info:
 
 	_, err = handler.LoadConfig()
 	assert.Error(t, err, "loading a config with payment_required: true should fail since no payment mechanism exists")
+}
+
+func TestNip42EndpointBinding(t *testing.T) {
+	const canonicalURL = "wss://relay.test.local"
+	auth := handler.AuthConfig{RelayURL: canonicalURL}
+	limitation := &handler.RelayLimitation{RestrictedWrites: true}
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.WebsocketConfig{})
+	defer cleanup()
+
+	publishAndExpect := func(t *testing.T, c *testClient, sk string, wantOK bool) {
+		t.Helper()
+		ev := signedEventWithKey(t, sk, 1, "hi", nil)
+		msg, _ := json.Marshal([]any{"EVENT", ev})
+		c.WriteMessage(websocket.TextMessage, msg)
+		okMsg := c.readOK(t)
+		assert.Equal(t, wantOK, okMsg[2])
+	}
+
+	t.Run("matching relay tag authenticates and unlocks publishing", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		publishAndExpect(t, c, sk, true)
+	})
+
+	t.Run("trailing slash difference does not block authentication", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, canonicalURL+"/", nostr.Now())
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		publishAndExpect(t, c, sk, true)
+	})
+
+	t.Run("mismatched relay tag is rejected", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, "wss://different-relay.example", nostr.Now())
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		notice := c.readNotice(t)
+		assert.Contains(t, notice[1], "restricted")
+		assert.Contains(t, notice[1], "does not match")
+
+		publishAndExpect(t, c, sk, false)
+	})
+
+	t.Run("missing relay tag is rejected", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		pk, _ := nostr.GetPublicKey(sk)
+		authEv := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 22242, Tags: nostr.Tags{{"challenge", challenge}}}
+		if err := authEv.Sign(sk); err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		notice := c.readNotice(t)
+		assert.Contains(t, notice[1], "invalid")
+	})
+
+	t.Run("mismatched challenge is rejected", func(t *testing.T) {
+		c, _ := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, "not-the-real-challenge", canonicalURL, nostr.Now())
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		notice := c.readNotice(t)
+		assert.Contains(t, notice[1], "invalid")
+	})
+
+	t.Run("malformed AUTH event kind is rejected", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		pk, _ := nostr.GetPublicKey(sk)
+		authEv := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Tags: nostr.Tags{{"challenge", challenge}, {"relay", canonicalURL}}}
+		if err := authEv.Sign(sk); err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		notice := c.readNotice(t)
+		assert.Contains(t, notice[1], "invalid")
+	})
+}
+
+func TestNip42AuthFreshness(t *testing.T) {
+	const canonicalURL = "wss://relay.test.local"
+	auth := handler.AuthConfig{RelayURL: canonicalURL, MaxEventAgeSeconds: 600}
+	limitation := &handler.RelayLimitation{RestrictedWrites: true}
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.WebsocketConfig{})
+	defer cleanup()
+
+	t.Run("fresh event authenticates", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		ev := signedEventWithKey(t, sk, 1, "hi", nil)
+		pubMsg, _ := json.Marshal([]any{"EVENT", ev})
+		c.WriteMessage(websocket.TextMessage, pubMsg)
+		okMsg := c.readOK(t)
+		assert.Equal(t, true, okMsg[2])
+	})
+
+	t.Run("stale event is rejected", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now()-3600)
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		notice := c.readNotice(t)
+		assert.Contains(t, notice[1], "invalid")
+		assert.Contains(t, notice[1], "created_at")
+	})
+
+	t.Run("future event is rejected", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now()+3600)
+		msg, _ := json.Marshal([]any{"AUTH", authEv})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		notice := c.readNotice(t)
+		assert.Contains(t, notice[1], "invalid")
+		assert.Contains(t, notice[1], "created_at")
+	})
+}
+
+func dialWithOrigin(t *testing.T, server *httptest.Server, origin string, wantAllowed bool) {
+	t.Helper()
+	u, _ := url.Parse(server.URL)
+	u.Scheme = "ws"
+	header := http.Header{}
+	if origin != "" {
+		header.Set("Origin", origin)
+	}
+	dialer := websocket.Dialer{}
+	c, resp, err := dialer.Dial(u.String(), header)
+	if wantAllowed {
+		if err != nil {
+			t.Fatalf("expected dial to succeed for origin %q: %v", origin, err)
+		}
+		c.Close()
+		return
+	}
+	if err == nil {
+		c.Close()
+		t.Fatalf("expected dial to be rejected for origin %q", origin)
+	}
+	if resp != nil {
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	}
+}
+
+func TestWebsocketOriginPolicy(t *testing.T) {
+	t.Run("development mode allows any origin", func(t *testing.T) {
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.WebsocketConfig{Mode: "development"})
+		defer cleanup()
+		dialWithOrigin(t, server, "https://anything.example", true)
+	})
+
+	t.Run("production mode allows a configured origin", func(t *testing.T) {
+		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		defer cleanup()
+		dialWithOrigin(t, server, "https://allowed.example", true)
+	})
+
+	t.Run("production mode denies an unlisted origin", func(t *testing.T) {
+		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		defer cleanup()
+		dialWithOrigin(t, server, "https://denied.example", false)
+	})
+
+	t.Run("production mode denies an absent origin", func(t *testing.T) {
+		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		defer cleanup()
+		dialWithOrigin(t, server, "", false)
+	})
+
+	t.Run("production mode denies a malformed origin", func(t *testing.T) {
+		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		defer cleanup()
+		dialWithOrigin(t, server, "not a url", false)
+	})
+}
+
+func TestNip42NoChallengeOrPayloadInLogs(t *testing.T) {
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prevLogger)
+
+	const canonicalURL = "wss://relay.test.local"
+	auth := handler.AuthConfig{RelayURL: canonicalURL}
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, auth, handler.WebsocketConfig{})
+	defer cleanup()
+
+	// Successful AUTH: block until a follow-up publish confirms it landed,
+	// so the "Client authenticated" log line has already been written.
+	c, challenge := connectTestRelayWithChallenge(t, server)
+	defer c.Close()
+	sk := nostr.GeneratePrivateKey()
+	authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
+	msg, _ := json.Marshal([]any{"AUTH", authEv})
+	c.WriteMessage(websocket.TextMessage, msg)
+	ev := signedEventWithKey(t, sk, 1, "hi", nil)
+	pubMsg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, pubMsg)
+	c.readOK(t)
+
+	// Failed AUTH on a second connection, to exercise the reject path too.
+	c2, challenge2 := connectTestRelayWithChallenge(t, server)
+	defer c2.Close()
+	sk2 := nostr.GeneratePrivateKey()
+	badAuthEv := buildAuthEvent(t, sk2, challenge2, "wss://different.example", nostr.Now())
+	msg2, _ := json.Marshal([]any{"AUTH", badAuthEv})
+	c2.WriteMessage(websocket.TextMessage, msg2)
+	c2.readNotice(t)
+
+	logged := buf.String()
+	assert.NotContains(t, logged, challenge, "AUTH challenge must never be logged")
+	assert.NotContains(t, logged, challenge2, "AUTH challenge must never be logged")
+	assert.NotContains(t, logged, authEv.Sig, "AUTH event payload must never be logged")
+	assert.NotContains(t, logged, badAuthEv.Sig, "AUTH event payload must never be logged")
+}
+
+func TestConfigWebsocketProductionRequiresOrigins(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+websocket:
+  mode: production
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	_, err = handler.LoadConfig()
+	assert.Error(t, err, "production mode with no allowed_origins should fail to load")
+}
+
+func TestConfigWebsocketProductionWithOriginsSucceeds(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+websocket:
+  mode: production
+  allowed_origins:
+    - "https://client.example"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	cfg, err := handler.LoadConfig()
+	if err != nil {
+		t.Fatalf("expected config to load: %v", err)
+	}
+	assert.Equal(t, "production", cfg.Websocket.Mode)
+	assert.Equal(t, []string{"https://client.example"}, cfg.Websocket.AllowedOrigins)
+	assert.Equal(t, 600, cfg.Auth.MaxEventAgeSeconds, "default freshness window should apply")
 }

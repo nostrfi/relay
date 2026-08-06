@@ -8,7 +8,9 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"relay/internal/relay/service"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,15 +38,14 @@ const (
 
 const writeDeadline = 5 * time.Second
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
 type RelayHandler struct {
 	service        service.RelayService
 	clients        sync.Map // map[*Client]bool
 	relayInfo      RelayInfo
 	resourceLimits ResourceLimits
+	auth           AuthConfig
+	websocket      WebsocketConfig
+	upgrader       websocket.Upgrader
 	connCount      atomic.Int64
 }
 
@@ -83,9 +84,34 @@ type ResourceLimits struct {
 	EventsPerSecond   int `mapstructure:"events_per_second"`
 }
 
+// AuthConfig binds NIP-42 authentication to this specific relay instance.
+// Kept separate from RelayInfo so it never appears in the public NIP-11
+// JSON response.
+type AuthConfig struct {
+	RelayURL           string `mapstructure:"relay_url"`
+	MaxEventAgeSeconds int    `mapstructure:"max_event_age_seconds"`
+}
+
+const (
+	websocketModeDevelopment = "development"
+	websocketModeProduction  = "production"
+)
+
+// WebsocketConfig controls which HTTP Origins may open a WebSocket
+// connection. Mode "production" is fail-closed: it requires a non-empty
+// AllowedOrigins list. Mode "development" (the default) preserves the
+// historical permissive behavior and must not be used for an
+// internet-facing deployment.
+type WebsocketConfig struct {
+	Mode           string   `mapstructure:"mode"`
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
+}
+
 type Config struct {
-	RelayInfo      RelayInfo      `mapstructure:"relay_info"`
-	ResourceLimits ResourceLimits `mapstructure:"resource_limits"`
+	RelayInfo      RelayInfo       `mapstructure:"relay_info"`
+	ResourceLimits ResourceLimits  `mapstructure:"resource_limits"`
+	Auth           AuthConfig      `mapstructure:"auth"`
+	Websocket      WebsocketConfig `mapstructure:"websocket"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -107,6 +133,20 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.RelayInfo.Limitation != nil && cfg.RelayInfo.Limitation.PaymentRequired {
 		return nil, fmt.Errorf("config: relay_info.limitation.payment_required is true but no payment mechanism is implemented; advertising it would be misleading")
+	}
+
+	if cfg.Websocket.Mode == "" {
+		cfg.Websocket.Mode = websocketModeDevelopment
+	}
+	if cfg.Websocket.Mode != websocketModeDevelopment && cfg.Websocket.Mode != websocketModeProduction {
+		return nil, fmt.Errorf("config: websocket.mode must be %q or %q, got %q", websocketModeDevelopment, websocketModeProduction, cfg.Websocket.Mode)
+	}
+	if cfg.Websocket.Mode == websocketModeProduction && len(cfg.Websocket.AllowedOrigins) == 0 {
+		return nil, fmt.Errorf("config: websocket.mode is %q but websocket.allowed_origins is empty; production mode is fail-closed and requires an explicit allow-list", websocketModeProduction)
+	}
+
+	if cfg.Auth.MaxEventAgeSeconds == 0 {
+		cfg.Auth.MaxEventAgeSeconds = 600
 	}
 
 	return &cfg, nil
@@ -135,6 +175,16 @@ func NewRelayHandler(service service.RelayService, info RelayInfo, buildVersion 
 }
 
 func NewRelayHandlerWithLimits(service service.RelayService, info RelayInfo, limits ResourceLimits, buildVersion string) *RelayHandler {
+	return NewRelayHandlerFull(service, info, limits, AuthConfig{}, WebsocketConfig{}, buildVersion)
+}
+
+// NewRelayHandlerFull is the fully configured constructor. An empty
+// AuthConfig disables endpoint-binding and freshness checks on NIP-42 AUTH
+// (matching the historical, presence-only behavior); a zero-value
+// WebsocketConfig defaults to development mode (all origins allowed),
+// matching the historical CheckOrigin behavior. Both must be set explicitly
+// to enable the stricter, internet-facing behavior.
+func NewRelayHandlerFull(service service.RelayService, info RelayInfo, limits ResourceLimits, auth AuthConfig, ws WebsocketConfig, buildVersion string) *RelayHandler {
 	if info.Name == "" {
 		info.Name = "Nostr Relay"
 	}
@@ -151,12 +201,38 @@ func NewRelayHandlerWithLimits(service service.RelayService, info RelayInfo, lim
 	if info.Version == "" {
 		info.Version = "dev"
 	}
+	if ws.Mode == "" {
+		ws.Mode = websocketModeDevelopment
+	}
 
-	return &RelayHandler{
+	h := &RelayHandler{
 		service:        service,
 		relayInfo:      info,
 		resourceLimits: limits,
+		auth:           auth,
+		websocket:      ws,
 	}
+	h.upgrader = websocket.Upgrader{CheckOrigin: h.checkOrigin}
+	return h
+}
+
+// checkOrigin enforces the configured WebSocket origin policy. Development
+// mode preserves the historical permissive behavior; production mode is
+// fail-closed and is validated at config load to always have a non-empty
+// allow-list.
+func (h *RelayHandler) checkOrigin(r *http.Request) bool {
+	if h.websocket.Mode != websocketModeProduction {
+		return true
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return slices.Contains(h.websocket.AllowedOrigins, origin)
 }
 
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -187,7 +263,7 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	conn, err := upgrader.Upgrade(w, req, nil)
+	conn, err := h.upgrader.Upgrade(w, req, nil)
 	if err != nil {
 		slog.Error("upgrade error", "error", err)
 		if h.resourceLimits.MaxConnections > 0 {
@@ -314,18 +390,29 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 	case "AUTH":
 		var ev nostr.Event
 		if err := json.Unmarshal(raw[1], &ev); err != nil {
-			h.sendNotice(c, "error: invalid AUTH event")
+			h.sendNotice(c, prefixInvalid+": invalid AUTH event")
 			return
 		}
 		if ok, err := ev.CheckSignature(); err != nil || !ok {
-			h.sendNotice(c, "error: AUTH event signature verification failed")
+			h.sendNotice(c, prefixInvalid+": AUTH event signature verification failed")
 			return
 		}
 		if ev.Kind != 22242 {
-			h.sendNotice(c, "error: invalid AUTH event kind")
+			h.sendNotice(c, prefixInvalid+": invalid AUTH event kind")
 			return
 		}
+		if h.auth.MaxEventAgeSeconds > 0 {
+			age := nostr.Now() - ev.CreatedAt
+			if age < 0 {
+				age = -age
+			}
+			if int64(age) > int64(h.auth.MaxEventAgeSeconds) {
+				h.sendNotice(c, fmt.Sprintf("%s: AUTH event created_at is more than %d seconds from now", prefixInvalid, h.auth.MaxEventAgeSeconds))
+				return
+			}
+		}
 		challengeFound := false
+		var relayTag string
 		relayFound := false
 		for _, tag := range ev.Tags {
 			if len(tag) >= 2 {
@@ -333,16 +420,22 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 					challengeFound = true
 				}
 				if tag[0] == "relay" {
-					// We could verify relay URL here, but keeping it simple for now
+					relayTag = tag[1]
 					relayFound = true
 				}
 			}
 		}
 		if !challengeFound || !relayFound {
-			h.sendNotice(c, "error: AUTH event missing challenge or relay tag")
+			h.sendNotice(c, prefixInvalid+": AUTH event missing challenge or relay tag")
+			return
+		}
+		if h.auth.RelayURL != "" && !sameRelayURL(relayTag, h.auth.RelayURL) {
+			h.sendNotice(c, prefixRestricted+": AUTH event relay tag does not match this relay's endpoint")
 			return
 		}
 		c.authPubkey = ev.PubKey
+		// Log only the resulting pubkey, never the challenge or the AUTH
+		// event payload, per the relay's logging guardrails.
 		slog.Info("Client authenticated", "pubkey", c.authPubkey)
 	case "NEG-OPEN":
 		var subID string
@@ -476,6 +569,13 @@ func checkTimestampBounds(createdAt nostr.Timestamp, limitation *RelayLimitation
 		}
 	}
 	return "", true
+}
+
+// sameRelayURL compares a NIP-42 AUTH event's relay tag against the
+// configured canonical relay URL, ignoring a trailing slash difference
+// since relay URLs are commonly written both ways.
+func sameRelayURL(a, b string) bool {
+	return strings.TrimSuffix(a, "/") == strings.TrimSuffix(b, "/")
 }
 
 func countSubscriptions(c *Client) int {

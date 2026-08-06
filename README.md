@@ -139,6 +139,23 @@ resource_limits:                 # operational controls outside the NIP-11 spec
 
 Rejections use a stable, machine-readable prefix (`invalid:`, `restricted:`, `rate-limited:`, `auth-required:`, `pow:`, `error:`) and never include raw internal error text. `REQ`s rejected for filter count, subscription count, or subscription-id length receive a `CLOSED` message; `EVENT`s rejected for any reason receive `OK false <reason>`.
 
+### Authentication and WebSocket origin policy
+
+```yaml
+auth:
+  relay_url: "" # set to this relay's canonical wss:// URL to enable NIP-42 endpoint binding
+  max_event_age_seconds: 600 # NIP-42 AUTH events older or further in the future than this are rejected
+
+websocket:
+  mode: "development" # "development" allows any Origin; set "production" for internet-facing deployment
+  allowed_origins: [] # required (non-empty) when mode is "production"
+```
+
+- **`auth.relay_url`**: when set, a NIP-42 `AUTH` event's signed `relay` tag must match this value (a trailing slash is ignored) or authentication is rejected with `restricted:`. Left empty, only the tag's presence is checked — the historical, development-friendly behavior. This prevents a captured AUTH event from being replayed against a different relay endpoint.
+- **`auth.max_event_age_seconds`**: an `AUTH` event whose `created_at` is more than this many seconds away from the relay's clock, in either direction, is rejected with `invalid:`. Defaults to `600` (10 minutes) when unset via `LoadConfig`; `0` disables the check (only relevant when constructing the handler directly, e.g. in tests).
+- **`websocket.mode`**: `development` (default) preserves the original permissive behavior — every `Origin` is accepted. `production` is fail-closed: the relay refuses to start unless `websocket.allowed_origins` is non-empty, and any WebSocket upgrade with a missing, malformed, or unlisted `Origin` header is rejected with `403 Forbidden` before the connection is established.
+- Authentication never logs the challenge value or the raw `AUTH` event payload — only the resulting authenticated public key.
+
 ## Database
 
 The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `db/relay.db`.
