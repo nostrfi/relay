@@ -9,6 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +28,11 @@ import (
 
 func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func()) {
 	t.Helper()
+	return startTestRelayWithLimits(t, handler.RelayInfo{}, handler.ResourceLimits{})
+}
+
+func startTestRelayWithLimits(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits) (*httptest.Server, repository.Repository, func()) {
+	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
 	if err != nil {
@@ -39,7 +47,7 @@ func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func
 	}
 
 	svc := service.NewRelayService(repo)
-	h := handler.NewRelayHandler(svc, handler.RelayInfo{}, "test")
+	h := handler.NewRelayHandlerWithLimits(svc, info, limits, "test")
 	server := httptest.NewServer(h)
 
 	cleanup := func() {
@@ -53,6 +61,23 @@ func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func
 
 func (c *testClient) readOK(t *testing.T) []any {
 	t.Helper()
+	return c.readMessageType(t, "OK")
+}
+
+func (c *testClient) readClosed(t *testing.T) []any {
+	t.Helper()
+	return c.readMessageType(t, "CLOSED")
+}
+
+func (c *testClient) readNotice(t *testing.T) []any {
+	t.Helper()
+	return c.readMessageType(t, "NOTICE")
+}
+
+// readMessageType reads until it sees a message of the requested type,
+// skipping the initial AUTH challenge (and other message types) along the way.
+func (c *testClient) readMessageType(t *testing.T, want string) []any {
+	t.Helper()
 	for {
 		_, msg, err := c.ReadMessage()
 		if err != nil {
@@ -62,7 +87,7 @@ func (c *testClient) readOK(t *testing.T) []any {
 		if err := json.Unmarshal(msg, &raw); err != nil {
 			t.Fatalf("failed to unmarshal: %v", err)
 		}
-		if raw[0] == "OK" {
+		if raw[0] == want {
 			return raw
 		}
 		if raw[0] == "AUTH" {
@@ -1317,4 +1342,383 @@ func TestNip17(t *testing.T) {
 		}
 	}
 	assert.True(t, foundBob, "Bob SHOULD see his own gift wrap after authentication")
+}
+
+func signedEvent(t *testing.T, kind int, content string, tags nostr.Tags) nostr.Event {
+	t.Helper()
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	ev := nostr.Event{
+		PubKey:    pk,
+		CreatedAt: nostr.Now(),
+		Kind:      kind,
+		Tags:      tags,
+		Content:   content,
+	}
+	if err := ev.Sign(sk); err != nil {
+		t.Fatalf("sign event: %v", err)
+	}
+	return ev
+}
+
+func TestResourceLimitsContentLength(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxContentLength: 10}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	t.Run("at the boundary is accepted", func(t *testing.T) {
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		ev := signedEvent(t, 1, "1234567890", nil) // exactly 10 characters
+		msg, _ := json.Marshal([]any{"EVENT", ev})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		okMsg := c.readOK(t)
+		assert.Equal(t, true, okMsg[2])
+	})
+
+	t.Run("over the boundary is rejected", func(t *testing.T) {
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		ev := signedEvent(t, 1, "this content is far longer than ten characters", nil)
+		msg, _ := json.Marshal([]any{"EVENT", ev})
+		c.WriteMessage(websocket.TextMessage, msg)
+
+		okMsg := c.readOK(t)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: content longer than 10 characters", okMsg[3])
+	})
+}
+
+func TestResourceLimitsEventTags(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxEventTags: 2}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	tags := nostr.Tags{{"t", "one"}, {"t", "two"}, {"t", "three"}}
+	ev := signedEvent(t, 1, "hi", tags)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "invalid: more than 2 tags", okMsg[3])
+}
+
+func TestResourceLimitsTimestampBounds(t *testing.T) {
+	limitation := &handler.RelayLimitation{CreatedAtUpperLimit: 60, CreatedAtLowerLimit: 60}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	future := nostr.Event{PubKey: pk, CreatedAt: nostr.Now() + 3600, Kind: 1, Content: "future"}
+	future.Sign(sk)
+	msg, _ := json.Marshal([]any{"EVENT", future})
+	c.WriteMessage(websocket.TextMessage, msg)
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "invalid: created_at is more than 60 seconds in the future", okMsg[3])
+
+	past := nostr.Event{PubKey: pk, CreatedAt: nostr.Now() - 3600, Kind: 1, Content: "past"}
+	past.Sign(sk)
+	msg2, _ := json.Marshal([]any{"EVENT", past})
+	c.WriteMessage(websocket.TextMessage, msg2)
+	okMsg2 := c.readOK(t)
+	assert.Equal(t, false, okMsg2[2])
+	assert.Equal(t, "invalid: created_at is more than 60 seconds in the past", okMsg2[3])
+}
+
+func TestResourceLimitsProofOfWork(t *testing.T) {
+	limitation := &handler.RelayLimitation{MinPowDifficulty: 8}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	// An ordinary, unmined event essentially never satisfies an 8-bit
+	// difficulty requirement.
+	ev := signedEvent(t, 1, "no pow here", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Contains(t, okMsg[3], "pow: insufficient proof of work")
+}
+
+func TestResourceLimitsAuthRequired(t *testing.T) {
+	limitation := &handler.RelayLimitation{AuthRequired: true}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	ev := signedEvent(t, 1, "hi", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "auth-required: this relay requires authentication to publish", okMsg[3])
+}
+
+func TestResourceLimitsFilterCount(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxFilters: 1}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	req, _ := json.Marshal([]any{"REQ", "too_many", nostr.Filter{Kinds: []int{1}}, nostr.Filter{Kinds: []int{2}}})
+	c.WriteMessage(websocket.TextMessage, req)
+
+	closedMsg := c.readClosed(t)
+	assert.Equal(t, "too_many", closedMsg[1])
+	assert.Equal(t, "restricted: too many filters, max 1", closedMsg[2])
+}
+
+func TestResourceLimitsSubscriptionCount(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxSubscriptions: 1}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	req1, _ := json.Marshal([]any{"REQ", "sub_one", nostr.Filter{Kinds: []int{1}}})
+	c.WriteMessage(websocket.TextMessage, req1)
+	// Drain EOSE for sub_one before moving on.
+	for {
+		_, msg, _ := c.ReadMessage()
+		var raw []any
+		json.Unmarshal(msg, &raw)
+		if raw[0] == "EOSE" {
+			break
+		}
+	}
+
+	// Re-issuing the same subscription id must not be rejected: it replaces
+	// the existing subscription rather than adding a new one.
+	c.WriteMessage(websocket.TextMessage, req1)
+	for {
+		_, msg, _ := c.ReadMessage()
+		var raw []any
+		json.Unmarshal(msg, &raw)
+		if raw[0] == "EOSE" {
+			break
+		}
+		if raw[0] == "CLOSED" {
+			t.Fatalf("re-subscribing the same subscription id should not be rejected: %v", raw)
+		}
+	}
+
+	// A second, distinct subscription id must be rejected.
+	req2, _ := json.Marshal([]any{"REQ", "sub_two", nostr.Filter{Kinds: []int{1}}})
+	c.WriteMessage(websocket.TextMessage, req2)
+	closedMsg := c.readClosed(t)
+	assert.Equal(t, "sub_two", closedMsg[1])
+	assert.Equal(t, "restricted: too many subscriptions, max 1", closedMsg[2])
+}
+
+func TestResourceLimitsSubidLength(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxSubidLength: 5}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	req, _ := json.Marshal([]any{"REQ", "too-long-a-subscription-id", nostr.Filter{Kinds: []int{1}}})
+	c.WriteMessage(websocket.TextMessage, req)
+
+	closedMsg := c.readClosed(t)
+	assert.Equal(t, "too-long-a-subscription-id", closedMsg[1])
+	assert.Equal(t, "invalid: subscription id longer than 5 characters", closedMsg[2])
+}
+
+func TestResourceLimitsMaxLimitClamp(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxLimit: 2}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	for i := range 3 {
+		ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now() - nostr.Timestamp(i), Kind: 1, Content: fmt.Sprintf("event %d", i)}
+		ev.Sign(sk)
+		msg, _ := json.Marshal([]any{"EVENT", ev})
+		c.WriteMessage(websocket.TextMessage, msg)
+		c.readOK(t)
+	}
+
+	req, _ := json.Marshal([]any{"REQ", "clamp_sub", nostr.Filter{Authors: []string{pk}, Limit: 10}})
+	c.WriteMessage(websocket.TextMessage, req)
+
+	received := 0
+	for {
+		_, msg, _ := c.ReadMessage()
+		var raw []any
+		json.Unmarshal(msg, &raw)
+		if raw[0] == "EVENT" {
+			received++
+		} else if raw[0] == "EOSE" {
+			break
+		}
+	}
+	assert.Equal(t, 2, received, "requested limit should be clamped to MaxLimit, not rejected")
+}
+
+func TestResourceLimitsMessageSize(t *testing.T) {
+	limitation := &handler.RelayLimitation{MaxMessageLength: 100}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	oversized := make([]byte, 500)
+	for i := range oversized {
+		oversized[i] = 'a'
+	}
+	// Wrap as a JSON string array so it is at least well-formed framing;
+	// gorilla's read limit closes the connection before content matters.
+	msg, _ := json.Marshal([]any{"EVENT", string(oversized)})
+	c.WriteMessage(websocket.TextMessage, msg)
+
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err := c.ReadMessage()
+	assert.Error(t, err, "server should close the connection when the read limit is exceeded")
+}
+
+func TestResourceLimitsRateLimiting(t *testing.T) {
+	limits := handler.ResourceLimits{MessagesPerSecond: 2}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{}, limits)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	rateLimited := false
+	for range 6 {
+		closeMsg, _ := json.Marshal([]any{"CLOSE", "no_such_sub"})
+		c.WriteMessage(websocket.TextMessage, closeMsg)
+	}
+
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for range 6 {
+		_, msg, err := c.ReadMessage()
+		if err != nil {
+			break
+		}
+		var raw []any
+		if err := json.Unmarshal(msg, &raw); err != nil {
+			continue
+		}
+		if raw[0] == "NOTICE" && strings.Contains(fmt.Sprint(raw[1]), "rate-limited") {
+			rateLimited = true
+			break
+		}
+	}
+	assert.True(t, rateLimited, "expected at least one rate-limited NOTICE once the burst is exhausted")
+}
+
+func TestResourceLimitsNoInternalErrorLeak(t *testing.T) {
+	server, repo, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	// Force SaveEvent to fail by closing the repository out from under the
+	// running relay, then confirm the client sees only the generic message.
+	repo.Close()
+
+	ev := signedEvent(t, 1, "hi", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "error: failed to save event", okMsg[3])
+}
+
+func TestResourceLimitsMaxConnectionsConcurrent(t *testing.T) {
+	limits := handler.ResourceLimits{MaxConnections: 5}
+	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{}, limits)
+	defer cleanup()
+
+	const attempts = 15
+	var wg sync.WaitGroup
+	var accepted, rejected atomic.Int64
+
+	for range attempts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			u, _ := url.Parse(server.URL)
+			u.Scheme = "ws"
+			dialer := websocket.Dialer{}
+			c, resp, err := dialer.Dial(u.String(), nil)
+			if err != nil {
+				if resp != nil && resp.StatusCode == http.StatusServiceUnavailable {
+					rejected.Add(1)
+					return
+				}
+				rejected.Add(1)
+				return
+			}
+			accepted.Add(1)
+			// Hold the connection open briefly so concurrent dials genuinely
+			// race against the connection cap instead of finishing serially.
+			time.Sleep(200 * time.Millisecond)
+			c.Close()
+		}()
+	}
+	wg.Wait()
+
+	assert.LessOrEqual(t, accepted.Load(), int64(5), "accepted connections must never exceed max_connections")
+	assert.Greater(t, rejected.Load(), int64(0), "some concurrent connections beyond the cap should have been rejected")
+	assert.Equal(t, int64(attempts), accepted.Load()+rejected.Load())
+}
+
+func TestConfigPaymentRequiredRejected(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+relay_info:
+  name: "Payment Test Relay"
+  limitation:
+    payment_required: true
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	_, err = handler.LoadConfig()
+	assert.Error(t, err, "loading a config with payment_required: true should fail since no payment mechanism exists")
 }

@@ -8,5 +8,19 @@ relay_info:
   limitation:
     max_message_length: 65536
     max_subscriptions: 100
+    max_filters: 20
+    max_limit: 500
+    max_subid_length: 64
+    max_event_tags: 2000
+    max_content_length: 65536
+    min_pow_difficulty: 0
     auth_required: false
     payment_required: false
+    restricted_writes: false
+    created_at_lower_limit: 94608000 # 3 years, in seconds
+    created_at_upper_limit: 900 # 15 minutes, in seconds
+
+resource_limits:
+  max_connections: 1000
+  messages_per_second: 20
+  events_per_second: 5

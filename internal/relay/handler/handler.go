@@ -11,22 +11,41 @@ import (
 	"relay/internal/relay/service"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/spf13/viper"
 
 	"github.com/gorilla/websocket"
 	negentropy "github.com/illuzen/go-negentropy"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip13"
+	"golang.org/x/time/rate"
 )
+
+// NIP-01 machine-readable rejection prefixes, shared across OK, CLOSED, and
+// NOTICE responses so clients see one consistent vocabulary.
+const (
+	prefixInvalid      = "invalid"
+	prefixRestricted   = "restricted"
+	prefixRateLimited  = "rate-limited"
+	prefixAuthRequired = "auth-required"
+	prefixPow          = "pow"
+	prefixError        = "error"
+)
+
+const writeDeadline = 5 * time.Second
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 type RelayHandler struct {
-	service   service.RelayService
-	clients   sync.Map // map[*Client]bool
-	relayInfo RelayInfo
+	service        service.RelayService
+	clients        sync.Map // map[*Client]bool
+	relayInfo      RelayInfo
+	resourceLimits ResourceLimits
+	connCount      atomic.Int64
 }
 
 type RelayInfo struct {
@@ -56,8 +75,17 @@ type RelayLimitation struct {
 	CreatedAtUpperLimit int  `json:"created_at_upper_limit,omitzero" mapstructure:"created_at_upper_limit"`
 }
 
+// ResourceLimits configures operational controls that NIP-11 does not model:
+// connection admission and per-connection rate limiting.
+type ResourceLimits struct {
+	MaxConnections    int `mapstructure:"max_connections"`
+	MessagesPerSecond int `mapstructure:"messages_per_second"`
+	EventsPerSecond   int `mapstructure:"events_per_second"`
+}
+
 type Config struct {
-	RelayInfo RelayInfo `mapstructure:"relay_info"`
+	RelayInfo      RelayInfo      `mapstructure:"relay_info"`
+	ResourceLimits ResourceLimits `mapstructure:"resource_limits"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -77,6 +105,10 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.RelayInfo.Limitation != nil && cfg.RelayInfo.Limitation.PaymentRequired {
+		return nil, fmt.Errorf("config: relay_info.limitation.payment_required is true but no payment mechanism is implemented; advertising it would be misleading")
+	}
+
 	return &cfg, nil
 }
 
@@ -88,6 +120,8 @@ type Client struct {
 	challenge     string
 	authPubkey    string
 	negSessions   sync.Map // map[string]*NegentropySession
+	msgLimiter    *rate.Limiter
+	eventLimiter  *rate.Limiter
 }
 
 type NegentropySession struct {
@@ -97,6 +131,10 @@ type NegentropySession struct {
 }
 
 func NewRelayHandler(service service.RelayService, info RelayInfo, buildVersion string) *RelayHandler {
+	return NewRelayHandlerWithLimits(service, info, ResourceLimits{}, buildVersion)
+}
+
+func NewRelayHandlerWithLimits(service service.RelayService, info RelayInfo, limits ResourceLimits, buildVersion string) *RelayHandler {
 	if info.Name == "" {
 		info.Name = "Nostr Relay"
 	}
@@ -115,8 +153,9 @@ func NewRelayHandler(service service.RelayService, info RelayInfo, buildVersion 
 	}
 
 	return &RelayHandler{
-		service:   service,
-		relayInfo: info,
+		service:        service,
+		relayInfo:      info,
+		resourceLimits: limits,
 	}
 }
 
@@ -136,15 +175,36 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Reserve a connection slot atomically before upgrading. Checking the
+	// count and incrementing it as two separate steps leaves a race window
+	// where concurrent requests can all pass the check before any of them
+	// is counted, letting more than MaxConnections through.
+	if h.resourceLimits.MaxConnections > 0 {
+		if h.connCount.Add(1) > int64(h.resourceLimits.MaxConnections) {
+			h.connCount.Add(-1)
+			http.Error(w, "restricted: too many connections", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
 	conn, err := upgrader.Upgrade(w, req, nil)
 	if err != nil {
 		slog.Error("upgrade error", "error", err)
+		if h.resourceLimits.MaxConnections > 0 {
+			h.connCount.Add(-1)
+		}
 		return
 	}
 
+	if h.relayInfo.Limitation != nil && h.relayInfo.Limitation.MaxMessageLength > 0 {
+		conn.SetReadLimit(int64(h.relayInfo.Limitation.MaxMessageLength))
+	}
+
 	client := &Client{
-		handler: h,
-		conn:    conn,
+		handler:      h,
+		conn:         conn,
+		msgLimiter:   newLimiter(h.resourceLimits.MessagesPerSecond),
+		eventLimiter: newLimiter(h.resourceLimits.EventsPerSecond),
 	}
 	h.clients.Store(client, true)
 
@@ -154,6 +214,9 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	defer func() {
 		h.clients.Delete(client)
+		if h.resourceLimits.MaxConnections > 0 {
+			h.connCount.Add(-1)
+		}
 		conn.Close()
 	}()
 
@@ -162,8 +225,21 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if err != nil {
 			break
 		}
+		if client.msgLimiter != nil && !client.msgLimiter.Allow() {
+			h.sendNotice(client, prefixRateLimited+": message rate exceeded")
+			continue
+		}
 		h.handleMessage(client, message)
 	}
+}
+
+// newLimiter builds a per-connection token-bucket limiter for the configured
+// rate. A non-positive rate disables limiting for that dimension.
+func newLimiter(perSecond int) *rate.Limiter {
+	if perSecond <= 0 {
+		return nil
+	}
+	return rate.NewLimiter(rate.Limit(perSecond), perSecond)
 }
 
 func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
@@ -195,7 +271,12 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 	case "REQ":
 		var subID string
 		if err := json.Unmarshal(raw[1], &subID); err != nil {
-			h.sendNotice(c, "error: invalid subscription ID")
+			h.sendNotice(c, prefixInvalid+": invalid subscription ID")
+			return
+		}
+		limitation := h.relayInfo.Limitation
+		if limitation != nil && limitation.MaxSubidLength > 0 && len(subID) > limitation.MaxSubidLength {
+			h.sendClosed(c, subID, fmt.Sprintf("%s: subscription id longer than %d characters", prefixInvalid, limitation.MaxSubidLength))
 			return
 		}
 		var filters []nostr.Filter
@@ -203,6 +284,23 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 			var f nostr.Filter
 			if err := json.Unmarshal(raw[i], &f); err == nil {
 				filters = append(filters, f)
+			}
+		}
+		if limitation != nil && limitation.MaxFilters > 0 && len(filters) > limitation.MaxFilters {
+			h.sendClosed(c, subID, fmt.Sprintf("%s: too many filters, max %d", prefixRestricted, limitation.MaxFilters))
+			return
+		}
+		if limitation != nil && limitation.MaxSubscriptions > 0 {
+			if _, exists := c.subscriptions.Load(subID); !exists && countSubscriptions(c) >= limitation.MaxSubscriptions {
+				h.sendClosed(c, subID, fmt.Sprintf("%s: too many subscriptions, max %d", prefixRestricted, limitation.MaxSubscriptions))
+				return
+			}
+		}
+		if limitation != nil && limitation.MaxLimit > 0 {
+			for i := range filters {
+				if filters[i].Limit > limitation.MaxLimit {
+					filters[i].Limit = limitation.MaxLimit
+				}
 			}
 		}
 		h.handleReq(c, subID, filters)
@@ -289,8 +387,41 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 
 func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 	if ok, err := ev.CheckSignature(); err != nil || !ok {
-		h.sendOK(c, ev.ID, false, "invalid: signature verification failed")
+		h.sendOK(c, ev.ID, false, prefixInvalid+": signature verification failed")
 		return
+	}
+
+	if c.eventLimiter != nil && !c.eventLimiter.Allow() {
+		h.sendOK(c, ev.ID, false, prefixRateLimited+": publish rate exceeded")
+		return
+	}
+
+	limitation := h.relayInfo.Limitation
+	if limitation != nil {
+		if limitation.MaxContentLength > 0 && len(ev.Content) > limitation.MaxContentLength {
+			h.sendOK(c, ev.ID, false, fmt.Sprintf("%s: content longer than %d characters", prefixInvalid, limitation.MaxContentLength))
+			return
+		}
+		if limitation.MaxEventTags > 0 && len(ev.Tags) > limitation.MaxEventTags {
+			h.sendOK(c, ev.ID, false, fmt.Sprintf("%s: more than %d tags", prefixInvalid, limitation.MaxEventTags))
+			return
+		}
+		if reason, ok := checkTimestampBounds(ev.CreatedAt, limitation); !ok {
+			h.sendOK(c, ev.ID, false, reason)
+			return
+		}
+		if limitation.MinPowDifficulty > 0 {
+			if err := nip13.Check(ev.ID, limitation.MinPowDifficulty); err != nil {
+				h.sendOK(c, ev.ID, false, fmt.Sprintf("%s: insufficient proof of work: %v", prefixPow, err))
+				return
+			}
+		}
+		// A relay-wide auth requirement gates every publish; restricted_writes
+		// carries the same meaning here since no separate allow-list exists.
+		if (limitation.AuthRequired || limitation.RestrictedWrites) && c.authPubkey == "" {
+			h.sendOK(c, ev.ID, false, prefixAuthRequired+": this relay requires authentication to publish")
+			return
+		}
 	}
 
 	// NIP-70: Protected Events
@@ -304,18 +435,19 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 
 	if protected {
 		if c.authPubkey == "" {
-			h.sendOK(c, ev.ID, false, "auth-required: this event may only be published by its author")
+			h.sendOK(c, ev.ID, false, prefixAuthRequired+": this event may only be published by its author")
 			return
 		}
 		if c.authPubkey != ev.PubKey {
-			h.sendOK(c, ev.ID, false, "restricted: this event may only be published by its author")
+			h.sendOK(c, ev.ID, false, prefixRestricted+": this event may only be published by its author")
 			return
 		}
 	}
 
 	success, err := h.service.SaveEvent(context.Background(), ev)
 	if err != nil {
-		h.sendOK(c, ev.ID, false, fmt.Sprintf("error: %v", err))
+		slog.Error("save event failed", "event_id", ev.ID, "error", err)
+		h.sendOK(c, ev.ID, false, prefixError+": failed to save event")
 		return
 	}
 
@@ -323,8 +455,36 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 		h.sendOK(c, ev.ID, true, "")
 		h.broadcast(ev)
 	} else {
-		h.sendOK(c, ev.ID, false, "error: failed to save event")
+		h.sendOK(c, ev.ID, false, prefixError+": failed to save event")
 	}
+}
+
+// checkTimestampBounds validates an event's created_at against the
+// configured NIP-11 lower/upper offsets from the current time.
+func checkTimestampBounds(createdAt nostr.Timestamp, limitation *RelayLimitation) (string, bool) {
+	now := nostr.Now()
+	if limitation.CreatedAtLowerLimit > 0 {
+		lower := now - nostr.Timestamp(limitation.CreatedAtLowerLimit)
+		if createdAt < lower {
+			return fmt.Sprintf("%s: created_at is more than %d seconds in the past", prefixInvalid, limitation.CreatedAtLowerLimit), false
+		}
+	}
+	if limitation.CreatedAtUpperLimit > 0 {
+		upper := now + nostr.Timestamp(limitation.CreatedAtUpperLimit)
+		if createdAt > upper {
+			return fmt.Sprintf("%s: created_at is more than %d seconds in the future", prefixInvalid, limitation.CreatedAtUpperLimit), false
+		}
+	}
+	return "", true
+}
+
+func countSubscriptions(c *Client) int {
+	n := 0
+	c.subscriptions.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
 }
 
 func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter) {
@@ -397,13 +557,14 @@ func (h *RelayHandler) broadcast(ev *nostr.Event) {
 func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filter, initialMsgHex string) {
 	initialMsg, err := hex.DecodeString(initialMsgHex)
 	if err != nil {
-		h.sendNegErr(c, subID, "invalid: could not decode hex message")
+		h.sendNegErr(c, subID, prefixInvalid+": could not decode hex message")
 		return
 	}
 
 	events, err := h.service.QueryEventsSorted(context.Background(), filter)
 	if err != nil {
-		h.sendNegErr(c, subID, fmt.Sprintf("error: %v", err))
+		slog.Error("negentropy query failed", "sub_id", subID, "error", err)
+		h.sendNegErr(c, subID, prefixError+": could not build reconciliation set")
 		return
 	}
 
@@ -419,7 +580,8 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 
 	storage, err := negentropy.NewNegentropy(items, 0)
 	if err != nil {
-		h.sendNegErr(c, subID, fmt.Sprintf("error: %v", err))
+		slog.Error("negentropy session init failed", "sub_id", subID, "error", err)
+		h.sendNegErr(c, subID, prefixError+": could not open reconciliation session")
 		return
 	}
 
@@ -432,7 +594,8 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 
 	response, err := storage.Reconcile(initialMsg)
 	if err != nil {
-		h.sendNegErr(c, subID, fmt.Sprintf("error: %v", err))
+		slog.Error("negentropy reconcile failed", "sub_id", subID, "error", err)
+		h.sendNegErr(c, subID, prefixError+": reconciliation failed")
 		return
 	}
 
@@ -449,13 +612,14 @@ func (h *RelayHandler) handleNegMsg(c *Client, subID string, msgHex string) {
 
 	msg, err := hex.DecodeString(msgHex)
 	if err != nil {
-		h.sendNegErr(c, subID, "invalid: could not decode hex message")
+		h.sendNegErr(c, subID, prefixInvalid+": could not decode hex message")
 		return
 	}
 
 	response, err := session.storage.Reconcile(msg)
 	if err != nil {
-		h.sendNegErr(c, subID, fmt.Sprintf("error: %v", err))
+		slog.Error("negentropy reconcile failed", "sub_id", subID, "error", err)
+		h.sendNegErr(c, subID, prefixError+": reconciliation failed")
 		return
 	}
 
@@ -467,54 +631,61 @@ func (h *RelayHandler) handleNegMsg(c *Client, subID string, msgHex string) {
 	h.sendNegMsg(c, subID, hex.EncodeToString(response))
 }
 
-func (h *RelayHandler) sendEvent(c *Client, subID string, ev *nostr.Event) {
-	msg, _ := json.Marshal([]any{"EVENT", subID, ev})
+// write sends a pre-encoded message with a bounded write deadline so a
+// stalled or malicious client cannot block the sender indefinitely. Errors
+// (including deadline exceeded) are logged and swallowed; the caller already
+// has nothing useful to do with a failed send to one client.
+func (h *RelayHandler) write(c *Client, msg []byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	c.conn.SetWriteDeadline(time.Now().Add(writeDeadline))
+	if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+		slog.Warn("write failed, dropping message for client", "error", err)
+	}
+}
+
+func (h *RelayHandler) sendEvent(c *Client, subID string, ev *nostr.Event) {
+	msg, _ := json.Marshal([]any{"EVENT", subID, ev})
+	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendOK(c *Client, eventID string, ok bool, reason string) {
 	msg, _ := json.Marshal([]any{"OK", eventID, ok, reason})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendNotice(c *Client, message string) {
 	msg, _ := json.Marshal([]any{"NOTICE", message})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendAuth(c *Client, challenge string) {
 	msg, _ := json.Marshal([]any{"AUTH", challenge})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendEOSE(c *Client, subID string) {
 	msg, _ := json.Marshal([]any{"EOSE", subID})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	h.write(c, msg)
+}
+
+// sendClosed sends a NIP-01 CLOSED message and drops the subscription, used
+// when a REQ is rejected instead of served.
+func (h *RelayHandler) sendClosed(c *Client, subID string, reason string) {
+	c.subscriptions.Delete(subID)
+	msg, _ := json.Marshal([]any{"CLOSED", subID, reason})
+	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendNegErr(c *Client, subID string, reason string) {
 	msg, _ := json.Marshal([]any{"NEG-ERR", subID, reason})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	h.write(c, msg)
 }
 
 func (h *RelayHandler) sendNegMsg(c *Client, subID string, msgHex string) {
 	slog.Info("Sending NEG-MSG", "subID", subID, "msgHex", msgHex)
 	msg, _ := json.Marshal([]any{"NEG-MSG", subID, msgHex})
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.conn.WriteMessage(websocket.TextMessage, msg)
+	h.write(c, msg)
 }
 
 func isWebSocketUpgrade(r *http.Request) bool {

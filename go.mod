@@ -7,9 +7,11 @@ toolchain go1.24.2
 require (
 	github.com/duckdb/duckdb-go/v2 v2.5.5
 	github.com/gorilla/websocket v1.5.3
+	github.com/illuzen/go-negentropy v0.0.0-20240715064232-a46d8ae31fc0
 	github.com/nbd-wtf/go-nostr v0.52.3
 	github.com/spf13/viper v1.21.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/time v0.14.0
 )
 
 require (
@@ -35,7 +37,6 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/illuzen/go-negentropy v0.0.0-20240715064232-a46d8ae31fc0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
