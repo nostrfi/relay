@@ -16,7 +16,7 @@ func main() {
 		PubKey:    pk,
 		CreatedAt: nostr.Now(),
 		Kind:      1,
-		Tags:      nil,
+		Tags:      nostr.Tags{{"p", "test"}},
 		Content:   "Hello, Nostr! This is a test event from wscat.",
 	}
 	err := ev.Sign(sk)
