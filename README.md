@@ -109,6 +109,36 @@ relay_info:
   supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
 ```
 
+### Resource limits
+
+Every field under `relay_info.limitation` is enforced on the request path, not just advertised. Set a field to `0` (or omit it) to leave that dimension unenforced.
+
+```yaml
+relay_info:
+  limitation:
+    max_message_length: 65536      # bytes; enforced on the WebSocket read
+    max_subscriptions: 100         # concurrent REQ subscriptions per connection
+    max_filters: 20                # filters allowed in a single REQ
+    max_limit: 500                 # a REQ's requested "limit" is clamped to this, not rejected
+    max_subid_length: 64           # characters
+    max_event_tags: 2000           # tags per published event
+    max_content_length: 65536      # characters per published event
+    min_pow_difficulty: 0          # NIP-13 leading-zero-bit requirement; 0 disables
+    auth_required: false           # require NIP-42 auth before any EVENT is accepted
+    payment_required: false        # must stay false: no payment mechanism is implemented,
+                                    # and the relay refuses to start if this is true
+    restricted_writes: false       # currently equivalent to auth_required (no allow-list exists)
+    created_at_lower_limit: 94608000 # seconds; rejects events older than now minus this
+    created_at_upper_limit: 900      # seconds; rejects events further in the future than this
+
+resource_limits:                 # operational controls outside the NIP-11 spec
+  max_connections: 1000          # total concurrent WebSocket connections
+  messages_per_second: 20        # per-connection token-bucket rate for all messages
+  events_per_second: 5           # per-connection token-bucket rate for EVENT publishes
+```
+
+Rejections use a stable, machine-readable prefix (`invalid:`, `restricted:`, `rate-limited:`, `auth-required:`, `pow:`, `error:`) and never include raw internal error text. `REQ`s rejected for filter count, subscription count, or subscription-id length receive a `CLOSED` message; `EVENT`s rejected for any reason receive `OK false <reason>`.
+
 ## Database
 
 The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `db/relay.db`.
