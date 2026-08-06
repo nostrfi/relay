@@ -107,11 +107,18 @@ type WebsocketConfig struct {
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
+// RetentionConfig controls the background purge-and-checkpoint worker that
+// removes expired events (see repository.PurgeExpired) and reclaims space.
+type RetentionConfig struct {
+	PurgeIntervalSeconds int `mapstructure:"purge_interval_seconds"`
+}
+
 type Config struct {
 	RelayInfo      RelayInfo       `mapstructure:"relay_info"`
 	ResourceLimits ResourceLimits  `mapstructure:"resource_limits"`
 	Auth           AuthConfig      `mapstructure:"auth"`
 	Websocket      WebsocketConfig `mapstructure:"websocket"`
+	Retention      RetentionConfig `mapstructure:"retention"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -147,6 +154,10 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Auth.MaxEventAgeSeconds == 0 {
 		cfg.Auth.MaxEventAgeSeconds = 600
+	}
+
+	if cfg.Retention.PurgeIntervalSeconds == 0 {
+		cfg.Retention.PurgeIntervalSeconds = 3600
 	}
 
 	return &cfg, nil

@@ -21,65 +21,9 @@ func NewDuckDBRepository(path string) (Repository, error) {
 		return nil, err
 	}
 
-	// Create tables
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS events (
-			id TEXT PRIMARY KEY,
-			pubkey TEXT,
-			created_at INTEGER,
-			kind INTEGER,
-			content TEXT,
-			sig TEXT,
-			d_tag TEXT
-		);
-		CREATE INDEX IF NOT EXISTS idx_events_pubkey ON events (pubkey);
-		CREATE INDEX IF NOT EXISTS idx_events_kind ON events (kind);
-		CREATE INDEX IF NOT EXISTS idx_events_created_at ON events (created_at);
-
-		CREATE TABLE IF NOT EXISTS tags (
-			event_id TEXT,
-			tag TEXT,
-			value TEXT
-		);
-		CREATE INDEX IF NOT EXISTS idx_tags_event_id ON tags (event_id);
-		CREATE INDEX IF NOT EXISTS idx_tags_tag_value ON tags (tag, value);
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	// Schema migration: Add expiration column if it doesn't exist
-	var hasExpiration bool
-	rows, err := db.Query("PRAGMA table_info('events')")
-	if err != nil {
-		return nil, fmt.Errorf("failed to query table info: %w", err)
-	}
-	for rows.Next() {
-		var cid int
-		var name, dtype string
-		var notnull bool
-		var dfltValue any
-		var pk bool
-		if err := rows.Scan(&cid, &name, &dtype, &notnull, &dfltValue, &pk); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("failed to scan table info: %w", err)
-		}
-		if name == "expiration" {
-			hasExpiration = true
-			break
-		}
-	}
-	rows.Close()
-
-	if !hasExpiration {
-		_, err = db.Exec("ALTER TABLE events ADD COLUMN expiration INTEGER")
-		if err != nil {
-			return nil, fmt.Errorf("failed to add expiration column: %w", err)
-		}
-		_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_events_expiration ON events (expiration)")
-		if err != nil {
-			return nil, fmt.Errorf("failed to create expiration index: %w", err)
-		}
+	if err := RunMigrations(context.Background(), db); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	return &duckDBRepository{db: db}, nil
