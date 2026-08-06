@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -21,12 +22,15 @@ import (
 	"relay/internal/relay/handler"
 	"relay/internal/relay/repository"
 	"relay/internal/relay/service"
+	"relay/pkg/metrics"
 
 	"github.com/gorilla/websocket"
 	negentropy "github.com/illuzen/go-negentropy"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func()) {
@@ -2214,4 +2218,162 @@ func TestReadyzWithRealRepositoryClosed(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+}
+
+// startTestMuxServer starts a full server (repository, RelayHandler, and the
+// production NewMux routing) so metrics tests exercise the exact same
+// wiring used by cmd/relay/main.go, including /metrics.
+func startTestMuxServer(t *testing.T) (*httptest.Server, repository.Repository, func()) {
+	t.Helper()
+	tmpDir, err := os.MkdirTemp("", "relay-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	dbPath := filepath.Join(tmpDir, "test.db")
+	repo, err := repository.NewDuckDBRepository(dbPath)
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		t.Fatalf("failed to open repository: %v", err)
+	}
+	svc := service.NewRelayService(repo)
+	relayHandler := handler.NewRelayHandler(svc, handler.RelayInfo{}, "test")
+	server := httptest.NewServer(handler.NewMux(relayHandler, repo.Ping))
+	cleanup := func() {
+		server.Close()
+		repo.Close()
+		os.RemoveAll(tmpDir)
+	}
+	return server, repo, cleanup
+}
+
+func scrapeMetrics(t *testing.T, server *httptest.Server) string {
+	t.Helper()
+	resp, err := http.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics: unexpected status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read /metrics body: %v", err)
+	}
+	return string(body)
+}
+
+func TestMetricsExposition(t *testing.T) {
+	server, _, cleanup := startTestMuxServer(t)
+	defer cleanup()
+
+	// Exercise a representative set of flows so every metric family has
+	// something to report, then confirm each is present in the scrape.
+	c := connectTestRelay(t, server)
+	ev := signedEvent(t, 1, "hi", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	c.readOK(t)
+
+	subID := "metrics_sub"
+	req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{Kinds: []int{1}}})
+	c.WriteMessage(websocket.TextMessage, req)
+	for {
+		_, m, _ := c.ReadMessage()
+		var raw []any
+		json.Unmarshal(m, &raw)
+		if raw[0] == "EOSE" {
+			break
+		}
+	}
+
+	// Trigger a rejection (malformed EVENT payload).
+	c.WriteMessage(websocket.TextMessage, []byte(`["EVENT", "not-an-event"]`))
+	c.readOK(t)
+
+	c.Close()
+	time.Sleep(20 * time.Millisecond) // let the disconnect defer run before scraping
+
+	body := scrapeMetrics(t, server)
+	for _, name := range []string{
+		"relay_connections_active",
+		"relay_messages_total",
+		"relay_rejections_total",
+		"relay_subscriptions_active",
+		"relay_query_duration_seconds",
+		"relay_events_stored_total",
+		"relay_save_failures_total",
+	} {
+		assert.Contains(t, body, name, "expected metric %q to appear in /metrics output", name)
+	}
+}
+
+func TestMetricsConnectionsActiveDelta(t *testing.T) {
+	server, _, cleanup := startTestMuxServer(t)
+	defer cleanup()
+
+	before := testutil.ToFloat64(metrics.ConnectionsActive)
+
+	c := connectTestRelay(t, server)
+	during := testutil.ToFloat64(metrics.ConnectionsActive)
+	assert.Equal(t, before+1, during, "connecting should increment the active-connections gauge")
+
+	c.Close()
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(metrics.ConnectionsActive) == before
+	}, time.Second, 5*time.Millisecond, "disconnecting should decrement the active-connections gauge back down")
+}
+
+func TestMetricsEventsStoredDelta(t *testing.T) {
+	server, _, cleanup := startTestMuxServer(t)
+	defer cleanup()
+
+	before := testutil.ToFloat64(metrics.EventsStoredTotal)
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	ev := signedEvent(t, 1, "hi", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	c.readOK(t)
+
+	after := testutil.ToFloat64(metrics.EventsStoredTotal)
+	assert.Equal(t, before+1, after, "a successful publish should increment the events-stored counter")
+}
+
+func TestNegentropyNoPayloadInLogs(t *testing.T) {
+	var buf bytes.Buffer
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prevLogger)
+
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	subID := "neg_log_test"
+	openMsg, _ := json.Marshal([]any{"NEG-OPEN", subID, nostr.Filter{}, "6100000000"})
+	c.WriteMessage(websocket.TextMessage, openMsg)
+
+	// Drain until we see a NEG-MSG (or NEG-ERR) reply, confirming the server
+	// has processed NEG-OPEN and logged whatever it's going to log for it.
+	for {
+		_, m, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var raw []any
+		if err := json.Unmarshal(m, &raw); err != nil {
+			continue
+		}
+		if raw[0] == "NEG-MSG" || raw[0] == "NEG-ERR" {
+			break
+		}
+	}
+
+	logged := buf.String()
+	assert.NotContains(t, logged, "6100000000", "the raw Negentropy hex payload must never be logged")
+	assert.Contains(t, logged, subID, "the subscription ID may still be logged")
 }
