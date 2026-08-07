@@ -1,0 +1,31 @@
+# TLS-terminating overlay. Bring up alongside docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# Caddy becomes the sole public entry point; the relay is only reachable
+# through it via the internal Docker network. Port 8443 is used here because
+# this file has been exercised in a rootless-container environment that
+# cannot bind privileged host ports (<1024) without extra host configuration.
+# On a host that can bind privileged ports (typical for a real server/VM),
+# change "8443:443" to "443:443" and add "80:80" for the ACME HTTP challenge
+# needed by a real (non-`tls internal`) certificate — see Caddyfile.
+services:
+  relay:
+    ports: !override []
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: nostrfi-relay-caddy
+    restart: unless-stopped
+    depends_on:
+      - relay
+    ports:
+      - "8443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:

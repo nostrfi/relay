@@ -3,7 +3,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: nostrfi/relay:latest
+    # RELAY_VERSION selects which CI-published tag to run — see README.md's
+    # "Deployment" section for the rollback recipe. Unset, this still builds
+    # and tags locally exactly as before (`docker compose up --build`).
+    image: ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}
     container_name: nostrfi-relay
     restart: unless-stopped
     ports:

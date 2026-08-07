@@ -220,3 +220,29 @@ go run ./cmd/relay -restore /path/to/backup-dir
 Both flags run the requested operation and exit — they do not start the server. `-backup` writes a `backup-manifest.json` (event and tag row counts) alongside the DuckDB export; `-restore` reads that manifest back, imports the backup, and fails loudly if the restored row counts don't match or a smoke-test query fails. `-restore` refuses to run if `db/relay.db` already exists, so it never silently merges with or overwrites a live database — move or remove the existing file first.
 
 This tool is deliberately not scheduled or triggered automatically by the relay itself: running it on a schedule, storing backups off-host, and defining a recovery point objective around that cadence are deployment-layer responsibilities. **Recovery time objective**: restart time plus however long `-restore` takes against your data volume — measure this for your own dataset size as part of your runbook, since it scales with database size and has not been benchmarked at production scale here.
+
+## Deployment
+
+The relay itself never terminates TLS — see `operating-model.md`'s application-vs-deployment boundary. `docker-compose.yml`'s `image` now references `ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}`, the tag CI actually publishes (GitVersion-driven semver, `sha-<shortsha>`, and `latest`), so both TLS termination and rollback below use the real deployment artifact rather than a locally-built, disconnected image name.
+
+### TLS termination
+
+`docker-compose.tls.yml` is an overlay that adds a [Caddy](https://caddyserver.com/) reverse proxy in front of the relay and removes the relay's own host-published port, so Caddy becomes the sole public entry point:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+curl https://localhost:8443/ -H "Accept: application/nostr+json"   # self-signed locally; use -k or trust Caddy's local CA
+```
+
+The bundled `Caddyfile` uses `tls internal` (Caddy issues itself a locally-trusted certificate) so this works out of the box with no domain or DNS setup — exactly what's exercised above. For an internet-facing deployment: replace `localhost` in the `Caddyfile` with your real domain and delete the `tls internal` line; Caddy then obtains and renews a real Let's Encrypt certificate automatically via ACME, no other configuration changes needed. Port `8443` is used above because this was verified in a rootless-container environment that can't bind privileged host ports without extra host configuration — on a host that can, map `443:443` (and `80:80` for the ACME HTTP challenge) instead.
+
+### Rollback
+
+Every CI build publishes to `ghcr.io/nostrfi/relay` under several tags (see `.github/workflows/ci.yml`): a full semver (`1.2.3`), `sha-<shortsha>`, and `latest` (non-prerelease builds only). To run a specific previously-published version, or roll back to one:
+
+```sh
+RELAY_VERSION=1.2.2 docker compose pull relay
+RELAY_VERSION=1.2.2 docker compose up -d relay
+```
+
+This mechanism — swap `RELAY_VERSION`, then recreate the container — is what was exercised during development (using two locally-built images standing in for two releases, since pulling the real published tags requires registry credentials not available in every environment): deploying one version, then switching to the other, confirms the running version (visible in the NIP-11 `version` field) changes correctly on each swap.
