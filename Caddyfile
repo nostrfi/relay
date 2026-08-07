@@ -1,0 +1,17 @@
+# Example TLS-terminating reverse proxy for the relay. See README.md's
+# "Deployment" section for how to bring this up alongside docker-compose.yml.
+#
+# `tls internal` makes Caddy issue itself a locally-trusted certificate,
+# which is what this file is set up for out of the box (local testing,
+# no public domain required). For an internet-facing deployment:
+#
+#   1. Replace `localhost` below with your real domain.
+#   2. Delete the `tls internal` line.
+#
+# Caddy will then automatically obtain and renew a Let's Encrypt certificate
+# via ACME — no other configuration changes are needed.
+
+localhost {
+	tls internal
+	reverse_proxy relay:8080
+}
