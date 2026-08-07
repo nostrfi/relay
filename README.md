@@ -246,3 +246,13 @@ RELAY_VERSION=1.2.2 docker compose up -d relay
 ```
 
 This mechanism — swap `RELAY_VERSION`, then recreate the container — is what was exercised during development (using two locally-built images standing in for two releases, since pulling the real published tags requires registry credentials not available in every environment): deploying one version, then switching to the other, confirms the running version (visible in the NIP-11 `version` field) changes correctly on each swap.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request against `master`:
+
+1. `go vet ./...`
+2. **Vulnerability scan**: `go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...` — pinned to an exact version for reproducibility, not `@latest`. A finding fails the build; it is not merely reported. Since `govulncheck` also checks the standard library itself against the pinned toolchain, keeping `go.mod`'s `toolchain` directive reasonably current is part of keeping this gate green — it isn't only about this module's direct dependencies.
+3. `go build`, then `go test -race ./tests/...`
+
+Version tagging (GitVersion), the Docker image build/push to `ghcr.io/nostrfi/relay`, and GitHub Releases on tag pushes run in later jobs in the same workflow, gated on the steps above passing.
