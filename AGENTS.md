@@ -4,7 +4,7 @@ Guidance for AI coding agents (Junie, Claude, Codex, etc.) working in this repos
 
 ## Project Overview
 
-This is a **Nostr Relay** implementation written in **Go 1.24**. It speaks the Nostr WebSocket protocol and implements a range of NIPs (NIP-01, 02, 09, 11, 17, 22, 28, 40, 42, 70, 71, 77).
+This is a **Nostr Relay** implementation written in **Go 1.25**. It speaks the Nostr WebSocket protocol and implements a range of NIPs (NIP-01, 02, 09, 11, 17, 22, 28, 40, 42, 70, 71, 77).
 
 Key dependencies:
 - `github.com/gorilla/websocket` — WebSocket transport
@@ -55,7 +55,7 @@ go vet ./...
 
 Manual smoke tests are documented in `README.md` (`curl` for NIP-11, `wscat` for WebSocket NIPs).
 
-## Coding Conventions (Go 1.24)
+## Coding Conventions (Go 1.25)
 
 Agents MUST use modern Go idioms. Non-exhaustive checklist:
 
