@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -84,6 +85,22 @@ func (c *testClient) readClosed(t *testing.T) []any {
 func (c *testClient) readNotice(t *testing.T) []any {
 	t.Helper()
 	return c.readMessageType(t, "NOTICE")
+}
+
+// readMessageAny reads and decodes the next message without filtering by
+// type. Unlike readMessageType it does not skip AUTH, since callers use it
+// after the initial challenge has already been consumed by connectTestRelay.
+func (c *testClient) readMessageAny(t *testing.T) []any {
+	t.Helper()
+	_, msg, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var raw []any
+	if err := json.Unmarshal(msg, &raw); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	return raw
 }
 
 // readMessageType reads until it sees a message of the requested type,
@@ -269,6 +286,224 @@ func TestTagFidelity(t *testing.T) {
 		t.Fatal("expected to find published event in subscription")
 	}
 	assert.Equal(t, tags, received.Tags, "served event tags must match the published tags exactly, including multi-field, multi-letter, and single-element tags")
+}
+
+// TestNip01MalformedMessages documents current behavior for syntactically or
+// structurally invalid client messages: each must produce a graceful NOTICE
+// rejection rather than a dropped connection, silent hang, or panic.
+func TestNip01MalformedMessages(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	cases := []struct {
+		name    string
+		payload string
+	}{
+		{"not JSON at all", `not json`},
+		{"JSON object instead of array", `{"type":"EVENT"}`},
+		{"JSON string instead of array", `"EVENT"`},
+		{"JSON number instead of array", `42`},
+		{"empty array", `[]`},
+		{"single-element array", `["EVENT"]`},
+		{"non-string message type", `[1, "sub"]`},
+		{"EVENT with non-object payload", `["EVENT", "not-an-event"]`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := connectTestRelay(t, server)
+			defer c.Close()
+
+			if err := c.WriteMessage(websocket.TextMessage, []byte(tc.payload)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			raw := c.readMessageAny(t)
+			c.SetReadDeadline(time.Time{})
+
+			msgType, _ := raw[0].(string)
+			assert.Contains(t, []string{"NOTICE", "OK"}, msgType, "a malformed message must produce a graceful rejection, not silence")
+		})
+	}
+}
+
+// assertNoResponseWithinDeadline confirms the server neither sends a message
+// nor proactively closes the connection: the read must fail with a genuine
+// deadline-exceeded error, not a close/EOF, which would indicate the server
+// dropped the connection instead of silently ignoring the input. A gorilla
+// websocket connection is not usable for further reads once a deadline
+// fires, so callers must treat c as spent after this call.
+func assertNoResponseWithinDeadline(t *testing.T, c *testClient, within time.Duration) {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(within))
+	_, _, err := c.ReadMessage()
+	require.Error(t, err, "expected no response")
+	netErr, ok := err.(net.Error)
+	require.Truef(t, ok, "expected a timeout error, got %T: %v", err, err)
+	assert.True(t, netErr.Timeout(), "expected the server to silently ignore the input rather than close the connection, got: %v", err)
+}
+
+// TestNip01UnknownMessageTypeIsIgnored asserts that a message type outside
+// the relay's known vocabulary is silently ignored (per NIP-01, relays MAY
+// ignore messages they don't understand) rather than closing the connection.
+func TestNip01UnknownMessageTypeIsIgnored(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	unknown, _ := json.Marshal([]any{"FROB", "whatever"})
+	if err := c.WriteMessage(websocket.TextMessage, unknown); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	assertNoResponseWithinDeadline(t, c, 200*time.Millisecond)
+}
+
+// TestNip01CloseUnknownSubscription asserts that CLOSE for a subscription ID
+// the relay never opened is a silent no-op, not an error or a dropped
+// connection.
+func TestNip01CloseUnknownSubscription(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	closeMsg, _ := json.Marshal([]any{"CLOSE", "never-opened-sub"})
+	if err := c.WriteMessage(websocket.TextMessage, closeMsg); err != nil {
+		t.Fatalf("write CLOSE: %v", err)
+	}
+
+	assertNoResponseWithinDeadline(t, c, 200*time.Millisecond)
+}
+
+// TestNip01ExtraArrayElementsIgnored asserts that trailing elements beyond
+// what a message type consumes (e.g. a third element on an EVENT message)
+// are ignored rather than rejected.
+func TestNip01ExtraArrayElementsIgnored(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: "extra trailing element"}
+	ev.Sign(sk)
+	msg, _ := json.Marshal([]any{"EVENT", ev, "unexpected-extra-element"})
+	if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("write EVENT: %v", err)
+	}
+	okMsg := c.readOK(t)
+	if okMsg[2] != true {
+		t.Fatalf("expected positive OK despite a trailing extra array element, got %v", okMsg)
+	}
+}
+
+// TestNip01ReqWithNoFilters documents current behavior for a REQ carrying no
+// filter objects at all: it matches nothing (only EOSE, no stored or live
+// events), distinct from a REQ with a single empty filter object `{}`, which
+// NIP-01 defines as matching everything.
+func TestNip01ReqWithNoFilters(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now() - 5, Kind: 1, Content: "pre-existing event"}
+	ev.Sign(sk)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	c.readOK(t)
+
+	subID := "no_filters_sub"
+	req, _ := json.Marshal([]any{"REQ", subID})
+	if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write REQ: %v", err)
+	}
+
+	sawEvent := false
+	for {
+		_, raw, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var arr []json.RawMessage
+		json.Unmarshal(raw, &arr)
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		if msgType == "EVENT" {
+			sawEvent = true
+		} else if msgType == "EOSE" {
+			break
+		}
+	}
+	assert.False(t, sawEvent, "a REQ with zero filter objects must not match any stored event")
+}
+
+// TestNip01DuplicateEventSuppression asserts that republishing the exact
+// same signed event (identical ID) is idempotent from the client's
+// perspective: both publishes report success, and a subscription matching
+// the event delivers it exactly once, never twice.
+func TestNip01DuplicateEventSuppression(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: "publish me twice", Tags: nostr.Tags{{"t", "dup-check"}}}
+	ev.Sign(sk)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+
+	if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("write EVENT (first): %v", err)
+	}
+	firstOK := c.readOK(t)
+	if firstOK[2] != true {
+		t.Fatalf("expected positive OK on first publish, got %v", firstOK)
+	}
+
+	if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("write EVENT (duplicate): %v", err)
+	}
+	secondOK := c.readOK(t)
+	if secondOK[2] != true {
+		t.Fatalf("expected positive OK on duplicate publish (idempotent), got %v", secondOK)
+	}
+
+	subID := "dup_sub"
+	req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{IDs: []string{ev.ID}}})
+	if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write REQ: %v", err)
+	}
+
+	seen := 0
+	for {
+		_, raw, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var arr []json.RawMessage
+		json.Unmarshal(raw, &arr)
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		if msgType == "EVENT" {
+			seen++
+		} else if msgType == "EOSE" {
+			break
+		}
+	}
+	assert.Equal(t, 1, seen, "a duplicate publish must not cause the event to be delivered more than once")
 }
 
 func TestNip02(t *testing.T) {
@@ -1828,6 +2063,156 @@ func TestResourceLimitsMaxConnectionsConcurrent(t *testing.T) {
 	assert.LessOrEqual(t, accepted.Load(), int64(5), "accepted connections must never exceed max_connections")
 	assert.Greater(t, rejected.Load(), int64(0), "some concurrent connections beyond the cap should have been rejected")
 	assert.Equal(t, int64(attempts), accepted.Load()+rejected.Load())
+}
+
+// TestConcurrentSubscriptionsNoCrossTalk exercises live-fanout broadcast
+// under concurrency: three authors each publish from their own connection
+// at the same time, into three disjoint per-author subscriptions plus one
+// subscription matching all three. Every subscriber must receive exactly
+// the events its filter matches — no cross-talk, no missed live event —
+// which requires no coordination beyond what the relay's own broadcast
+// logic (internal/relay/handler/subscription.go) provides.
+func TestConcurrentSubscriptionsNoCrossTalk(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	const eventsPerAuthor = 5
+
+	type author struct {
+		name string
+		sk   string
+		pk   string
+	}
+	authors := make([]author, 3)
+	for i := range authors {
+		sk := nostr.GeneratePrivateKey()
+		pk, _ := nostr.GetPublicKey(sk)
+		authors[i] = author{name: fmt.Sprintf("author%d", i), sk: sk, pk: pk}
+	}
+	allPks := []string{authors[0].pk, authors[1].pk, authors[2].pk}
+
+	// Establish every connection up front, on the main test goroutine:
+	// connectTestRelay calls t.Fatalf on failure, which must not run on a
+	// spawned goroutine.
+	subConns := map[string]*testClient{}
+	for _, a := range authors {
+		subConns[a.name] = connectTestRelay(t, server)
+	}
+	subConns["all"] = connectTestRelay(t, server)
+	pubConns := make([]*testClient, len(authors))
+	for i := range authors {
+		pubConns[i] = connectTestRelay(t, server)
+	}
+	defer func() {
+		for _, c := range subConns {
+			c.Close()
+		}
+		for _, c := range pubConns {
+			c.Close()
+		}
+	}()
+
+	for _, a := range authors {
+		req, _ := json.Marshal([]any{"REQ", "sub_" + a.name, nostr.Filter{Authors: []string{a.pk}}})
+		require.NoError(t, subConns[a.name].WriteMessage(websocket.TextMessage, req))
+		subConns[a.name].readMessageType(t, "EOSE")
+	}
+	reqAll, _ := json.Marshal([]any{"REQ", "sub_all", nostr.Filter{Authors: allPks}})
+	require.NoError(t, subConns["all"].WriteMessage(websocket.TextMessage, reqAll))
+	subConns["all"].readMessageType(t, "EOSE")
+
+	received := map[string][]nostr.Event{}
+	var mu sync.Mutex
+	var readerWg sync.WaitGroup
+	for key, c := range subConns {
+		readerWg.Add(1)
+		go func(key string, c *testClient) {
+			defer readerWg.Done()
+			for {
+				_, raw, err := c.ReadMessage()
+				if err != nil {
+					return
+				}
+				var arr []json.RawMessage
+				if err := json.Unmarshal(raw, &arr); err != nil {
+					continue
+				}
+				var msgType string
+				json.Unmarshal(arr[0], &msgType)
+				if msgType != "EVENT" {
+					continue
+				}
+				var ev nostr.Event
+				json.Unmarshal(arr[2], &ev)
+				mu.Lock()
+				received[key] = append(received[key], ev)
+				mu.Unlock()
+			}
+		}(key, c)
+	}
+
+	// Errors from the publisher goroutines are reported via t.Errorf (safe
+	// from any goroutine), never t.Fatalf/require (main-goroutine only).
+	var pubWg sync.WaitGroup
+	for i, a := range authors {
+		pubWg.Add(1)
+		go func(a author, pc *testClient) {
+			defer pubWg.Done()
+			for i := range eventsPerAuthor {
+				ev := nostr.Event{PubKey: a.pk, CreatedAt: nostr.Now(), Kind: 1, Content: fmt.Sprintf("%s-%d", a.name, i)}
+				ev.Sign(a.sk)
+				msg, _ := json.Marshal([]any{"EVENT", ev})
+				if err := pc.WriteMessage(websocket.TextMessage, msg); err != nil {
+					t.Errorf("publish write failed for %s: %v", a.name, err)
+					return
+				}
+				for {
+					_, raw, err := pc.ReadMessage()
+					if err != nil {
+						t.Errorf("publish read failed for %s: %v", a.name, err)
+						return
+					}
+					var arr []json.RawMessage
+					if err := json.Unmarshal(raw, &arr); err != nil {
+						continue
+					}
+					var msgType string
+					json.Unmarshal(arr[0], &msgType)
+					if msgType == "OK" {
+						break
+					}
+				}
+			}
+		}(a, pubConns[i])
+	}
+	pubWg.Wait()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(received["all"])
+		mu.Unlock()
+		if n >= eventsPerAuthor*len(authors) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	for _, c := range subConns {
+		c.Close()
+	}
+	readerWg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, a := range authors {
+		got := received[a.name]
+		assert.Len(t, got, eventsPerAuthor, "author %s subscriber should receive exactly its own events", a.name)
+		for _, ev := range got {
+			assert.Equal(t, a.pk, ev.PubKey, "no cross-talk: subscriber for author %s must not receive another author's event", a.name)
+		}
+	}
+	assert.Len(t, received["all"], eventsPerAuthor*len(authors), "the multi-author subscriber must receive every author's events exactly once")
 }
 
 func TestConfigPaymentRequiredRejected(t *testing.T) {

@@ -167,3 +167,29 @@ func TestSaveEventCleansUpOrphanedTags(t *testing.T) {
 		assert.Equal(t, int64(0), tagRowCount(t, ctx, db, ev1.ID), "the deleted parameterized-replaceable event's tag rows must not survive")
 	})
 }
+
+// TestSaveEventDuplicatePublishDoesNotDuplicateTags is a regression test:
+// republishing an event that already exists (same ID) used to insert its
+// tags-index rows again on every call, since the tags-insert loop ran
+// unconditionally after an INSERT OR IGNORE that silently no-oped on the
+// duplicate. SaveEvent now checks RowsAffected and skips the tags loop
+// entirely when the event row wasn't newly inserted.
+func TestSaveEventDuplicatePublishDoesNotDuplicateTags(t *testing.T) {
+	db, _ := openTempDB(t)
+	ctx := context.Background()
+	require.NoError(t, RunMigrations(ctx, db))
+	repo := &duckDBRepository{db: db}
+	sk := nostr.GeneratePrivateKey()
+
+	ev := nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "republish me", Tags: nostr.Tags{{"t", "dup"}}}
+	signAndSave(t, ctx, repo, sk, &ev)
+	require.Equal(t, int64(1), tagRowCount(t, ctx, db, ev.ID))
+
+	// Republish the identical, already-signed event (not signAndSave, which
+	// would re-sign and mutate CreatedAt/ID).
+	ok, err := repo.SaveEvent(ctx, &ev)
+	require.NoError(t, err)
+	require.True(t, ok, "a duplicate publish must still report success")
+
+	assert.Equal(t, int64(1), tagRowCount(t, ctx, db, ev.ID), "republishing an existing event must not duplicate its tag rows")
+}

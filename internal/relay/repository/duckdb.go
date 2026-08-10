@@ -191,12 +191,23 @@ func saveEventTx(ctx context.Context, tx *sql.Tx, event *nostr.Event) (bool, err
 		return false, fmt.Errorf("failed to marshal tags: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, content, sig, d_tag, expiration, tags_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, event.ID, event.PubKey, event.CreatedAt, event.Kind, event.Content, event.Sig, dTag, expiration, string(tagsJSON))
 	if err != nil {
 		return false, err
+	}
+
+	// A duplicate publish of an event already in storage is not an error —
+	// report success as usual — but its tags index rows are already there
+	// too, so inserting them again would duplicate them on every republish.
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if inserted == 0 {
+		return true, nil
 	}
 
 	// This index only ever needs to serve NIP-01 single-letter tag filters
