@@ -63,6 +63,22 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version:     3,
+		description: "add events.tags_json column for full tag fidelity",
+		up: func(ctx context.Context, tx *sql.Tx) error {
+			hasColumn, err := columnExists(ctx, tx, "events", "tags_json")
+			if err != nil {
+				return err
+			}
+			if !hasColumn {
+				if _, err := tx.ExecContext(ctx, "ALTER TABLE events ADD COLUMN tags_json TEXT"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	},
 }
 
 func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {

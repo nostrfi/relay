@@ -65,6 +65,10 @@ func TestRunMigrationsBootstrapsPreFrameworkDatabase(t *testing.T) {
 	hasExpiration, err := columnExistsOnConn(ctx, db, "events", "expiration")
 	require.NoError(t, err)
 	assert.True(t, hasExpiration, "the expiration column migration should still apply to a pre-framework database")
+
+	hasTagsJSON, err := columnExistsOnConn(ctx, db, "events", "tags_json")
+	require.NoError(t, err)
+	assert.True(t, hasTagsJSON, "the tags_json column migration should still apply to a pre-framework database")
 }
 
 // columnExistsOnConn mirrors columnExists but works against a *sql.DB
