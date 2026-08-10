@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -29,17 +30,37 @@ func NewDuckDBRepository(path string) (Repository, error) {
 	return &duckDBRepository{db: db}, nil
 }
 
+// SaveEvent runs entirely inside one transaction: every branch that deletes
+// or replaces an event also removes that event's tag rows in the same
+// transaction, so a failure partway through never leaves orphaned tags or a
+// half-applied replace/delete.
 func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	saved, err := saveEventTx(ctx, tx, event)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return saved, nil
+}
+
+func saveEventTx(ctx context.Context, tx *sql.Tx, event *nostr.Event) (bool, error) {
 	// Handle replaceable and addressable events
 	if (event.Kind >= 10000 && event.Kind < 20000) || event.Kind == 0 || event.Kind == 3 {
-		_, err := r.db.ExecContext(ctx, "DELETE FROM events WHERE pubkey = ? AND kind = ? AND (created_at < ? OR (created_at = ? AND id > ?))",
-			event.PubKey, event.Kind, event.CreatedAt, event.CreatedAt, event.ID)
-		if err != nil {
+		if _, err := deleteMatchingEvents(ctx, tx, "pubkey = ? AND kind = ? AND (created_at < ? OR (created_at = ? AND id > ?))",
+			event.PubKey, event.Kind, event.CreatedAt, event.CreatedAt, event.ID); err != nil {
 			return false, err
 		}
 
 		var count int
-		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE pubkey = ? AND kind = ? AND (created_at > ? OR (created_at = ? AND id <= ?))",
+		err := tx.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE pubkey = ? AND kind = ? AND (created_at > ? OR (created_at = ? AND id <= ?))",
 			event.PubKey, event.Kind, event.CreatedAt, event.CreatedAt, event.ID).Scan(&count)
 		if err != nil {
 			return false, err
@@ -59,21 +80,18 @@ func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (b
 		}
 
 		if eTag != "" {
-			// Find all kind 41 events with the same 'e' tag
-			_, err := r.db.ExecContext(ctx, `
-				DELETE FROM events 
-				WHERE kind = 41 
+			if _, err := deleteMatchingEvents(ctx, tx, `
+				kind = 41
 				AND id IN (SELECT event_id FROM tags WHERE tag = 'e' AND value = ?)
 				AND (created_at < ? OR (created_at = ? AND id > ?))
-			`, eTag, event.CreatedAt, event.CreatedAt, event.ID)
-			if err != nil {
+			`, eTag, event.CreatedAt, event.CreatedAt, event.ID); err != nil {
 				return false, err
 			}
 
 			var count int
-			err = r.db.QueryRowContext(ctx, `
-				SELECT count(*) FROM events 
-				WHERE kind = 41 
+			err := tx.QueryRowContext(ctx, `
+				SELECT count(*) FROM events
+				WHERE kind = 41
 				AND id IN (SELECT event_id FROM tags WHERE tag = 'e' AND value = ?)
 				AND (created_at > ? OR (created_at = ? AND id <= ?))
 			`, eTag, event.CreatedAt, event.CreatedAt, event.ID).Scan(&count)
@@ -92,14 +110,13 @@ func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (b
 				break
 			}
 		}
-		_, err := r.db.ExecContext(ctx, "DELETE FROM events WHERE pubkey = ? AND kind = ? AND d_tag = ? AND (created_at < ? OR (created_at = ? AND id > ?))",
-			event.PubKey, event.Kind, dTag, event.CreatedAt, event.CreatedAt, event.ID)
-		if err != nil {
+		if _, err := deleteMatchingEvents(ctx, tx, "pubkey = ? AND kind = ? AND d_tag = ? AND (created_at < ? OR (created_at = ? AND id > ?))",
+			event.PubKey, event.Kind, dTag, event.CreatedAt, event.CreatedAt, event.ID); err != nil {
 			return false, err
 		}
 
 		var count int
-		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE pubkey = ? AND kind = ? AND d_tag = ? AND (created_at > ? OR (created_at = ? AND id <= ?))",
+		err := tx.QueryRowContext(ctx, "SELECT count(*) FROM events WHERE pubkey = ? AND kind = ? AND d_tag = ? AND (created_at > ? OR (created_at = ? AND id <= ?))",
 			event.PubKey, event.Kind, dTag, event.CreatedAt, event.CreatedAt, event.ID).Scan(&count)
 		if err != nil {
 			return false, err
@@ -116,9 +133,8 @@ func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (b
 			}
 			if tag[0] == "e" {
 				targetID := tag[1]
-				_, err := r.db.ExecContext(ctx, "DELETE FROM events WHERE id = ? AND pubkey = ?", targetID, event.PubKey)
-				if err != nil {
-					slog.Error("failed to delete event by e tag", "target_id", targetID, "error", err)
+				if _, err := deleteMatchingEvents(ctx, tx, "id = ? AND pubkey = ?", targetID, event.PubKey); err != nil {
+					return false, fmt.Errorf("failed to delete event by e tag %q: %w", targetID, err)
 				}
 			} else if tag[0] == "a" {
 				parts := strings.Split(tag[1], ":")
@@ -132,16 +148,14 @@ func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (b
 
 					if pubkey == event.PubKey {
 						if dTag != "" {
-							_, err := r.db.ExecContext(ctx, "DELETE FROM events WHERE pubkey = ? AND kind = ? AND d_tag = ? AND created_at <= ?",
-								pubkey, kind, dTag, event.CreatedAt)
-							if err != nil {
-								slog.Error("failed to delete event by a tag with d_tag", "pubkey", pubkey, "kind", kind, "d_tag", dTag, "error", err)
+							if _, err := deleteMatchingEvents(ctx, tx, "pubkey = ? AND kind = ? AND d_tag = ? AND created_at <= ?",
+								pubkey, kind, dTag, event.CreatedAt); err != nil {
+								return false, fmt.Errorf("failed to delete event by a tag %q: %w", tag[1], err)
 							}
 						} else {
-							_, err := r.db.ExecContext(ctx, "DELETE FROM events WHERE pubkey = ? AND kind = ? AND created_at <= ?",
-								pubkey, kind, event.CreatedAt)
-							if err != nil {
-								slog.Error("failed to delete event by a tag", "pubkey", pubkey, "kind", kind, "error", err)
+							if _, err := deleteMatchingEvents(ctx, tx, "pubkey = ? AND kind = ? AND created_at <= ?",
+								pubkey, kind, event.CreatedAt); err != nil {
+								return false, fmt.Errorf("failed to delete event by a tag %q: %w", tag[1], err)
 							}
 						}
 					}
@@ -172,20 +186,29 @@ func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (b
 		return false, fmt.Errorf("event already expired")
 	}
 
-	_, err := r.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, content, sig, d_tag, expiration)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, event.ID, event.PubKey, event.CreatedAt, event.Kind, event.Content, event.Sig, dTag, expiration)
+	tagsJSON, err := json.Marshal(event.Tags)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal tags: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO events (id, pubkey, created_at, kind, content, sig, d_tag, expiration, tags_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, event.ID, event.PubKey, event.CreatedAt, event.Kind, event.Content, event.Sig, dTag, expiration, string(tagsJSON))
 	if err != nil {
 		return false, err
 	}
 
+	// This index only ever needs to serve NIP-01 single-letter tag filters
+	// (`#e`, `#p`, ...), which match on a tag's name and first value alone —
+	// full tag fidelity for served events comes from tags_json above, not
+	// from this table.
 	for _, tag := range event.Tags {
 		if len(tag) < 2 {
 			continue
 		}
 		if len(tag[0]) == 1 && ((tag[0][0] >= 'a' && tag[0][0] <= 'z') || (tag[0][0] >= 'A' && tag[0][0] <= 'Z')) {
-			_, err = r.db.ExecContext(ctx, "INSERT INTO tags (event_id, tag, value) VALUES (?, ?, ?)", event.ID, tag[0], tag[1])
+			_, err = tx.ExecContext(ctx, "INSERT INTO tags (event_id, tag, value) VALUES (?, ?, ?)", event.ID, tag[0], tag[1])
 			if err != nil {
 				slog.Error("failed to insert tag", "event_id", event.ID, "tag", tag[0], "error", err)
 			}
@@ -193,6 +216,52 @@ func (r *duckDBRepository) SaveEvent(ctx context.Context, event *nostr.Event) (b
 	}
 
 	return true, nil
+}
+
+// deleteMatchingEvents deletes every event matching whereClause, along with
+// its tag rows, in two IN-list statements rather than a subquery on tags
+// nested inside a delete from tags (which would self-reference the table
+// being deleted from). Returns the number of events deleted.
+func deleteMatchingEvents(ctx context.Context, tx *sql.Tx, whereClause string, args ...any) (int64, error) {
+	ids, err := selectEventIDs(ctx, tx, "SELECT id FROM events WHERE "+whereClause, args...)
+	if err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	idArgs := make([]any, len(ids))
+	for i, id := range ids {
+		idArgs[i] = id
+	}
+	ph := placeholders(len(ids))
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tags WHERE event_id IN ("+ph+")", idArgs...); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM events WHERE id IN ("+ph+")", idArgs...); err != nil {
+		return 0, err
+	}
+	return int64(len(ids)), nil
+}
+
+func selectEventIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (r *duckDBRepository) QueryEvents(ctx context.Context, filter nostr.Filter) ([]*nostr.Event, error) {
@@ -208,21 +277,21 @@ func (r *duckDBRepository) queryEvents(ctx context.Context, filter nostr.Filter,
 	var args []any
 
 	if len(filter.IDs) > 0 {
-		conditions = append(conditions, fmt.Sprintf("e.id IN (%s)", r.placeholders(len(filter.IDs))))
+		conditions = append(conditions, fmt.Sprintf("e.id IN (%s)", placeholders(len(filter.IDs))))
 		for _, id := range filter.IDs {
 			args = append(args, id)
 		}
 	}
 
 	if len(filter.Authors) > 0 {
-		conditions = append(conditions, fmt.Sprintf("e.pubkey IN (%s)", r.placeholders(len(filter.Authors))))
+		conditions = append(conditions, fmt.Sprintf("e.pubkey IN (%s)", placeholders(len(filter.Authors))))
 		for _, author := range filter.Authors {
 			args = append(args, author)
 		}
 	}
 
 	if len(filter.Kinds) > 0 {
-		conditions = append(conditions, fmt.Sprintf("e.kind IN (%s)", r.placeholders(len(filter.Kinds))))
+		conditions = append(conditions, fmt.Sprintf("e.kind IN (%s)", placeholders(len(filter.Kinds))))
 		for _, kind := range filter.Kinds {
 			args = append(args, kind)
 		}
@@ -244,14 +313,14 @@ func (r *duckDBRepository) queryEvents(ctx context.Context, filter nostr.Filter,
 		}
 		conditions = append(conditions, fmt.Sprintf(`
 			e.id IN (SELECT event_id FROM tags WHERE tag = ? AND value IN (%s))
-		`, r.placeholders(len(values))))
+		`, placeholders(len(values))))
 		args = append(args, tag)
 		for _, val := range values {
 			args = append(args, val)
 		}
 	}
 
-	query := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig FROM events e"
+	query := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json FROM events e"
 	now := nostr.Now()
 	conditions = append(conditions, "(e.expiration IS NULL OR e.expiration > ?)")
 	args = append(args, now)
@@ -277,17 +346,35 @@ func (r *duckDBRepository) queryEvents(ctx context.Context, filter nostr.Filter,
 	var events []*nostr.Event
 	for rows.Next() {
 		var ev nostr.Event
-		err := rows.Scan(&ev.ID, &ev.PubKey, &ev.CreatedAt, &ev.Kind, &ev.Content, &ev.Sig)
+		var tagsJSON sql.NullString
+		err := rows.Scan(&ev.ID, &ev.PubKey, &ev.CreatedAt, &ev.Kind, &ev.Content, &ev.Sig, &tagsJSON)
 		if err != nil {
 			return nil, err
 		}
-		ev.Tags = r.getTags(ctx, ev.ID)
+		ev.Tags = r.reconstructTags(ctx, ev.ID, tagsJSON)
 		events = append(events, &ev)
 	}
 	return events, nil
 }
 
-func (r *duckDBRepository) placeholders(n int) string {
+// reconstructTags returns the event's tags with full fidelity when
+// tagsJSON was populated at save time. A row saved before the tags_json
+// migration has tagsJSON NULL; for that case only, fall back to the
+// lossy two-field reconstruction the relay used previously, since the
+// original tag fields were never stored and cannot be recovered.
+func (r *duckDBRepository) reconstructTags(ctx context.Context, eventID string, tagsJSON sql.NullString) nostr.Tags {
+	if !tagsJSON.Valid {
+		return r.getLegacyTags(ctx, eventID)
+	}
+	var tags nostr.Tags
+	if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err != nil {
+		slog.Error("failed to unmarshal tags_json, falling back to legacy reconstruction", "event_id", eventID, "error", err)
+		return r.getLegacyTags(ctx, eventID)
+	}
+	return tags
+}
+
+func placeholders(n int) string {
 	ps := make([]string, n)
 	for i := range n {
 		ps[i] = "?"
@@ -302,7 +389,12 @@ func (r *duckDBRepository) Close() error {
 	return nil
 }
 
-func (r *duckDBRepository) getTags(ctx context.Context, eventID string) nostr.Tags {
+// getLegacyTags reconstructs an event's tags from the tags index table,
+// which only ever recorded a tag's name and first value. It is the fallback
+// path for events saved before the tags_json migration (see
+// reconstructTags); every event saved since then is reconstructed from its
+// own tags_json column instead.
+func (r *duckDBRepository) getLegacyTags(ctx context.Context, eventID string) nostr.Tags {
 	rows, err := r.db.QueryContext(ctx, "SELECT tag, value FROM tags WHERE event_id = ?", eventID)
 	if err != nil {
 		return nil

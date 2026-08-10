@@ -197,6 +197,80 @@ func TestNip01(t *testing.T) {
 	}
 }
 
+// TestTagFidelity exercises full tag round-trip fidelity end to end over the
+// wire: a multi-field tag (relay hint + marker), a multi-letter tag name,
+// and a single-element tag (e.g. NIP-36's bare "content-warning") must all
+// come back from a REQ exactly as published, not truncated to a two-field
+// approximation.
+func TestTagFidelity(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+
+	tags := nostr.Tags{
+		{"e", "0000000000000000000000000000000000000000000000000000000000000001", "wss://relay.example/", "reply"},
+		{"published_at", "1700000000"},
+		{"content-warning"},
+		{"t", "one"},
+	}
+	ev := nostr.Event{
+		PubKey:    pk,
+		CreatedAt: nostr.Now(),
+		Kind:      1,
+		Tags:      tags,
+		Content:   "tag fidelity check",
+	}
+	ev.Sign(sk)
+
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("write EVENT: %v", err)
+	}
+	okMsg := c.readOK(t)
+	if okMsg[2] != true {
+		t.Fatalf("expected positive OK, got %v", okMsg)
+	}
+
+	subID := "tag_fidelity_sub"
+	req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{IDs: []string{ev.ID}}})
+	if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write REQ: %v", err)
+	}
+
+	var received *nostr.Event
+	for {
+		_, msg, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read EVENT/EOSE: %v", err)
+		}
+
+		var raw []json.RawMessage
+		json.Unmarshal(msg, &raw)
+		var msgType string
+		json.Unmarshal(raw[0], &msgType)
+
+		if msgType == "EVENT" {
+			var evReceived nostr.Event
+			json.Unmarshal(raw[2], &evReceived)
+			if evReceived.ID == ev.ID {
+				received = &evReceived
+			}
+		} else if msgType == "EOSE" {
+			break
+		}
+	}
+
+	if received == nil {
+		t.Fatal("expected to find published event in subscription")
+	}
+	assert.Equal(t, tags, received.Tags, "served event tags must match the published tags exactly, including multi-field, multi-letter, and single-element tags")
+}
+
 func TestNip02(t *testing.T) {
 	server, _, cleanup := startTestRelay(t)
 	defer cleanup()
