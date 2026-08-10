@@ -277,17 +277,15 @@ func (r *duckDBRepository) queryEvents(ctx context.Context, filter nostr.Filter,
 	var args []any
 
 	if len(filter.IDs) > 0 {
-		conditions = append(conditions, fmt.Sprintf("e.id IN (%s)", placeholders(len(filter.IDs))))
-		for _, id := range filter.IDs {
-			args = append(args, id)
-		}
+		cond, condArgs := prefixMatchCondition("e.id", filter.IDs)
+		conditions = append(conditions, cond)
+		args = append(args, condArgs...)
 	}
 
 	if len(filter.Authors) > 0 {
-		conditions = append(conditions, fmt.Sprintf("e.pubkey IN (%s)", placeholders(len(filter.Authors))))
-		for _, author := range filter.Authors {
-			args = append(args, author)
-		}
+		cond, condArgs := prefixMatchCondition("e.pubkey", filter.Authors)
+		conditions = append(conditions, cond)
+		args = append(args, condArgs...)
 	}
 
 	if len(filter.Kinds) > 0 {
@@ -380,6 +378,25 @@ func placeholders(n int) string {
 		ps[i] = "?"
 	}
 	return strings.Join(ps, ",")
+}
+
+// prefixMatchCondition builds an OR-combined WHERE fragment matching column
+// against any of values. Per NIP-01, "ids" and "authors" filter values
+// shorter than a full 64-character hex id/pubkey are prefix matches; a
+// full-length value uses exact equality (equivalent to a 64-character
+// prefix match, but index-friendly rather than a full scan).
+func prefixMatchCondition(column string, values []string) (string, []any) {
+	parts := make([]string, len(values))
+	args := make([]any, len(values))
+	for i, v := range values {
+		if len(v) == 64 {
+			parts[i] = column + " = ?"
+		} else {
+			parts[i] = "starts_with(" + column + ", ?)"
+		}
+		args[i] = v
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
 func (r *duckDBRepository) Close() error {

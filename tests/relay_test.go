@@ -197,6 +197,60 @@ func TestNip01(t *testing.T) {
 	}
 }
 
+// TestNip01PrefixFilter exercises NIP-01 prefix matching on "ids" and
+// "authors" end to end over the wire: a filter value shorter than the full
+// 64-character hex id/pubkey must match any event whose id/pubkey starts
+// with it, and a value that matches no stored event's prefix must return
+// nothing.
+func TestNip01PrefixFilter(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: "prefix filter check"}
+	ev.Sign(sk)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	okMsg := c.readOK(t)
+	if okMsg[2] != true {
+		t.Fatalf("expected positive OK, got %v", okMsg)
+	}
+
+	drainToEOSE := func(subID string, filter nostr.Filter) bool {
+		req, _ := json.Marshal([]any{"REQ", subID, filter})
+		c.WriteMessage(websocket.TextMessage, req)
+		found := false
+		for {
+			_, raw, err := c.ReadMessage()
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			var arr []json.RawMessage
+			json.Unmarshal(raw, &arr)
+			var msgType string
+			json.Unmarshal(arr[0], &msgType)
+			if msgType == "EVENT" {
+				var evReceived nostr.Event
+				json.Unmarshal(arr[2], &evReceived)
+				if evReceived.ID == ev.ID {
+					found = true
+				}
+			} else if msgType == "EOSE" {
+				break
+			}
+		}
+		return found
+	}
+
+	assert.True(t, drainToEOSE("prefix_id_sub", nostr.Filter{IDs: []string{ev.ID[:10]}}), "a short id prefix must match the event")
+	assert.True(t, drainToEOSE("prefix_author_sub", nostr.Filter{Authors: []string{pk[:10]}}), "a short author prefix must match the event")
+	assert.False(t, drainToEOSE("prefix_mismatch_sub", nostr.Filter{IDs: []string{"deadbeef"}}), "a non-matching prefix must match nothing")
+}
+
 // TestTagFidelity exercises full tag round-trip fidelity end to end over the
 // wire: a multi-field tag (relay hint + marker), a multi-letter tag name,
 // and a single-element tag (e.g. NIP-36's bare "content-warning") must all
