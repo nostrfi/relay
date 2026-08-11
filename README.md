@@ -16,6 +16,8 @@ A robust and modern Nostr relay written in Go, supporting a wide range of Nostr 
 - **NIP-70**: Protected Events
 - **NIP-71**: Video Events
 - **NIP-77**: Negentropy Syncing
+- **NIP-86**: Relay Management API (ban-list subset: pubkey/event bans, IP blocks)
+- **NIP-98**: HTTP Auth (used to authenticate NIP-86 management requests)
 
 ---
 
@@ -189,6 +191,27 @@ websocket:
 - **`auth.max_event_age_seconds`**: an `AUTH` event whose `created_at` is more than this many seconds away from the relay's clock, in either direction, is rejected with `invalid:`. Defaults to `600` (10 minutes) when unset via `LoadConfig`; `0` disables the check (only relevant when constructing the handler directly, e.g. in tests).
 - **`websocket.mode`**: `development` (default) preserves the original permissive behavior — every `Origin` is accepted. `production` is fail-closed: the relay refuses to start unless `websocket.allowed_origins` is non-empty, and any WebSocket upgrade with a missing, malformed, or unlisted `Origin` header is rejected with `403 Forbidden` before the connection is established.
 - Authentication never logs the challenge value or the raw `AUTH` event payload — only the resulting authenticated public key.
+
+### Moderation (NIP-86 / NIP-98)
+
+```yaml
+moderation:
+  admin_pubkey: "" # NIP-86 management API caller must sign as this pubkey (NIP-98); defaults to relay_info.pubkey when empty
+  max_event_age_seconds: 60 # NIP-98 auth events older or further in the future than this are rejected
+```
+
+The relay exposes the ban-list subset of the [NIP-86 relay management API](https://github.com/nostr-protocol/nips/blob/master/86.md) — `supportedmethods`, `banpubkey`/`unbanpubkey`/`listbannedpubkeys`, `banevent`/`allowevent`/`listbannedevents`, `blockip`/`unblockip`/`listblockedips` — as `POST` requests to the same URI as the WebSocket endpoint, with `Content-Type: application/nostr+json+rpc`:
+
+```json
+{"method": "banpubkey", "params": ["<32-byte-hex-pubkey>", "spam"]}
+```
+
+Every request must carry an `Authorization: Nostr <base64>` header containing a signed [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) kind-`27235` event, with the `payload` tag set (NIP-86 requires it; generic NIP-98 only recommends it) to the hex-encoded SHA-256 of the exact request body. A request is rejected with `401` if the signature, `u`/`method`/`payload` tags, or freshness check fails, or if the signing pubkey does not match `moderation.admin_pubkey`. Any NIP-98-capable client or tool (e.g. [`nak`](https://github.com/fiatjaf/nak)) can construct this header; the relay does not provide a browser UI for it.
+
+- **`banpubkey`**: rejects future `EVENT` publishes from that pubkey with `blocked:`. It does not retroactively hide events that pubkey already published — use `banevent` for a specific event.
+- **`banevent`**: excludes that event ID from `REQ` results. The underlying row is not deleted, so `allowevent` reverses it; independent of NIP-09 same-author deletion.
+- **`blockip`**: rejects future WebSocket upgrade attempts from that IP or CIDR with `403`. Uses the request's observed remote address, not a proxy header like `X-Forwarded-For` — behind a reverse proxy this sees the proxy's address, not the real client's.
+- Every management call, successful or not, is logged (`method`, `operator_pubkey`, and outcome) — never event content, private keys, or the raw request body.
 
 ## Database
 

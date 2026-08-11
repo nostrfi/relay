@@ -3,7 +3,7 @@ relay_info:
   description: "A custom Nostr relay configured via YAML."
   pubkey: "0000000000000000000000000000000000000000000000000000000000000001"
   contact: "admin@example.com"
-  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
+  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77, 86, 98]
   software: "https://github.com/nostrfi/relay"
   limitation:
     max_message_length: 65536
@@ -28,6 +28,10 @@ resource_limits:
 auth:
   relay_url: "" # set to this relay's canonical wss:// URL to enable NIP-42 endpoint binding
   max_event_age_seconds: 600 # NIP-42 AUTH events older or further in the future than this are rejected
+
+moderation:
+  admin_pubkey: "" # NIP-86 management API caller must sign as this pubkey (NIP-98); defaults to relay_info.pubkey when empty
+  max_event_age_seconds: 60 # NIP-98 auth events older or further in the future than this are rejected
 
 websocket:
   mode: "development" # "development" allows any Origin; set "production" for internet-facing deployment

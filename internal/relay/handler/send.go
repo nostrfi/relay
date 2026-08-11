@@ -21,6 +21,7 @@ const (
 	prefixAuthRequired = "auth-required"
 	prefixPow          = "pow"
 	prefixError        = "error"
+	prefixBlocked      = "blocked"
 )
 
 const writeDeadline = 5 * time.Second

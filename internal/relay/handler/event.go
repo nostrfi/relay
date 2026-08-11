@@ -12,6 +12,17 @@ import (
 )
 
 func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
+	banned, err := h.service.IsPubkeyBanned(context.Background(), ev.PubKey)
+	if err != nil {
+		slog.Error("moderation check failed", "error", err)
+		h.sendOK(c, ev.ID, false, prefixError+": failed to process event")
+		return
+	}
+	if banned {
+		h.sendOK(c, ev.ID, false, prefixBlocked+": this pubkey is not permitted to publish to this relay")
+		return
+	}
+
 	if ok, err := ev.CheckSignature(); err != nil || !ok {
 		h.sendOK(c, ev.ID, false, prefixInvalid+": signature verification failed")
 		return

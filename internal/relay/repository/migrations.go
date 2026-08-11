@@ -79,6 +79,30 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		version:     4,
+		description: "create moderation tables (banned_pubkeys, banned_events, blocked_ips)",
+		up: func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `
+				CREATE TABLE IF NOT EXISTS banned_pubkeys (
+					pubkey TEXT PRIMARY KEY,
+					reason TEXT,
+					banned_at INTEGER
+				);
+				CREATE TABLE IF NOT EXISTS banned_events (
+					event_id TEXT PRIMARY KEY,
+					reason TEXT,
+					banned_at INTEGER
+				);
+				CREATE TABLE IF NOT EXISTS blocked_ips (
+					ip_or_cidr TEXT PRIMARY KEY,
+					reason TEXT,
+					blocked_at INTEGER
+				);
+			`)
+			return err
+		},
+	},
 }
 
 func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {

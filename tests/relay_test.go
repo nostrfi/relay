@@ -3,6 +3,8 @@ package tests
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -41,10 +43,10 @@ func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func
 
 func startTestRelayWithLimits(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits) (*httptest.Server, repository.Repository, func()) {
 	t.Helper()
-	return startTestRelayFull(t, info, limits, handler.AuthConfig{}, handler.WebsocketConfig{})
+	return startTestRelayFull(t, info, limits, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
 }
 
-func startTestRelayFull(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits, auth handler.AuthConfig, ws handler.WebsocketConfig) (*httptest.Server, repository.Repository, func()) {
+func startTestRelayFull(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits, auth handler.AuthConfig, moderation handler.ModerationConfig, ws handler.WebsocketConfig) (*httptest.Server, repository.Repository, func()) {
 	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
@@ -60,7 +62,7 @@ func startTestRelayFull(t *testing.T, info handler.RelayInfo, limits handler.Res
 	}
 
 	svc := service.NewRelayService(repo)
-	h := handler.NewRelayHandlerFull(svc, info, limits, auth, ws, "test")
+	h := handler.NewRelayHandlerFull(svc, info, limits, auth, moderation, ws, "test")
 	server := httptest.NewServer(h)
 
 	cleanup := func() {
@@ -2067,8 +2069,10 @@ func TestResourceLimitsNoInternalErrorLeak(t *testing.T) {
 	c := connectTestRelay(t, server)
 	defer c.Close()
 
-	// Force SaveEvent to fail by closing the repository out from under the
-	// running relay, then confirm the client sees only the generic message.
+	// Force every DB-backed check to fail by closing the repository out from
+	// under the running relay, then confirm the client sees only a generic
+	// message. The moderation ban check runs first and hits this before
+	// SaveEvent would, so it's what actually produces the response here.
 	repo.Close()
 
 	ev := signedEvent(t, 1, "hi", nil)
@@ -2077,7 +2081,7 @@ func TestResourceLimitsNoInternalErrorLeak(t *testing.T) {
 
 	okMsg := c.readOK(t)
 	assert.Equal(t, false, okMsg[2])
-	assert.Equal(t, "error: failed to save event", okMsg[3])
+	assert.Equal(t, "error: failed to process event", okMsg[3])
 }
 
 func TestResourceLimitsMaxConnectionsConcurrent(t *testing.T) {
@@ -2300,7 +2304,7 @@ func TestNip42EndpointBinding(t *testing.T) {
 	const canonicalURL = "wss://relay.test.local"
 	auth := handler.AuthConfig{RelayURL: canonicalURL}
 	limitation := &handler.RelayLimitation{RestrictedWrites: true}
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.ModerationConfig{}, handler.WebsocketConfig{})
 	defer cleanup()
 
 	publishAndExpect := func(t *testing.T, c *testClient, sk string, wantOK bool) {
@@ -2404,7 +2408,7 @@ func TestNip42AuthFreshness(t *testing.T) {
 	const canonicalURL = "wss://relay.test.local"
 	auth := handler.AuthConfig{RelayURL: canonicalURL, MaxEventAgeSeconds: 600}
 	limitation := &handler.RelayLimitation{RestrictedWrites: true}
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.ModerationConfig{}, handler.WebsocketConfig{})
 	defer cleanup()
 
 	t.Run("fresh event authenticates", func(t *testing.T) {
@@ -2480,35 +2484,35 @@ func dialWithOrigin(t *testing.T, server *httptest.Server, origin string, wantAl
 
 func TestWebsocketOriginPolicy(t *testing.T) {
 	t.Run("development mode allows any origin", func(t *testing.T) {
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.WebsocketConfig{Mode: "development"})
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{Mode: "development"})
 		defer cleanup()
 		dialWithOrigin(t, server, "https://anything.example", true)
 	})
 
 	t.Run("production mode allows a configured origin", func(t *testing.T) {
 		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
 		defer cleanup()
 		dialWithOrigin(t, server, "https://allowed.example", true)
 	})
 
 	t.Run("production mode denies an unlisted origin", func(t *testing.T) {
 		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
 		defer cleanup()
 		dialWithOrigin(t, server, "https://denied.example", false)
 	})
 
 	t.Run("production mode denies an absent origin", func(t *testing.T) {
 		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
 		defer cleanup()
 		dialWithOrigin(t, server, "", false)
 	})
 
 	t.Run("production mode denies a malformed origin", func(t *testing.T) {
 		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, ws)
+		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
 		defer cleanup()
 		dialWithOrigin(t, server, "not a url", false)
 	})
@@ -2522,7 +2526,7 @@ func TestNip42NoChallengeOrPayloadInLogs(t *testing.T) {
 
 	const canonicalURL = "wss://relay.test.local"
 	auth := handler.AuthConfig{RelayURL: canonicalURL}
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, auth, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, auth, handler.ModerationConfig{}, handler.WebsocketConfig{})
 	defer cleanup()
 
 	// Successful AUTH: block until a follow-up publish confirms it landed,
@@ -2889,4 +2893,288 @@ func TestNegentropyNoPayloadInLogs(t *testing.T) {
 	logged := buf.String()
 	assert.NotContains(t, logged, "6100000000", "the raw Negentropy hex payload must never be logged")
 	assert.Contains(t, logged, subID, "the subscription ID may still be logged")
+}
+
+// nip98AuthHeader signs a NIP-98 kind-27235 event authorizing a POST to url
+// with the given body, and returns the resulting Authorization header
+// value ("Nostr <base64>").
+func nip98AuthHeader(t *testing.T, sk, rawURL string, body []byte) string {
+	t.Helper()
+	pk, err := nostr.GetPublicKey(sk)
+	require.NoError(t, err)
+	sum := sha256.Sum256(body)
+	ev := nostr.Event{
+		PubKey:    pk,
+		CreatedAt: nostr.Now(),
+		Kind:      27235,
+		Tags: nostr.Tags{
+			{"u", rawURL},
+			{"method", http.MethodPost},
+			{"payload", hex.EncodeToString(sum[:])},
+		},
+		Content: "",
+	}
+	require.NoError(t, ev.Sign(sk))
+	raw, err := json.Marshal(ev)
+	require.NoError(t, err)
+	return "Nostr " + base64.StdEncoding.EncodeToString(raw)
+}
+
+// callManagement issues a NIP-86 management request against server, signed
+// by sk (or unsigned, if sk is empty), and returns the decoded JSON
+// response body and HTTP status code.
+func callManagement(t *testing.T, server *httptest.Server, sk, method string, params []any) (map[string]any, int) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"method": method, "params": params})
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/nostr+json+rpc")
+	if sk != "" {
+		req.Header.Set("Authorization", nip98AuthHeader(t, sk, server.URL, body))
+	}
+
+	resp, err := server.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out, resp.StatusCode
+}
+
+func TestModerationBanPubkeyRejectsPublish(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	authorSk := nostr.GeneratePrivateKey()
+	authorPk, _ := nostr.GetPublicKey(authorSk)
+
+	out, status := callManagement(t, server, operatorSk, "banpubkey", []any{authorPk, "spam"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	ev := signedEventWithKey(t, authorSk, 1, "should be blocked", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "blocked: this pubkey is not permitted to publish to this relay", okMsg[3])
+
+	out, status = callManagement(t, server, operatorSk, "unbanpubkey", []any{authorPk})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	ev2 := signedEventWithKey(t, authorSk, 1, "should succeed now", nil)
+	msg2, _ := json.Marshal([]any{"EVENT", ev2})
+	c.WriteMessage(websocket.TextMessage, msg2)
+	okMsg2 := c.readOK(t)
+	assert.Equal(t, true, okMsg2[2], "unbanning must restore the pubkey's ability to publish")
+}
+
+func TestModerationBanEventExcludesFromReq(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	ev := signedEvent(t, 1, "hide me", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	c.readOK(t)
+
+	findEvent := func() bool {
+		subID := "mod_req_" + ev.ID[:8]
+		req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{IDs: []string{ev.ID}}})
+		c.WriteMessage(websocket.TextMessage, req)
+		found := false
+		for {
+			_, raw, err := c.ReadMessage()
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			var arr []json.RawMessage
+			json.Unmarshal(raw, &arr)
+			var msgType string
+			json.Unmarshal(arr[0], &msgType)
+			if msgType == "EVENT" {
+				found = true
+			} else if msgType == "EOSE" {
+				break
+			}
+		}
+		return found
+	}
+
+	require.True(t, findEvent(), "event must be visible before it's banned")
+
+	out, status := callManagement(t, server, operatorSk, "banevent", []any{ev.ID, "reported"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	assert.False(t, findEvent(), "a banned event must not be served, independent of NIP-09")
+
+	out, status = callManagement(t, server, operatorSk, "allowevent", []any{ev.ID})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	assert.True(t, findEvent(), "allowevent must restore visibility")
+}
+
+func TestModerationBlockIPRejectsConnection(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	// A connection succeeds before any block is applied.
+	c := connectTestRelay(t, server)
+	c.Close()
+
+	out, status := callManagement(t, server, operatorSk, "blockip", []any{"127.0.0.1", "abuse"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	u, _ := url.Parse(server.URL)
+	u.Scheme = "ws"
+	_, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	require.Error(t, err, "a blocked IP must not be able to open a WebSocket connection")
+	if resp != nil {
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	}
+
+	out, status = callManagement(t, server, operatorSk, "unblockip", []any{"127.0.0.1"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	c2 := connectTestRelay(t, server)
+	defer c2.Close()
+}
+
+func TestModerationBlockIPCIDR(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	out, status := callManagement(t, server, operatorSk, "blockip", []any{"127.0.0.0/8", "range block"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"])
+
+	u, _ := url.Parse(server.URL)
+	u.Scheme = "ws"
+	_, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	require.Error(t, err, "a CIDR block must reject an address it contains")
+	if resp != nil {
+		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	}
+}
+
+func TestNip86SupportedMethods(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	out, status := callManagement(t, server, operatorSk, "supportedmethods", []any{})
+	require.Equal(t, http.StatusOK, status)
+	methods, ok := out["result"].([]any)
+	require.True(t, ok)
+	assert.Contains(t, methods, "banpubkey")
+	assert.Contains(t, methods, "banevent")
+	assert.Contains(t, methods, "blockip")
+	assert.NotContains(t, methods, "allowpubkey", "the allow-list methods are intentionally unsupported: no admission allow-list model")
+}
+
+func TestNip86ListMethodsReportReason(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	targetSk := nostr.GeneratePrivateKey()
+	targetPk, _ := nostr.GetPublicKey(targetSk)
+	callManagement(t, server, operatorSk, "banpubkey", []any{targetPk, "spam"})
+
+	out, status := callManagement(t, server, operatorSk, "listbannedpubkeys", []any{})
+	require.Equal(t, http.StatusOK, status)
+	entries, ok := out["result"].([]any)
+	require.True(t, ok)
+	require.Len(t, entries, 1)
+	entry := entries[0].(map[string]any)
+	assert.Equal(t, targetPk, entry["pubkey"])
+	assert.Equal(t, "spam", entry["reason"])
+}
+
+func TestNip86Unauthorized(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	defer cleanup()
+
+	someoneElseSk := nostr.GeneratePrivateKey()
+	targetPk := operatorPk
+
+	t.Run("missing Authorization header", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{"method": "supportedmethods", "params": []any{}})
+		req, _ := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/nostr+json+rpc")
+		resp, err := server.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("signed by a non-operator pubkey", func(t *testing.T) {
+		_, status := callManagement(t, server, someoneElseSk, "banpubkey", []any{targetPk, ""})
+		assert.Equal(t, http.StatusUnauthorized, status)
+	})
+
+	t.Run("stale created_at", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{"method": "supportedmethods", "params": []any{}})
+		sum := sha256.Sum256(body)
+		pk, _ := nostr.GetPublicKey(operatorSk)
+		ev := nostr.Event{
+			PubKey:    pk,
+			CreatedAt: nostr.Now() - 3600,
+			Kind:      27235,
+			Tags: nostr.Tags{
+				{"u", server.URL},
+				{"method", http.MethodPost},
+				{"payload", hex.EncodeToString(sum[:])},
+			},
+		}
+		require.NoError(t, ev.Sign(operatorSk))
+		raw, _ := json.Marshal(ev)
+
+		req, _ := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/nostr+json+rpc")
+		req.Header.Set("Authorization", "Nostr "+base64.StdEncoding.EncodeToString(raw))
+		resp, err := server.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+
+	t.Run("tampered payload hash", func(t *testing.T) {
+		realBody, _ := json.Marshal(map[string]any{"method": "supportedmethods", "params": []any{}})
+		authHeader := nip98AuthHeader(t, operatorSk, server.URL, realBody)
+
+		tamperedBody, _ := json.Marshal(map[string]any{"method": "banpubkey", "params": []any{operatorPk, ""}})
+		req, _ := http.NewRequest(http.MethodPost, server.URL, bytes.NewReader(tamperedBody))
+		req.Header.Set("Content-Type", "application/nostr+json+rpc")
+		req.Header.Set("Authorization", authHeader)
+		resp, err := server.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "a payload hash that doesn't match the actual body must be rejected")
+	})
 }

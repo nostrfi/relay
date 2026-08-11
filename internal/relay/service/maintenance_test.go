@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"relay/internal/relay/repository"
+
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/stretchr/testify/assert"
 )
@@ -37,6 +39,27 @@ func (f *fakeRepository) Checkpoint(ctx context.Context) error {
 }
 func (f *fakeRepository) Ping(ctx context.Context) error { return nil }
 func (f *fakeRepository) Close() error                   { return nil }
+
+func (f *fakeRepository) BanPubkey(ctx context.Context, pubkey, reason string) error { return nil }
+func (f *fakeRepository) UnbanPubkey(ctx context.Context, pubkey string) error       { return nil }
+func (f *fakeRepository) ListBannedPubkeys(ctx context.Context) ([]repository.ModerationEntry, error) {
+	return nil, nil
+}
+func (f *fakeRepository) IsPubkeyBanned(ctx context.Context, pubkey string) (bool, error) {
+	return false, nil
+}
+
+func (f *fakeRepository) BanEvent(ctx context.Context, eventID, reason string) error { return nil }
+func (f *fakeRepository) AllowEvent(ctx context.Context, eventID string) error       { return nil }
+func (f *fakeRepository) ListBannedEvents(ctx context.Context) ([]repository.ModerationEntry, error) {
+	return nil, nil
+}
+
+func (f *fakeRepository) BlockIP(ctx context.Context, ipOrCIDR, reason string) error { return nil }
+func (f *fakeRepository) UnblockIP(ctx context.Context, ipOrCIDR string) error       { return nil }
+func (f *fakeRepository) ListBlockedIPs(ctx context.Context) ([]repository.ModerationEntry, error) {
+	return nil, nil
+}
 
 func TestMaintenanceServiceRunsOnInterval(t *testing.T) {
 	repo := &fakeRepository{}

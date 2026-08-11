@@ -57,7 +57,7 @@ func main() {
 	relayService := service.NewRelayService(repo)
 
 	// 5. Initialize Handler
-	relayHandler := handler.NewRelayHandlerFull(relayService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Websocket, version)
+	relayHandler := handler.NewRelayHandlerFull(relayService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, version)
 
 	// 6. Setup Server
 	server := &http.Server{

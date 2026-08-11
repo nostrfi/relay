@@ -333,6 +333,7 @@ func (r *duckDBRepository) queryEvents(ctx context.Context, filter nostr.Filter,
 	now := nostr.Now()
 	conditions = append(conditions, "(e.expiration IS NULL OR e.expiration > ?)")
 	args = append(args, now)
+	conditions = append(conditions, "e.id NOT IN (SELECT event_id FROM banned_events)")
 
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
