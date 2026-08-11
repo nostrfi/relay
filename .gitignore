@@ -5,6 +5,7 @@
 *.so
 *.dylib
 /relay
+/loadtest
 
 # Test binary, built with `go test -c`
 *.test
