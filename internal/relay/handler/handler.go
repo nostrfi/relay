@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"relay/internal/relay/service"
@@ -24,6 +25,7 @@ type RelayHandler struct {
 	relayInfo      RelayInfo
 	resourceLimits ResourceLimits
 	auth           AuthConfig
+	moderation     ModerationConfig
 	websocket      WebsocketConfig
 	upgrader       websocket.Upgrader
 	connCount      atomic.Int64
@@ -35,16 +37,17 @@ func NewRelayHandler(service service.RelayService, info RelayInfo, buildVersion 
 }
 
 func NewRelayHandlerWithLimits(service service.RelayService, info RelayInfo, limits ResourceLimits, buildVersion string) *RelayHandler {
-	return NewRelayHandlerFull(service, info, limits, AuthConfig{}, WebsocketConfig{}, buildVersion)
+	return NewRelayHandlerFull(service, info, limits, AuthConfig{}, ModerationConfig{}, WebsocketConfig{}, buildVersion)
 }
 
 // NewRelayHandlerFull is the fully configured constructor. An empty
 // AuthConfig disables endpoint-binding and freshness checks on NIP-42 AUTH
 // (matching the historical, presence-only behavior); a zero-value
 // WebsocketConfig defaults to development mode (all origins allowed),
-// matching the historical CheckOrigin behavior. Both must be set explicitly
-// to enable the stricter, internet-facing behavior.
-func NewRelayHandlerFull(service service.RelayService, info RelayInfo, limits ResourceLimits, auth AuthConfig, ws WebsocketConfig, buildVersion string) *RelayHandler {
+// matching the historical CheckOrigin behavior. An empty ModerationConfig
+// falls back to RelayInfo.Pubkey as the NIP-86/NIP-98 admin key. All must
+// be set explicitly to enable the stricter, internet-facing behavior.
+func NewRelayHandlerFull(service service.RelayService, info RelayInfo, limits ResourceLimits, auth AuthConfig, moderation ModerationConfig, ws WebsocketConfig, buildVersion string) *RelayHandler {
 	if info.Name == "" {
 		info.Name = "Nostr Relay"
 	}
@@ -52,7 +55,7 @@ func NewRelayHandlerFull(service service.RelayService, info RelayInfo, limits Re
 		info.Description = "A minimal Nostr relay written in Go."
 	}
 	if len(info.SupportedNips) == 0 {
-		info.SupportedNips = []int{1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77}
+		info.SupportedNips = []int{1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77, 86, 98}
 	}
 	if info.Software == "" {
 		info.Software = "https://github.com/nostrfi/relay"
@@ -64,12 +67,19 @@ func NewRelayHandlerFull(service service.RelayService, info RelayInfo, limits Re
 	if ws.Mode == "" {
 		ws.Mode = websocketModeDevelopment
 	}
+	if moderation.AdminPubkey == "" {
+		moderation.AdminPubkey = info.Pubkey
+	}
+	if moderation.MaxEventAgeSeconds == 0 {
+		moderation.MaxEventAgeSeconds = 60
+	}
 
 	h := &RelayHandler{
 		service:        service,
 		relayInfo:      info,
 		resourceLimits: limits,
 		auth:           auth,
+		moderation:     moderation,
 		websocket:      ws,
 	}
 	h.upgrader = websocket.Upgrader{CheckOrigin: h.checkOrigin}
@@ -95,7 +105,49 @@ func (h *RelayHandler) checkOrigin(r *http.Request) bool {
 	return slices.Contains(h.websocket.AllowedOrigins, origin)
 }
 
+// isConnectionSourceBlocked checks the connecting client's IP address
+// against the operator's blocked-IP list (see NIP-86's blockip/unblockip).
+// It uses r.RemoteAddr, not a proxy header like X-Forwarded-For: that
+// header is trivially spoofable by the client itself unless the relay
+// knows it's behind a trusted, header-overwriting proxy, which this relay
+// has no configuration for today. A deployment behind such a proxy will
+// see the proxy's address here, not the real client's — a known
+// limitation, not a bug, until trusted-proxy support exists.
+func (h *RelayHandler) isConnectionSourceBlocked(r *http.Request) (bool, error) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false, nil
+	}
+
+	blocked, err := h.service.ListBlockedIPs(r.Context())
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range blocked {
+		if entry.Value == host {
+			return true, nil
+		}
+		if _, ipNet, err := net.ParseCIDR(entry.Value); err == nil && ipNet.Contains(ip) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// NIP-86: relay management API, on the same URI as the WebSocket
+	// endpoint, distinguished by method and Content-Type rather than
+	// Accept, so it can't collide with the NIP-11/landing-page/upgrade
+	// branches below.
+	if req.Method == http.MethodPost && req.Header.Get("Content-Type") == nip86ContentType {
+		h.handleManagementRequest(w, req)
+		return
+	}
+
 	if req.Header.Get("Accept") == "application/nostr+json" {
 		w.Header().Set("Content-Type", "application/nostr+json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -108,6 +160,15 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Serve HTML landing page for non-WebSocket browser requests
 	if !isWebSocketUpgrade(req) {
 		h.serveLandingPage(w, req)
+		return
+	}
+
+	if blocked, err := h.isConnectionSourceBlocked(req); err != nil {
+		slog.Error("moderation check failed", "error", err)
+		http.Error(w, "error: failed to process connection", http.StatusInternalServerError)
+		return
+	} else if blocked {
+		http.Error(w, "blocked: this connection source is not permitted to connect to this relay", http.StatusForbidden)
 		return
 	}
 

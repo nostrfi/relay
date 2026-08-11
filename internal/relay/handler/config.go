@@ -49,6 +49,16 @@ type AuthConfig struct {
 	MaxEventAgeSeconds int    `mapstructure:"max_event_age_seconds"`
 }
 
+// ModerationConfig authorizes NIP-86 relay-management API requests, which
+// must be signed (via NIP-98) by AdminPubkey. AdminPubkey defaults to
+// RelayInfo.Pubkey — the already-public operator identity — when unset;
+// operators who want a separate moderation credential can set it
+// explicitly.
+type ModerationConfig struct {
+	AdminPubkey        string `mapstructure:"admin_pubkey"`
+	MaxEventAgeSeconds int    `mapstructure:"max_event_age_seconds"`
+}
+
 const (
 	websocketModeDevelopment = "development"
 	websocketModeProduction  = "production"
@@ -83,13 +93,14 @@ type StorageConfig struct {
 }
 
 type Config struct {
-	RelayInfo      RelayInfo       `mapstructure:"relay_info"`
-	ResourceLimits ResourceLimits  `mapstructure:"resource_limits"`
-	Auth           AuthConfig      `mapstructure:"auth"`
-	Websocket      WebsocketConfig `mapstructure:"websocket"`
-	Retention      RetentionConfig `mapstructure:"retention"`
-	Server         ServerConfig    `mapstructure:"server"`
-	Storage        StorageConfig   `mapstructure:"storage"`
+	RelayInfo      RelayInfo        `mapstructure:"relay_info"`
+	ResourceLimits ResourceLimits   `mapstructure:"resource_limits"`
+	Auth           AuthConfig       `mapstructure:"auth"`
+	Moderation     ModerationConfig `mapstructure:"moderation"`
+	Websocket      WebsocketConfig  `mapstructure:"websocket"`
+	Retention      RetentionConfig  `mapstructure:"retention"`
+	Server         ServerConfig     `mapstructure:"server"`
+	Storage        StorageConfig    `mapstructure:"storage"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -125,6 +136,13 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Auth.MaxEventAgeSeconds == 0 {
 		cfg.Auth.MaxEventAgeSeconds = 600
+	}
+
+	if cfg.Moderation.AdminPubkey == "" {
+		cfg.Moderation.AdminPubkey = cfg.RelayInfo.Pubkey
+	}
+	if cfg.Moderation.MaxEventAgeSeconds == 0 {
+		cfg.Moderation.MaxEventAgeSeconds = 60
 	}
 
 	if cfg.Retention.PurgeIntervalSeconds == 0 {
