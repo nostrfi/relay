@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"relay/internal/relay/handler"
-	"relay/internal/relay/repository"
-	"relay/internal/relay/service"
+	"relay/internal/application"
+	"relay/internal/infrastructure/duckdb"
+	"relay/internal/interfaces/ws"
 	"relay/pkg/metrics"
 
 	"github.com/gorilla/websocket"
@@ -36,17 +36,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func startTestRelay(t *testing.T) (*httptest.Server, repository.Repository, func()) {
+func startTestRelay(t *testing.T) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
-	return startTestRelayWithLimits(t, handler.RelayInfo{}, handler.ResourceLimits{})
+	return startTestRelayWithLimits(t, ws.RelayInfo{}, ws.ResourceLimits{})
 }
 
-func startTestRelayWithLimits(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits) (*httptest.Server, repository.Repository, func()) {
+func startTestRelayWithLimits(t *testing.T, info ws.RelayInfo, limits ws.ResourceLimits) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
-	return startTestRelayFull(t, info, limits, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	return startTestRelayFull(t, info, limits, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 }
 
-func startTestRelayFull(t *testing.T, info handler.RelayInfo, limits handler.ResourceLimits, auth handler.AuthConfig, moderation handler.ModerationConfig, ws handler.WebsocketConfig) (*httptest.Server, repository.Repository, func()) {
+func startTestRelayFull(t *testing.T, info ws.RelayInfo, limits ws.ResourceLimits, auth ws.AuthConfig, moderation ws.ModerationConfig, wsCfg ws.WebsocketConfig) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
@@ -55,14 +55,15 @@ func startTestRelayFull(t *testing.T, info handler.RelayInfo, limits handler.Res
 	}
 
 	dbPath := filepath.Join(tmpDir, "test.db")
-	repo, err := repository.NewDuckDBRepository(dbPath)
+	repo, err := duckdb.NewRepository(dbPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("failed to open repository: %v", err)
 	}
 
-	svc := service.NewRelayService(repo)
-	h := handler.NewRelayHandlerFull(svc, info, limits, auth, moderation, ws, "test")
+	eventService := application.NewEventService(repo)
+	moderationService := application.NewModerationService(repo)
+	h := ws.NewRelayHandlerFull(eventService, moderationService, info, limits, auth, moderation, wsCfg, "test")
 	server := httptest.NewServer(h)
 
 	cleanup := func() {
@@ -681,7 +682,7 @@ relay_info:
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(tmpDir)
 
-	cfg, err := handler.LoadConfig()
+	cfg, err := ws.LoadConfig()
 	if err != nil {
 		t.Fatalf("failed to load config: %v", err)
 	}
@@ -747,7 +748,7 @@ func TestNip11(t *testing.T) {
 	assert.Equal(t, "application/nostr+json", resp.Header.Get("Content-Type"))
 	assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
 
-	var info handler.RelayInfo
+	var info ws.RelayInfo
 	err = json.NewDecoder(resp.Body).Decode(&info)
 	if err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -1787,8 +1788,8 @@ func buildAuthEvent(t *testing.T, sk, challenge, relayTag string, createdAt nost
 }
 
 func TestResourceLimitsContentLength(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxContentLength: 10}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxContentLength: 10}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	t.Run("at the boundary is accepted", func(t *testing.T) {
@@ -1818,8 +1819,8 @@ func TestResourceLimitsContentLength(t *testing.T) {
 }
 
 func TestResourceLimitsEventTags(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxEventTags: 2}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxEventTags: 2}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1836,8 +1837,8 @@ func TestResourceLimitsEventTags(t *testing.T) {
 }
 
 func TestResourceLimitsTimestampBounds(t *testing.T) {
-	limitation := &handler.RelayLimitation{CreatedAtUpperLimit: 60, CreatedAtLowerLimit: 60}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{CreatedAtUpperLimit: 60, CreatedAtLowerLimit: 60}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1863,8 +1864,8 @@ func TestResourceLimitsTimestampBounds(t *testing.T) {
 }
 
 func TestResourceLimitsProofOfWork(t *testing.T) {
-	limitation := &handler.RelayLimitation{MinPowDifficulty: 8}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MinPowDifficulty: 8}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1882,8 +1883,8 @@ func TestResourceLimitsProofOfWork(t *testing.T) {
 }
 
 func TestResourceLimitsAuthRequired(t *testing.T) {
-	limitation := &handler.RelayLimitation{AuthRequired: true}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{AuthRequired: true}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1899,8 +1900,8 @@ func TestResourceLimitsAuthRequired(t *testing.T) {
 }
 
 func TestResourceLimitsFilterCount(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxFilters: 1}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxFilters: 1}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1915,8 +1916,8 @@ func TestResourceLimitsFilterCount(t *testing.T) {
 }
 
 func TestResourceLimitsSubscriptionCount(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxSubscriptions: 1}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxSubscriptions: 1}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1958,8 +1959,8 @@ func TestResourceLimitsSubscriptionCount(t *testing.T) {
 }
 
 func TestResourceLimitsSubidLength(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxSubidLength: 5}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxSubidLength: 5}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -1974,8 +1975,8 @@ func TestResourceLimitsSubidLength(t *testing.T) {
 }
 
 func TestResourceLimitsMaxLimitClamp(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxLimit: 2}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxLimit: 2}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -2009,8 +2010,8 @@ func TestResourceLimitsMaxLimitClamp(t *testing.T) {
 }
 
 func TestResourceLimitsMessageSize(t *testing.T) {
-	limitation := &handler.RelayLimitation{MaxMessageLength: 100}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{})
+	limitation := &ws.RelayLimitation{MaxMessageLength: 100}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -2031,8 +2032,8 @@ func TestResourceLimitsMessageSize(t *testing.T) {
 }
 
 func TestResourceLimitsRateLimiting(t *testing.T) {
-	limits := handler.ResourceLimits{MessagesPerSecond: 2}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{}, limits)
+	limits := ws.ResourceLimits{MessagesPerSecond: 2}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{}, limits)
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -2085,8 +2086,8 @@ func TestResourceLimitsNoInternalErrorLeak(t *testing.T) {
 }
 
 func TestResourceLimitsMaxConnectionsConcurrent(t *testing.T) {
-	limits := handler.ResourceLimits{MaxConnections: 5}
-	server, _, cleanup := startTestRelayWithLimits(t, handler.RelayInfo{}, limits)
+	limits := ws.ResourceLimits{MaxConnections: 5}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{}, limits)
 	defer cleanup()
 
 	const attempts = 15
@@ -2129,7 +2130,7 @@ func TestResourceLimitsMaxConnectionsConcurrent(t *testing.T) {
 // subscription matching all three. Every subscriber must receive exactly
 // the events its filter matches — no cross-talk, no missed live event —
 // which requires no coordination beyond what the relay's own broadcast
-// logic (internal/relay/handler/subscription.go) provides.
+// logic (internal/interfaces/ws/subscription.go) provides.
 func TestConcurrentSubscriptionsNoCrossTalk(t *testing.T) {
 	server, _, cleanup := startTestRelay(t)
 	defer cleanup()
@@ -2296,15 +2297,15 @@ relay_info:
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(tmpDir)
 
-	_, err = handler.LoadConfig()
+	_, err = ws.LoadConfig()
 	assert.Error(t, err, "loading a config with payment_required: true should fail since no payment mechanism exists")
 }
 
 func TestNip42EndpointBinding(t *testing.T) {
 	const canonicalURL = "wss://relay.test.local"
-	auth := handler.AuthConfig{RelayURL: canonicalURL}
-	limitation := &handler.RelayLimitation{RestrictedWrites: true}
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	auth := ws.AuthConfig{RelayURL: canonicalURL}
+	limitation := &ws.RelayLimitation{RestrictedWrites: true}
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{}, auth, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	publishAndExpect := func(t *testing.T, c *testClient, sk string, wantOK bool) {
@@ -2406,9 +2407,9 @@ func TestNip42EndpointBinding(t *testing.T) {
 
 func TestNip42AuthFreshness(t *testing.T) {
 	const canonicalURL = "wss://relay.test.local"
-	auth := handler.AuthConfig{RelayURL: canonicalURL, MaxEventAgeSeconds: 600}
-	limitation := &handler.RelayLimitation{RestrictedWrites: true}
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Limitation: limitation}, handler.ResourceLimits{}, auth, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	auth := ws.AuthConfig{RelayURL: canonicalURL, MaxEventAgeSeconds: 600}
+	limitation := &ws.RelayLimitation{RestrictedWrites: true}
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{}, auth, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	t.Run("fresh event authenticates", func(t *testing.T) {
@@ -2484,35 +2485,35 @@ func dialWithOrigin(t *testing.T, server *httptest.Server, origin string, wantAl
 
 func TestWebsocketOriginPolicy(t *testing.T) {
 	t.Run("development mode allows any origin", func(t *testing.T) {
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{Mode: "development"})
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{Mode: "development"})
 		defer cleanup()
 		dialWithOrigin(t, server, "https://anything.example", true)
 	})
 
 	t.Run("production mode allows a configured origin", func(t *testing.T) {
-		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
+		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
 		defer cleanup()
 		dialWithOrigin(t, server, "https://allowed.example", true)
 	})
 
 	t.Run("production mode denies an unlisted origin", func(t *testing.T) {
-		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
+		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
 		defer cleanup()
 		dialWithOrigin(t, server, "https://denied.example", false)
 	})
 
 	t.Run("production mode denies an absent origin", func(t *testing.T) {
-		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
+		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
 		defer cleanup()
 		dialWithOrigin(t, server, "", false)
 	})
 
 	t.Run("production mode denies a malformed origin", func(t *testing.T) {
-		ws := handler.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
-		server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, ws)
+		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
 		defer cleanup()
 		dialWithOrigin(t, server, "not a url", false)
 	})
@@ -2525,8 +2526,8 @@ func TestNip42NoChallengeOrPayloadInLogs(t *testing.T) {
 	defer slog.SetDefault(prevLogger)
 
 	const canonicalURL = "wss://relay.test.local"
-	auth := handler.AuthConfig{RelayURL: canonicalURL}
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{}, handler.ResourceLimits{}, auth, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	auth := ws.AuthConfig{RelayURL: canonicalURL}
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, auth, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	// Successful AUTH: block until a follow-up publish confirms it landed,
@@ -2579,7 +2580,7 @@ websocket:
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(tmpDir)
 
-	_, err = handler.LoadConfig()
+	_, err = ws.LoadConfig()
 	assert.Error(t, err, "production mode with no allowed_origins should fail to load")
 }
 
@@ -2606,7 +2607,7 @@ websocket:
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(tmpDir)
 
-	cfg, err := handler.LoadConfig()
+	cfg, err := ws.LoadConfig()
 	if err != nil {
 		t.Fatalf("expected config to load: %v", err)
 	}
@@ -2632,7 +2633,7 @@ func TestConfigServerStorageDefaults(t *testing.T) {
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(tmpDir)
 
-	cfg, err := handler.LoadConfig()
+	cfg, err := ws.LoadConfig()
 	if err != nil {
 		t.Fatalf("expected config to load: %v", err)
 	}
@@ -2665,7 +2666,7 @@ storage:
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(tmpDir)
 
-	cfg, err := handler.LoadConfig()
+	cfg, err := ws.LoadConfig()
 	if err != nil {
 		t.Fatalf("expected config to load: %v", err)
 	}
@@ -2675,7 +2676,7 @@ storage:
 }
 
 func TestHealthz(t *testing.T) {
-	mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), func(context.Context) error { return nil })
+	mux := ws.NewMux(ws.NewRelayHandler(nil, nil, ws.RelayInfo{}, "test"), func(context.Context) error { return nil })
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -2689,7 +2690,7 @@ func TestHealthz(t *testing.T) {
 
 func TestReadyz(t *testing.T) {
 	t.Run("ready when the dependency check succeeds", func(t *testing.T) {
-		mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), func(context.Context) error { return nil })
+		mux := ws.NewMux(ws.NewRelayHandler(nil, nil, ws.RelayInfo{}, "test"), func(context.Context) error { return nil })
 		server := httptest.NewServer(mux)
 		defer server.Close()
 
@@ -2702,7 +2703,7 @@ func TestReadyz(t *testing.T) {
 	})
 
 	t.Run("not ready when the dependency check fails", func(t *testing.T) {
-		mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), func(context.Context) error {
+		mux := ws.NewMux(ws.NewRelayHandler(nil, nil, ws.RelayInfo{}, "test"), func(context.Context) error {
 			return fmt.Errorf("database unreachable")
 		})
 		server := httptest.NewServer(mux)
@@ -2725,7 +2726,7 @@ func TestReadyzWithRealRepositoryClosed(t *testing.T) {
 	// stubbed failure.
 	repo.Close()
 
-	mux := handler.NewMux(handler.NewRelayHandler(nil, handler.RelayInfo{}, "test"), repo.Ping)
+	mux := ws.NewMux(ws.NewRelayHandler(nil, nil, ws.RelayInfo{}, "test"), repo.Ping)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -2740,21 +2741,22 @@ func TestReadyzWithRealRepositoryClosed(t *testing.T) {
 // startTestMuxServer starts a full server (repository, RelayHandler, and the
 // production NewMux routing) so metrics tests exercise the exact same
 // wiring used by cmd/relay/main.go, including /metrics.
-func startTestMuxServer(t *testing.T) (*httptest.Server, repository.Repository, func()) {
+func startTestMuxServer(t *testing.T) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
 	dbPath := filepath.Join(tmpDir, "test.db")
-	repo, err := repository.NewDuckDBRepository(dbPath)
+	repo, err := duckdb.NewRepository(dbPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		t.Fatalf("failed to open repository: %v", err)
 	}
-	svc := service.NewRelayService(repo)
-	relayHandler := handler.NewRelayHandler(svc, handler.RelayInfo{}, "test")
-	server := httptest.NewServer(handler.NewMux(relayHandler, repo.Ping))
+	eventService := application.NewEventService(repo)
+	moderationService := application.NewModerationService(repo)
+	relayHandler := ws.NewRelayHandler(eventService, moderationService, ws.RelayInfo{}, "test")
+	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping))
 	cleanup := func() {
 		server.Close()
 		repo.Close()
@@ -2947,7 +2949,7 @@ func callManagement(t *testing.T, server *httptest.Server, sk, method string, pa
 func TestModerationBanPubkeyRejectsPublish(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	authorSk := nostr.GeneratePrivateKey()
@@ -2980,7 +2982,7 @@ func TestModerationBanPubkeyRejectsPublish(t *testing.T) {
 func TestModerationBanEventExcludesFromReq(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	c := connectTestRelay(t, server)
@@ -3032,7 +3034,7 @@ func TestModerationBanEventExcludesFromReq(t *testing.T) {
 func TestModerationBlockIPRejectsConnection(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	// A connection succeeds before any block is applied.
@@ -3062,7 +3064,7 @@ func TestModerationBlockIPRejectsConnection(t *testing.T) {
 func TestModerationBlockIPCIDR(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	out, status := callManagement(t, server, operatorSk, "blockip", []any{"127.0.0.0/8", "range block"})
@@ -3081,7 +3083,7 @@ func TestModerationBlockIPCIDR(t *testing.T) {
 func TestNip86SupportedMethods(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	out, status := callManagement(t, server, operatorSk, "supportedmethods", []any{})
@@ -3097,7 +3099,7 @@ func TestNip86SupportedMethods(t *testing.T) {
 func TestNip86ListMethodsReportReason(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	targetSk := nostr.GeneratePrivateKey()
@@ -3117,7 +3119,7 @@ func TestNip86ListMethodsReportReason(t *testing.T) {
 func TestNip86Unauthorized(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
-	server, _, cleanup := startTestRelayFull(t, handler.RelayInfo{Pubkey: operatorPk}, handler.ResourceLimits{}, handler.AuthConfig{}, handler.ModerationConfig{}, handler.WebsocketConfig{})
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
 	someoneElseSk := nostr.GeneratePrivateKey()
