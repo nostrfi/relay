@@ -16,8 +16,21 @@ const npub = computed(() => {
 
 async function signOut() {
   await logout()
-  await navigateTo('/login')
+  await navigateTo('/')
 }
+
+/**
+ * Opened by the header button, or by ?signin=1 — which is where the auth
+ * middleware sends someone who reached a private page signed out.
+ */
+const route = useRoute()
+const signInOpen = ref(route.query.signin !== undefined)
+
+watch(() => route.query.signin, (value) => {
+  if (value !== undefined) {
+    signInOpen.value = true
+  }
+})
 </script>
 
 <template>
@@ -30,21 +43,35 @@ async function signOut() {
         <AppLogo :size="32" />
         <span class="nf-wordmark font-display">Relay Admin</span>
 
-        <div
-          v-if="npub"
-          class="nf-identity"
-        >
-          <span
-            class="nf-npub font-mono"
-            :title="npub.full"
-          >{{ npub.short }}</span>
-          <UButton
-            size="xs"
-            variant="ghost"
-            @click="signOut"
+        <div class="nf-identity">
+          <template v-if="npub">
+            <NuxtLink
+              to="/dashboard"
+              class="nf-header__link"
+            >
+              Dashboard
+            </NuxtLink>
+            <span
+              class="nf-npub font-mono"
+              :title="npub.full"
+            >{{ npub.short }}</span>
+            <UButton
+              size="xs"
+              variant="ghost"
+              @click="signOut"
+            >
+              Sign out
+            </UButton>
+          </template>
+
+          <SignInModal
+            v-else
+            v-model:open="signInOpen"
           >
-            Sign out
-          </UButton>
+            <UButton size="xs">
+              Sign in
+            </UButton>
+          </SignInModal>
         </div>
       </div>
     </header>
@@ -104,6 +131,15 @@ async function signOut() {
 .nf-npub {
   font-size: 13px;
   color: var(--ui-text-muted);
+}
+
+.nf-header__link {
+  font-size: 14px;
+  color: var(--ui-text-muted);
+}
+
+.nf-header__link:hover {
+  color: var(--ui-text);
 }
 
 .nf-main {

@@ -221,9 +221,14 @@ Every request must carry an `Authorization: Nostr <base64>` header containing a 
 
 ### Admin dashboard sign-in
 
-The dashboard at `/admin` is gated by pubkey login. The operator proves ownership of a key by
-signing a NIP-98 kind-`27235` event over the login endpoint — with a browser extension (NIP-07) or
-a remote signer (NIP-46 bunker) — and the dashboard's Nuxt server opens a session for them.
+`/admin` itself is public: it renders the relay's NIP-11 information, the same document the relay
+serves to any anonymous caller. Everything else — starting with `/admin/dashboard` — requires a
+pubkey login. The operator proves ownership of a key by signing a NIP-98 kind-`27235` event over
+the login endpoint, with a browser extension (NIP-07) or a remote signer (NIP-46 bunker), and the
+dashboard's Nuxt server opens a session for them.
+
+Sign-in is a **Sign in** action in the dashboard header, which opens a modal with both options.
+Reaching a private page while signed out returns to `/admin` with that modal open.
 
 Two environment variables configure it on the `dashboard` service:
 
@@ -247,8 +252,8 @@ The login flow itself:
 4. The server verifies the signature, freshness, tags, and challenge, checks the pubkey against the
    admin pubkey, and sets an httpOnly, `Secure`, `SameSite=Lax` cookie scoped to `/admin`.
 
-Sessions last 8 hours. Signing out clears the cookie and any stored bunker pairing. Login and
-challenge requests are rate-limited per client address.
+Sessions last 8 hours. Signing out clears the cookie and any stored bunker pairing, and returns to
+the public page. Login and challenge requests are rate-limited per client address.
 
 ## Database
 
