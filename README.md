@@ -219,6 +219,37 @@ Every request must carry an `Authorization: Nostr <base64>` header containing a 
 - **`blockip`**: rejects future WebSocket upgrade attempts from that IP or CIDR with `403`. Uses the request's observed remote address, not a proxy header like `X-Forwarded-For` — behind a reverse proxy this sees the proxy's address, not the real client's.
 - Every management call, successful or not, is logged (`method`, `operator_pubkey`, and outcome) — never event content, private keys, or the raw request body.
 
+### Admin dashboard sign-in
+
+The dashboard at `/admin` is gated by pubkey login. The operator proves ownership of a key by
+signing a NIP-98 kind-`27235` event over the login endpoint — with a browser extension (NIP-07) or
+a remote signer (NIP-46 bunker) — and the dashboard's Nuxt server opens a session for them.
+
+Two environment variables configure it on the `dashboard` service:
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `NUXT_SESSION_PASSWORD` | yes | Seals the session cookie. At least 32 characters; generate per deployment with `openssl rand -base64 48`. The dashboard refuses to open a session when it is unset or too short rather than falling back to a known secret. |
+| `NUXT_ADMIN_PUBKEY` | no | Hex pubkey allowed to sign in. Defaults to the relay's NIP-11 `pubkey`, mirroring how `moderation.admin_pubkey` defaults. Set it when `moderation.admin_pubkey` differs, and keep the two in step. |
+
+The session is an **identity assertion, not a capability**. It records which pubkey signed in and
+gates the dashboard UI; it is not a credential the relay accepts. Privileged relay operations
+continue to require their own per-request NIP-98 signature checked against
+`moderation.admin_pubkey`, exactly as described above — so a stolen session cookie yields dashboard
+access, never the ability to mutate relay state.
+
+The login flow itself:
+
+1. The browser requests a one-time challenge from the dashboard.
+2. It signs a kind-`27235` event tagged with `u` (the login URL), `method`, and that `challenge`.
+3. It sends the event in an `Authorization: Nostr <base64>` header with an empty body — the same
+   header convention the NIP-86 API uses.
+4. The server verifies the signature, freshness, tags, and challenge, checks the pubkey against the
+   admin pubkey, and sets an httpOnly, `Secure`, `SameSite=Lax` cookie scoped to `/admin`.
+
+Sessions last 8 hours. Signing out clears the cookie and any stored bunker pairing. Login and
+challenge requests are rate-limited per client address.
+
 ## Database
 
 The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `backend/db/relay.db`.
