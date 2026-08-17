@@ -219,7 +219,7 @@ The relay uses **DuckDB** for high-performance event storage and querying. The d
 
 ### Schema migrations
 
-Schema changes are applied by a versioned migration runner (`internal/relay/repository/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
+Schema changes are applied by a versioned migration runner (`internal/infrastructure/duckdb/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
 
 ### Retention and maintenance
 

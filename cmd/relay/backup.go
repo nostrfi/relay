@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"relay/internal/relay/repository"
+	"relay/internal/infrastructure/duckdb"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 )
@@ -26,12 +26,12 @@ func runBackup(dbPath, dir string) {
 	// Ensure the schema exists (idempotent) before backing up: -backup can
 	// be run against a database the server has never started against yet.
 	ctx := context.Background()
-	if err := repository.RunMigrations(ctx, db); err != nil {
+	if err := duckdb.RunMigrations(ctx, db); err != nil {
 		slog.Error("failed to prepare database schema for backup", "error", err)
 		os.Exit(1)
 	}
 
-	manifest, err := repository.Backup(ctx, db, dir)
+	manifest, err := duckdb.Backup(ctx, db, dir)
 	if err != nil {
 		slog.Error("backup failed", "error", err)
 		os.Exit(1)
@@ -65,7 +65,7 @@ func runRestore(dbPath, dir string) {
 	}
 	defer db.Close()
 
-	manifest, err := repository.Restore(context.Background(), db, dir)
+	manifest, err := duckdb.Restore(context.Background(), db, dir)
 	if err != nil {
 		slog.Error("restore failed", "error", err)
 		os.Exit(1)

@@ -7,12 +7,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"relay/internal/relay/handler"
-	"relay/internal/relay/repository"
-	"relay/internal/relay/service"
-	"relay/pkg/logger"
 	"syscall"
 	"time"
+
+	"relay/internal/application"
+	"relay/internal/infrastructure/duckdb"
+	"relay/internal/interfaces/ws"
+	"relay/pkg/logger"
 )
 
 // version is injected at build time via -ldflags "-X main.version=..."
@@ -29,7 +30,7 @@ func main() {
 	// both now read the database path from config rather than a hardcoded
 	// constant, so a broken config.yaml blocks them too, consistently with
 	// normal startup.
-	cfg, err := handler.LoadConfig()
+	cfg, err := ws.LoadConfig()
 	if err != nil {
 		slog.Error("failed to load configuration", "error", err)
 		os.Exit(1)
@@ -47,28 +48,29 @@ func main() {
 	slog.Info("Starting relay", "version", version)
 
 	// 3. Initialize Repository
-	repo, err := repository.NewDuckDBRepository(cfg.Storage.DBPath)
+	repo, err := duckdb.NewRepository(cfg.Storage.DBPath)
 	if err != nil {
 		slog.Error("failed to open storage", "error", err)
 		os.Exit(1)
 	}
 
-	// 4. Initialize Service
-	relayService := service.NewRelayService(repo)
+	// 4. Initialize Services
+	eventService := application.NewEventService(repo)
+	moderationService := application.NewModerationService(repo)
 
 	// 5. Initialize Handler
-	relayHandler := handler.NewRelayHandlerFull(relayService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, version)
+	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, version)
 
 	// 6. Setup Server
 	server := &http.Server{
 		Addr:    cfg.Server.ListenAddr,
-		Handler: handler.NewMux(relayHandler, repo.Ping),
+		Handler: ws.NewMux(relayHandler, repo.Ping),
 	}
 
 	// 6a. Start the background maintenance worker (expired-event purge and
 	// checkpoint), stopped alongside the server on shutdown.
 	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
-	maintenance := service.NewMaintenanceService(repo, time.Duration(cfg.Retention.PurgeIntervalSeconds)*time.Second)
+	maintenance := application.NewMaintenanceService(repo, time.Duration(cfg.Retention.PurgeIntervalSeconds)*time.Second)
 	go maintenance.Run(maintenanceCtx)
 
 	// 6b. Graceful Shutdown Setup

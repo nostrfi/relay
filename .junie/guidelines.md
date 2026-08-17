@@ -1,35 +1,42 @@
 ## 1. Organize Project Structure
 
-* Follow a domain-driven or feature-based structure rather than organizing by technical layers
-* Keep related functionality together to improve code discoverability
+* Follow a layered DDD structure: `domain` owns entities, value objects, and repository interfaces; `application` orchestrates use cases against those interfaces; `infrastructure` implements them; `interfaces` decodes transport requests and calls `application`
+* The domain layer must not import infrastructure or interfaces packages; dependencies point inward
+* Keep related functionality together within each layer to improve code discoverability
 * Use a consistent naming convention for packages and files
 
 **Explanation:**
 
 * A well-organized project structure makes it easier to understand the codebase, locate files, and maintain the application over time.
-* Domain or feature-based organization helps developers find all related code (handlers, services, models) in one place.
+* Layering by DDD boundary keeps domain invariants (e.g. an event's signature must be verified before it's used as a domain object) enforced in one place — the domain layer — instead of duplicated at every transport call site.
 * A consistent structure reduces cognitive load when navigating the codebase.
 
+This is the actual structure in use in this repository:
+
 ```go
-// Example project structure
-project/
+relay/
 ├── cmd/
-│   └── main.go               // Application entry point
-├── internal/                 // Private application code
-│   ├── auth/                 // Auth feature
-│   │   ├── handler.go        // HTTP handlers
-│   │   ├── middleware.go     // Auth middleware
-│   │   ├── service.go        // Business logic
-│   │   └── repository.go     // Data access
-│   ├── user/                 // User feature
-│   └── product/              // Product feature
-├── pkg/                      // Public libraries
-│   ├── database/             // Database utilities
-│   └── validator/            // Validation utilities
-├── api/                      // API documentation
-├── config/                   // Configuration files
-└── go.mod                    // Go module definition
+│   ├── relay/                    // Application entry point (main.go, backup.go)
+│   └── loadtest/                 // Load-testing CLI
+├── internal/
+│   ├── domain/                   // Entities, value objects, repository interfaces
+│   │   ├── event/                 // Event (wraps *nostr.Event), NewEvent() signature invariant, Repository interface
+│   │   ├── moderation/             // ModerationEntry, Repository interface
+│   │   └── subscription/           // Subscription value object
+│   ├── application/              // Use-case orchestration (EventService, ModerationService, MaintenanceService)
+│   ├── infrastructure/
+│   │   └── duckdb/                // DuckDB implementation of the domain repository interfaces
+│   └── interfaces/
+│       └── ws/                    // WebSocket/HTTP transport: dispatch, config, NIP-11/86/98 handling
+├── pkg/                           // Reusable public libraries
+│   ├── errors/                    // AppError type + typed constructors
+│   └── logger/                    // slog-based structured logger setup
+├── tests/                         // Integration tests (relay_test.go, one TestNipXX per NIP)
+├── config.yaml
+└── go.mod
 ```
+
+Every NIP's handling is split across all four layers by concern (transport in `interfaces/ws`, persistence in `infrastructure/duckdb`), not grouped into its own package — this repository is small enough that one relay-wide domain model per concept (event, moderation, subscription) is clearer than per-NIP subdivision. Do not introduce per-NIP feature folders without an explicit task requirement.
 
 ## 2. Dependency Injection with Explicit Construction
 
