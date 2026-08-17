@@ -55,7 +55,7 @@ func NewRelayHandlerWithLimits(events application.EventService, moderationSvc ap
 // be set explicitly to enable the stricter, internet-facing behavior.
 func NewRelayHandlerFull(events application.EventService, moderationSvc application.ModerationService, info RelayInfo, limits ResourceLimits, auth AuthConfig, moderationCfg ModerationConfig, ws WebsocketConfig, buildVersion string) *RelayHandler {
 	if info.Name == "" {
-		info.Name = "Nostr Relay"
+		info.Name = "Nostrfi Relay"
 	}
 	if info.Description == "" {
 		info.Description = "A minimal Nostr relay written in Go."

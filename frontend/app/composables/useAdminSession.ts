@@ -1,6 +1,6 @@
 import type { ChallengeResponse, SessionState } from '~~/shared/types/session'
 import type { EventTemplate } from 'nostr-tools/pure'
-
+import { joinURL } from 'ufo'
 const NIP98_AUTH_KIND = 27235
 
 /**
@@ -27,7 +27,8 @@ export function useAdminSession() {
   async function login(signer: Signer): Promise<SessionState> {
     const { challenge } = await $fetch<ChallengeResponse>('/api/session/challenge')
 
-    const loginUrl = new URL(useRuntimeConfig().app.baseURL + 'api/session/login', window.location.origin).toString()
+    const base = useRuntimeConfig().app.baseURL
+    const loginUrl = new URL(joinURL(base, 'api/session/login'), window.location.origin).toString()
 
     const template: EventTemplate = {
       kind: NIP98_AUTH_KIND,

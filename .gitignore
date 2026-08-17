@@ -27,7 +27,7 @@ backend/db/*.db
 backend/db/*.db.wal
 
 # Environment and configuration files
-.env
+frontend/.env
 .env.local
 config.local.yaml
 

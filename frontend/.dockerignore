@@ -15,5 +15,5 @@ dist
 .DS_Store
 
 # Env overrides
-.env
+../.env
 .env.local
