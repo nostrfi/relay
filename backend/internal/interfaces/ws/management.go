@@ -13,7 +13,7 @@ import (
 )
 
 // nip86ContentType is the Content-Type that selects the NIP-86 relay
-// management API instead of the normal WebSocket/NIP-11/landing-page
+// management API instead of the normal WebSocket/NIP-11
 // handling on the same URI.
 const nip86ContentType = "application/nostr+json+rpc"
 

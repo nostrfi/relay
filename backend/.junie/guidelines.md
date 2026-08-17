@@ -1,5 +1,5 @@
 > Relay-specific coding conventions, architectural rules, testing rules, and security guardrails
-> live in [`CODINGSTANDARDS.md`](../CODINGSTANDARDS.md) at the repo root. This document covers
+> live in [`CODINGSTANDARDS.md`](../../CODINGSTANDARDS.md) at the repo root. This document covers
 > generic Go best practices; consult both.
 
 ## 1. Organize Project Structure

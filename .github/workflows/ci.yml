@@ -10,6 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  DASHBOARD_IMAGE_NAME: ${{ github.repository }}-dashboard
 
 jobs:
   # ── Version ────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ jobs:
           echo "CommitsSinceVersion:  ${{ steps.gitversion.outputs.commitsSinceVersionSource }}"
           echo "Sha:                  ${{ steps.gitversion.outputs.sha }}"
 
-  # ── Build & test ──────────────────────────────────────────────
+  # ── Build & test (backend) ───────────────────────────────────────
   build:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -69,19 +70,24 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: backend/go.mod
           cache: true
+          cache-dependency-path: backend/go.sum
 
       - name: Download deps
+        working-directory: backend
         run: go mod download
 
       - name: Vet
+        working-directory: backend
         run: go vet ./...
 
       - name: Vulnerability scan
+        working-directory: backend
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Build (with version injection)
+        working-directory: backend
         env:
           CGO_ENABLED: 1
         run: |
@@ -90,6 +96,7 @@ jobs:
             -o /tmp/relay ./cmd/relay
 
       - name: Test
+        working-directory: backend
         run: go test -v -race -coverprofile=coverage.out ./tests/...
 
       - name: Upload coverage
@@ -97,7 +104,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ needs.version.outputs.semVer }}
-          path: coverage.out
+          path: backend/coverage.out
           retention-days: 14
 
       # Docker metadata — uses GitVersion outputs for tagging
@@ -122,7 +129,63 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.version=${{ needs.version.outputs.semVer }}
 
-  # ── Docker build & push ───────────────────────────────────────
+  # ── Build & check (frontend) ─────────────────────────────────────
+  frontend:
+    name: Frontend Build & Check
+    runs-on: ubuntu-latest
+    needs: version
+    outputs:
+      tags: ${{ steps.meta.outputs.tags }}
+      labels: ${{ steps.meta.outputs.labels }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install deps
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        working-directory: frontend
+        run: pnpm lint
+
+      - name: Typecheck
+        working-directory: frontend
+        run: pnpm typecheck
+
+      - name: Build
+        working-directory: frontend
+        run: pnpm build
+
+      # Docker metadata — mirrors the backend's tagging scheme
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.DASHBOARD_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.semVer }}
+            type=raw,value=${{ needs.version.outputs.majorMinorPatch }}
+            type=raw,value=sha-${{ needs.version.outputs.sha }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.isPrerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=Nostrfi Relay Dashboard
+            org.opencontainers.image.description=Admin dashboard for the Nostrfi relay
+            org.opencontainers.image.source=https://github.com/nostrfi/relay
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ needs.version.outputs.semVer }}
+
+  # ── Docker build & push (backend) ─────────────────────────────────
   package:
     name: Package & Publish
     runs-on: ubuntu-latest
@@ -149,8 +212,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./backend
+          file: ./backend/Dockerfile
           push: true
           tags: ${{ needs.build.outputs.tags }}
           labels: ${{ needs.build.outputs.labels }}
@@ -158,6 +221,40 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             VERSION=${{ needs.version.outputs.semVer }}
+
+  # ── Docker build & push (dashboard) ───────────────────────────────
+  package-dashboard:
+    name: Package & Publish Dashboard
+    runs-on: ubuntu-latest
+    needs: [version, frontend]
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: ${{ needs.frontend.outputs.tags }}
+          labels: ${{ needs.frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # ── GitHub Release on tag ────────────────────────────────────
   release:
@@ -176,19 +273,20 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version-file: backend/go.mod
 
       - name: Build release binary (linux amd64)
+        working-directory: backend
         env:
           CGO_ENABLED: 1
           GOOS: linux
           GOARCH: amd64
         run: |
-          mkdir -p dist
+          mkdir -p ../dist
           go build \
             -ldflags="-s -w -X main.version=${{ needs.version.outputs.semVer }}" \
-            -o dist/relay-linux-amd64 ./cmd/relay
-          tar -czf dist/relay-linux-amd64.tar.gz -C dist relay-linux-amd64
+            -o ../dist/relay-linux-amd64 ./cmd/relay
+          tar -czf ../dist/relay-linux-amd64.tar.gz -C ../dist relay-linux-amd64
 
       - name: Generate changelog
         id: changelog

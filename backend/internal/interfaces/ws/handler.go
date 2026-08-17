@@ -148,8 +148,7 @@ func (h *RelayHandler) isConnectionSourceBlocked(r *http.Request) (bool, error) 
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// NIP-86: relay management API, on the same URI as the WebSocket
 	// endpoint, distinguished by method and Content-Type rather than
-	// Accept, so it can't collide with the NIP-11/landing-page/upgrade
-	// branches below.
+	// Accept, so it can't collide with the NIP-11/upgrade branches below.
 	if req.Method == http.MethodPost && req.Header.Get("Content-Type") == nip86ContentType {
 		h.handleManagementRequest(w, req)
 		return
@@ -164,9 +163,11 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Serve HTML landing page for non-WebSocket browser requests
+	// Non-WebSocket browser requests: point to the admin dashboard, which
+	// owns the HTML landing experience now (see nostrfi/workspace#28).
 	if !isWebSocketUpgrade(req) {
-		h.serveLandingPage(w, req)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		fmt.Fprintf(w, "%s\nThis is a Nostr relay WebSocket endpoint. See /admin for the admin dashboard, or request Accept: application/nostr+json for the NIP-11 document.\n", h.relayInfo.Name)
 		return
 	}
 

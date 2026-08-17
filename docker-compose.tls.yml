@@ -19,6 +19,7 @@ services:
     restart: unless-stopped
     depends_on:
       - relay
+      - dashboard
     ports:
       - "8443:443"
     volumes:

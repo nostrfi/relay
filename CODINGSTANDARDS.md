@@ -2,6 +2,10 @@
 
 Coding standards for this repository. Referenced by `AGENTS.md` and `.junie/guidelines.md`.
 
+The sections below through "Security Guardrails" cover the Go backend (`backend/`). See
+"Frontend Conventions (TypeScript / Nuxt)" at the end of this document for the Nuxt admin
+dashboard (`frontend/`).
+
 ## Coding Conventions (Go 1.25)
 
 Agents MUST use modern Go idioms. Non-exhaustive checklist:
@@ -48,3 +52,45 @@ Style rules:
 - Rate-limit / bound message sizes and subscription counts per connection.
 - Never log private keys, DMs (NIP-17 payloads), or auth challenges/responses in cleartext.
 - Do not add authentication endpoints that store passwords. Nostr uses pubkey-based auth (NIP-42).
+
+## Frontend Conventions (TypeScript / Nuxt)
+
+Applies to `frontend/`, the Nuxt admin dashboard. Stack: Nuxt 4, `@nuxt/ui`, TypeScript, ESLint
+(via `@nuxt/eslint`), pnpm — the same stack the Nostrfi marketing site uses, so conventions below
+follow that precedent where one already exists.
+
+Conventions:
+
+- TypeScript throughout; no `any` escape hatches without a comment explaining why a stricter type
+  isn't available.
+- Use `<script setup lang="ts">` single-file components. Prefer the Composition API; no Options
+  API components.
+- Use `@nuxt/ui` components (`UCard`, `UBadge`, `UButton`, etc.) instead of hand-rolled
+  equivalents. Only write bespoke markup/CSS for layout the component library doesn't cover.
+- Server-only concerns (calling the relay's HTTP API, reading `runtimeConfig` values that aren't
+  under `public`) belong in `server/api/*` Nitro routes, never fetched directly from
+  client-reachable code — see `server/api/relay-info.get.ts` for the pattern. This keeps
+  internal relay addresses (e.g. the Docker Compose service hostname) out of the client bundle.
+- Types shared between `app/` and `server/` go in `shared/types/`, mirroring the Go backend's JSON
+  shapes where the frontend consumes them (see `shared/types/relay-info.ts` for an example: it
+  mirrors `backend/internal/interfaces/ws/config.go`'s `RelayInfo`/`RelayLimitation`).
+- Match ESLint's `@nuxt/eslint` stylistic config already set in `nuxt.config.ts` (no trailing
+  commas, 1tbs brace style) — do not hand-format against it.
+
+Testing:
+
+- Use [Vitest](https://vitest.dev) (the Nuxt-ecosystem default) for unit/component tests once the
+  dashboard has logic worth testing beyond template rendering. Not wired up yet as of the initial
+  scaffold (nostrfi/workspace#28) — add `@nuxt/test-utils`/`vitest` when the first feature ticket
+  needs it, rather than carrying an empty test setup with nothing to test.
+- Never disable, skip, weaken, or delete a test to make a build pass, matching the backend rule
+  above.
+
+Security:
+
+- Never expose secrets, internal service hostnames, or admin credentials to the client bundle —
+  keep them in server-only `runtimeConfig` keys (not `runtimeConfig.public`) and route access
+  through `server/api/*`.
+- The dashboard is an administrative surface: every `server/api/*` route that reads or mutates
+  relay state must go through the login/session check landing in nostrfi/workspace#35 once that's
+  in place — nothing here yet ships an unauthenticated route beyond the read-only relay-info proxy.

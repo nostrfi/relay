@@ -11,11 +11,10 @@ import (
 const readinessPingTimeout = 2 * time.Second
 
 // NewMux routes /healthz, /readyz, and /metrics alongside relayHandler,
-// which continues to handle every other path (NIP-11, WebSocket upgrades,
-// the landing page) exactly as before. Kept in this package rather than
-// assembled inline in cmd/relay/main.go so tests/relay_test.go — which
-// cannot import a main package — can exercise the exact routing used in
-// production.
+// which continues to handle every other path (NIP-11, WebSocket upgrades)
+// exactly as before. Kept in this package rather than assembled inline in
+// cmd/relay/main.go so tests/relay_test.go — which cannot import a main
+// package — can exercise the exact routing used in production.
 func NewMux(relayHandler http.Handler, ping func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)

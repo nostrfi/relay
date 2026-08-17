@@ -1,0 +1,25 @@
+{
+  "name": "frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "lint": "eslint .",
+    "typecheck": "nuxt typecheck"
+  },
+  "dependencies": {
+    "@nuxt/ui": "^4.10.0",
+    "nuxt": "^4.4.8"
+  },
+  "devDependencies": {
+    "@nuxt/eslint": "^1.16.0",
+    "@types/node": "^22.13.1",
+    "eslint": "^10.7.0",
+    "typescript": "^6.0.3",
+    "vue-tsc": "^3.3.7"
+  },
+  "packageManager": "pnpm@11.22.0"
+}
