@@ -27,6 +27,8 @@ backend/db/*.db
 backend/db/*.db.wal
 
 # Environment and configuration files
+# Unanchored, so it covers both frontend/.env and the repository-root .env
+# that `docker compose` reads NUXT_SESSION_PASSWORD from.
 .env
 .env.local
 config.local.yaml

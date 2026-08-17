@@ -41,6 +41,14 @@ services:
     # network access for local debugging.
     environment:
       - NUXT_RELAY_API_BASE=http://relay:8080
+      # Seals the admin session cookie. Required — the dashboard refuses to
+      # open a session without it, rather than falling back to a known
+      # secret. Generate one per deployment: `openssl rand -base64 48`.
+      - NUXT_SESSION_PASSWORD=${NUXT_SESSION_PASSWORD:?set NUXT_SESSION_PASSWORD, e.g. in a .env file}
+      # Which pubkey may sign in. Defaults to the relay's NIP-11 pubkey when
+      # empty; set it when the relay's moderation.admin_pubkey differs, and
+      # keep the two in step.
+      - NUXT_ADMIN_PUBKEY=${NUXT_ADMIN_PUBKEY:-}
     healthcheck:
       # node:22-bookworm-slim has no wget; healthcheck.js uses Node's
       # built-in fetch instead, avoiding an apt-get layer just for this.

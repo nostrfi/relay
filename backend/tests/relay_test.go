@@ -720,7 +720,7 @@ func TestPlainBrowserRequest(t *testing.T) {
 	n, _ := resp.Body.Read(body)
 	body = body[:n]
 
-	assert.Contains(t, string(body), "Nostr Relay")
+	assert.Contains(t, string(body), "Nostrfi Relay")
 	assert.Contains(t, string(body), "/admin")
 	assert.Contains(t, string(body), "application/nostr+json")
 }
@@ -752,7 +752,7 @@ func TestNip11(t *testing.T) {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	assert.Equal(t, "Nostr Relay", info.Name)
+	assert.Equal(t, "Nostrfi Relay", info.Name)
 	assert.Equal(t, "test", info.Version) // build version injected via NewRelayHandler
 	assert.Contains(t, info.SupportedNips, 11)
 	assert.Contains(t, info.SupportedNips, 17)

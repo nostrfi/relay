@@ -1,3 +1,25 @@
+<script setup lang="ts">
+import { npubEncode } from 'nostr-tools/nip19'
+
+const { state, logout } = useAdminSession()
+
+// Truncated with the full value kept accessible, per the brand rule for
+// protocol identifiers.
+const npub = computed(() => {
+  const pubkey = state.value?.pubkey
+  if (!pubkey) {
+    return null
+  }
+  const encoded = npubEncode(pubkey)
+  return { full: encoded, short: `${encoded.slice(0, 10)}…${encoded.slice(-6)}` }
+})
+
+async function signOut() {
+  await logout()
+  await navigateTo('/login')
+}
+</script>
+
 <template>
   <div
     data-nf-mode="signal"
@@ -7,6 +29,23 @@
       <div class="nf-header__inner">
         <AppLogo :size="32" />
         <span class="nf-wordmark font-display">Relay Admin</span>
+
+        <div
+          v-if="npub"
+          class="nf-identity"
+        >
+          <span
+            class="nf-npub font-mono"
+            :title="npub.full"
+          >{{ npub.short }}</span>
+          <UButton
+            size="xs"
+            variant="ghost"
+            @click="signOut"
+          >
+            Sign out
+          </UButton>
+        </div>
       </div>
     </header>
 
@@ -53,6 +92,18 @@
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--ui-text-highlighted);
+}
+
+.nf-identity {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-2);
+  margin-left: auto;
+}
+
+.nf-npub {
+  font-size: 13px;
+  color: var(--ui-text-muted);
 }
 
 .nf-main {

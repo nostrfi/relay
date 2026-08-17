@@ -108,12 +108,32 @@ checks colour, so these rules are the only thing preventing drift — treat them
 - Dark mode is a **calm dark Signal** variant, not Sovereign. New dark styling belongs in the
   `.dark` token block in `main.css`, not as per-component overrides.
 
+Authentication and sessions:
+
+- **The session is an identity assertion, not a capability.** It records which pubkey signed in and
+  gates the UI. It is not a credential the relay accepts — every privileged relay operation carries
+  its own per-request NIP-98 signature, checked by the relay against `moderation.admin_pubkey`. Do
+  not add a server-issued token that stands in for a signature.
+- **Route middleware is not a security boundary.** `app/middleware/auth.global.ts` only redirects
+  the browser. Every `server/api/*` route that returns relay data or proxies an action must call
+  `requireAdminSession(event)` itself.
+- **Sign privileged relay calls client-side**, then forward the signed event verbatim. The NIP-98
+  `u` tag must name the URL *the relay* observes — `/` with no query, since the relay serves NIP-86
+  from the same URI as the WebSocket endpoint — not the dashboard path the browser called.
+- **Verify the observed path with `getRequestURL(event).pathname`, never `event.path`**, when
+  checking a `u` tag against a dashboard endpoint: Nitro strips `app.baseURL` (`/admin`) for route
+  matching, but the browser signs the public path.
+- **Never log an auth event, session cookie, challenge, or bunker key.** Log the resulting pubkey
+  and the outcome, matching the backend's logging guardrail.
+- **Fail closed on missing secrets.** `NUXT_SESSION_PASSWORD` has no fallback value by design.
+- Obtain signatures through `useSigner`, never by calling `window.nostr` or a bunker directly, so
+  both signer types keep working everywhere.
+
 Testing:
 
-- Use [Vitest](https://vitest.dev) (the Nuxt-ecosystem default) for unit/component tests once the
-  dashboard has logic worth testing beyond template rendering. Not wired up yet as of the initial
-  scaffold (nostrfi/workspace#28) — add `@nuxt/test-utils`/`vitest` when the first feature ticket
-  needs it, rather than carrying an empty test setup with nothing to test.
+- [Vitest](https://vitest.dev) runs the server-side unit tests in `test/` (`pnpm test`, also a CI
+  step). Logic worth testing lives in `server/utils/` — challenge lifecycle, NIP-98 verification,
+  rate limiting — rather than in route handlers, so it can be tested without a running server.
 - Never disable, skip, weaken, or delete a test to make a build pass, matching the backend rule
   above.
 
