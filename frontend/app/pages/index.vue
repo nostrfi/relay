@@ -33,7 +33,7 @@ const { data: relay } = await useFetch('/api/relay-info')
               target="_blank"
               rel="noopener"
               class="text-primary hover:underline"
-            >{{ relay.software }}</a>
+            >{{ relay.name }}</a>
           </dd>
         </div>
         <div>
