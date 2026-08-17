@@ -77,6 +77,37 @@ Conventions:
 - Match ESLint's `@nuxt/eslint` stylistic config already set in `nuxt.config.ts` (no trailing
   commas, 1tbs brace style) — do not hand-format against it.
 
+Styling and brand:
+
+The dashboard implements the Nostrfi **Sovereign Signal** brand system. Nothing in ESLint or CI
+checks colour, so these rules are the only thing preventing drift — treat them as review criteria.
+
+- **Signal mode only.** The dashboard is a configuration, moderation, and trust surface, so it
+  never takes the Sovereign hero treatment: no glow, no oversized display type, no decorative
+  motion. `app/layouts/default.vue` sets `data-nf-mode="signal"` on its root; keep it there.
+- **`app/assets/css/brand.css` is a pinned copy of the canonical workspace tokens**, not a file to
+  edit. Change it only by re-copying from the workspace (`60-marketing/brand/tokens/brand.css`) and
+  updating the provenance header with the new version and date. Never alter a token value locally.
+- **No literal colour values in components or scoped styles.** Use the `--nf-*` brand tokens, or
+  the `--ui-*` aliases mapped from them in `app/assets/css/main.css`, which is where every mapping
+  lives.
+- **Use approved foreground/background pairs only** (contrast table in the workspace
+  `brand-system.md`). `#f7931a` on white is explicitly not an approved text pair.
+- **Colour hierarchy is roughly 65 / 25 / 10** — neutral surface, violet identity, at most 10%
+  orange. Orange answers "what matters now?"; it is never the colour of a destructive action, which
+  uses `--ui-error`. Never signal state by colour alone: pair it with a label or icon.
+- **Typography roles:** Space Grotesk (`font-display`) for headings, Inter (`font-sans`) for body
+  and UI, IBM Plex Mono (`font-mono`) for event IDs, pubkeys, relay URLs, and code. Add
+  `nf-tabular` to metrics, counts, and timestamps so columns align. Fonts are self-hosted and
+  version-pinned; do not add a webfont CDN link.
+- **Separate with borders and tonal shift before shadows.** `--nf-shadow-marketing` is for
+  marketing surfaces and has no place here.
+- **Spacing and radius come from tokens** (`--nf-space-*`, `--nf-radius-*`), not ad-hoc pixels.
+- Keep the keyboard focus ring intact — the global `*:focus-visible` rule in `main.css` is the
+  brand treatment (3px violet-500, offset) and applies in both light and dark.
+- Dark mode is a **calm dark Signal** variant, not Sovereign. New dark styling belongs in the
+  `.dark` token block in `main.css`, not as per-component overrides.
+
 Testing:
 
 - Use [Vitest](https://vitest.dev) (the Nuxt-ecosystem default) for unit/component tests once the
