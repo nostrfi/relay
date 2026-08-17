@@ -42,7 +42,14 @@ services:
     environment:
       - NUXT_RELAY_API_BASE=http://relay:8080
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3000/admin"]
+      # node:22-bookworm-slim has no wget; healthcheck.js uses Node's
+      # built-in fetch instead, avoiding an apt-get layer just for this.
+      # A script file (not an inline `-e` string) because the Docker Engine
+      # API's CMD-array healthcheck test gets word-split by at least one
+      # container engine in local use here even though each `-e` argument
+      # is a single Compose YAML scalar — a script file sidesteps that by
+      # keeping every CMD array element free of embedded whitespace.
+      test: ["CMD", "node", "/app/healthcheck.js"]
       interval: 15s
       timeout: 5s
       retries: 3

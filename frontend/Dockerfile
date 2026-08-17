@@ -23,6 +23,7 @@ WORKDIR /app
 # Nitro's node-server preset output is self-contained (bundled deps) —
 # no separate `pnpm install --prod` needed in the runtime image.
 COPY --from=builder /build/.output /app/.output
+COPY healthcheck.js /app/healthcheck.js
 
 ENV PORT=3000
 ENV HOST=0.0.0.0

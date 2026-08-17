@@ -1,0 +1,19 @@
+# Node dependencies — reinstalled fresh inside the image
+node_modules
+
+# Nuxt dev/build outputs
+.output
+.data
+.nuxt
+.nitro
+.cache
+dist
+
+# Git / editor / OS
+.git
+.idea
+.DS_Store
+
+# Env overrides
+.env
+.env.local
