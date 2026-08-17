@@ -4,15 +4,30 @@ const { login } = useAdminSession()
 useSeoMeta({ title: 'Sign in' })
 
 const bunkerInput = ref('')
-const pending = ref<'nip07' | 'nip46' | null>(null)
+type Pending = 'nip07' | 'nip46' | 'nip46-restore'
+
+const pending = ref<Pending | null>(null)
 const error = ref('')
 
 const extensionAvailable = ref(false)
+const storedBunker = ref(false)
 onMounted(() => {
   extensionAvailable.value = hasNip07()
+  // A previous bunker pairing can be reconnected instead of re-pairing from
+  // the URL, which is the point of persisting it.
+  storedBunker.value = hasStoredBunker()
 })
 
-async function signIn(create: () => Promise<Signer>, kind: 'nip07' | 'nip46') {
+async function reconnectBunker(): Promise<Signer> {
+  const signer = await restoreBunkerSigner()
+  if (!signer) {
+    storedBunker.value = false
+    throw new Error('The saved remote signer could not be reconnected. Enter its bunker URL again.')
+  }
+  return signer
+}
+
+async function signIn(create: () => Promise<Signer>, kind: Pending) {
   error.value = ''
   pending.value = kind
 
@@ -90,8 +105,25 @@ function messageFor(cause: unknown): string {
         <span class="text-sm font-semibold uppercase tracking-wide text-(--ui-text-muted)">Remote signer</span>
       </template>
 
+      <div
+        v-if="storedBunker"
+        class="mb-6"
+      >
+        <p class="mb-3 text-sm text-(--ui-text-muted)">
+          This browser is already paired with a remote signer.
+        </p>
+        <UButton
+          :loading="pending === 'nip46-restore'"
+          :disabled="pending !== null"
+          @click="signIn(reconnectBunker, 'nip46-restore')"
+        >
+          Reconnect saved signer
+        </UButton>
+      </div>
+
       <p class="mb-4 text-sm text-(--ui-text-muted)">
-        Connect a NIP-46 bunker with its <code class="font-mono">bunker://</code> URL, or a
+        {{ storedBunker ? 'Or pair a different signer' : 'Connect a NIP-46 bunker' }} with its
+        <code class="font-mono">bunker://</code> URL, or a
         <code class="font-mono">name@domain</code> identifier.
       </p>
 

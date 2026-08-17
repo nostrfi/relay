@@ -14,6 +14,8 @@ dist
 .idea
 .DS_Store
 
-# Env overrides
-../.env
+# Env overrides. Patterns are relative to the build context (this directory),
+# so they cannot name anything above it — the repository-root .env is already
+# outside the context and never reaches the image.
+.env
 .env.local

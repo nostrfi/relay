@@ -1,6 +1,7 @@
 import type { ChallengeResponse, SessionState } from '~~/shared/types/session'
 import type { EventTemplate } from 'nostr-tools/pure'
-import { joinURL } from 'ufo'
+import { loginUrlFor } from '~~/shared/utils/login-url'
+
 const NIP98_AUTH_KIND = 27235
 
 /**
@@ -13,11 +14,13 @@ const NIP98_AUTH_KIND = 27235
 export function useAdminSession() {
   const state = useState<SessionState | null>('admin-session', () => null)
 
-  /** Fetches the session once per navigation unless forced. */
-  async function ensureLoaded(force = false): Promise<SessionState> {
-    if (state.value && !force) {
-      return state.value
-    }
+  /**
+   * Re-reads the session from the server. Called on every navigation rather
+   * than cached for the lifetime of the SPA: the cookie can expire mid-visit
+   * or be cleared in another tab, and a stale cached value would leave the
+   * operator navigating a signed-in UI whose every request 401s.
+   */
+  async function refresh(): Promise<SessionState> {
     // useRequestFetch forwards the incoming cookie header during SSR;
     // a plain $fetch would arrive at the server route unauthenticated.
     state.value = await useRequestFetch()<SessionState>('/api/session')
@@ -27,8 +30,7 @@ export function useAdminSession() {
   async function login(signer: Signer): Promise<SessionState> {
     const { challenge } = await $fetch<ChallengeResponse>('/api/session/challenge')
 
-    const base = useRuntimeConfig().app.baseURL
-    const loginUrl = new URL(joinURL(base, 'api/session/login'), window.location.origin).toString()
+    const loginUrl = loginUrlFor(useRuntimeConfig().app.baseURL, window.location.origin)
 
     const template: EventTemplate = {
       kind: NIP98_AUTH_KIND,
@@ -62,5 +64,5 @@ export function useAdminSession() {
     state.value = null
   }
 
-  return { state, ensureLoaded, login, logout }
+  return { state, refresh, login, logout }
 }

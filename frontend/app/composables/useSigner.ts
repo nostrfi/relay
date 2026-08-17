@@ -55,6 +55,11 @@ export function clearStoredBunker(): void {
   }
 }
 
+/** True when this browser has a bunker pairing to reconnect with. */
+export function hasStoredBunker(): boolean {
+  return readStoredBunker() !== null
+}
+
 export function hasNip07(): boolean {
   return import.meta.client && typeof window.nostr !== 'undefined'
 }

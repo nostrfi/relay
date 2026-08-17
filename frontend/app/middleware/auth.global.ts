@@ -5,10 +5,14 @@
  * Nuxt app, where anything it decides can be bypassed by calling the API
  * directly. Every server route that returns relay data enforces the session
  * itself via requireAdminSession.
+ *
+ * The session is re-read on every navigation rather than cached, so an
+ * expired or externally cleared cookie sends the operator back to the login
+ * page instead of leaving them in a signed-in UI whose requests all fail.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
-  const { ensureLoaded } = useAdminSession()
-  const session = await ensureLoaded()
+  const { refresh } = useAdminSession()
+  const session = await refresh()
 
   if (to.path === '/login') {
     return session.authenticated ? navigateTo('/') : undefined
