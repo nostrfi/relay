@@ -143,6 +143,12 @@ jobs:
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
+        with:
+          # frontend/package.json's "packageManager" field pins the same
+          # version, but pnpm/action-setup only auto-detects that field from
+          # a repo-root package.json — ours lives in frontend/, so it's
+          # passed explicitly here instead.
+          version: 11.22.0
 
       - name: Set up Node
         uses: actions/setup-node@v4
