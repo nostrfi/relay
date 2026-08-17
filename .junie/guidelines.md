@@ -1,3 +1,7 @@
+> Relay-specific coding conventions, architectural rules, testing rules, and security guardrails
+> live in [`CODINGSTANDARDS.md`](../CODINGSTANDARDS.md) at the repo root. This document covers
+> generic Go best practices; consult both.
+
 ## 1. Organize Project Structure
 
 * Follow a layered DDD structure: `domain` owns entities, value objects, and repository interfaces; `application` orchestrates use cases against those interfaces; `infrastructure` implements them; `interfaces` decodes transport requests and calls `application`
