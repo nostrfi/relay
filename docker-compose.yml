@@ -1,7 +1,7 @@
 services:
   relay:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
     # RELAY_VERSION selects which CI-published tag to run — see README.md's
     # "Deployment" section for the rollback recipe. Unset, this still builds
@@ -15,11 +15,41 @@ services:
       # Persist DuckDB across container restarts
       - relay-db:/app/db
       # Override config without rebuilding the image
-      - ./config.yaml:/app/config.yaml:ro
+      - ./backend/config.yaml:/app/config.yaml:ro
     environment:
       - LOG_LEVEL=info
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/readyz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    # DASHBOARD_VERSION mirrors RELAY_VERSION's rollback recipe, pinning
+    # which CI-published dashboard image tag to run.
+    image: ghcr.io/nostrfi/relay-dashboard:${DASHBOARD_VERSION:-latest}
+    container_name: nostrfi-relay-dashboard
+    restart: unless-stopped
+    depends_on:
+      - relay
+    # No host port mapping: only reachable via the Caddy overlay's /admin
+    # route (docker-compose.tls.yml), or via `docker compose exec`/internal
+    # network access for local debugging.
+    environment:
+      - NUXT_RELAY_API_BASE=http://relay:8080
+    healthcheck:
+      # node:22-bookworm-slim has no wget; healthcheck.js uses Node's
+      # built-in fetch instead, avoiding an apt-get layer just for this.
+      # A script file (not an inline `-e` string) because the Docker Engine
+      # API's CMD-array healthcheck test gets word-split by at least one
+      # container engine in local use here even though each `-e` argument
+      # is a single Compose YAML scalar — a script file sidesteps that by
+      # keeping every CMD array element free of embedded whitespace.
+      test: ["CMD", "node", "/app/healthcheck.js"]
       interval: 15s
       timeout: 5s
       retries: 3

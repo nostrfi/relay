@@ -1,5 +1,6 @@
-# Example TLS-terminating reverse proxy for the relay. See README.md's
-# "Deployment" section for how to bring this up alongside docker-compose.yml.
+# Example TLS-terminating reverse proxy for the relay and its admin
+# dashboard. See README.md's "Deployment" section for how to bring this up
+# alongside docker-compose.yml.
 #
 # `tls internal` makes Caddy issue itself a locally-trusted certificate,
 # which is what this file is set up for out of the box (local testing,
@@ -13,5 +14,18 @@
 
 localhost {
 	tls internal
-	reverse_proxy relay:8080
+
+	# Admin dashboard (Nuxt SSR), path-based at /admin. Nuxt's own
+	# `app.baseURL: /admin` config expects the /admin prefix on incoming
+	# requests, so this uses `handle` (which preserves the path), not
+	# `handle_path` (which would strip it).
+	handle /admin* {
+		reverse_proxy dashboard:3000
+	}
+
+	# Everything else (WebSocket upgrades, NIP-11, NIP-86 management,
+	# health/readiness) stays on the relay, unchanged.
+	handle {
+		reverse_proxy relay:8080
+	}
 }

@@ -693,7 +693,7 @@ relay_info:
 	assert.Equal(t, "", cfg.RelayInfo.Version)
 }
 
-func TestLandingPage(t *testing.T) {
+func TestPlainBrowserRequest(t *testing.T) {
 	server, _, cleanup := startTestRelay(t)
 	defer cleanup()
 
@@ -702,7 +702,9 @@ func TestLandingPage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create request: %v", err)
 	}
-	// Simulate a regular browser request (no WebSocket headers, no nostr+json accept)
+	// Simulate a regular browser request (no WebSocket headers, no nostr+json accept).
+	// The relay no longer renders an HTML landing page itself — see
+	// nostrfi/workspace#28 — it points such requests at the admin dashboard.
 	req.Header.Set("Accept", "text/html")
 
 	resp, err := client.Do(req)
@@ -712,19 +714,15 @@ func TestLandingPage(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, resp.Header.Get("Content-Type"), "text/html")
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/plain")
 
 	body := make([]byte, 8192)
 	n, _ := resp.Body.Read(body)
 	body = body[:n]
 
-	assert.Contains(t, string(body), "<!DOCTYPE html>")
 	assert.Contains(t, string(body), "Nostr Relay")
-	assert.Contains(t, string(body), "Supported NIPs")
-	assert.Contains(t, string(body), "NIP-1")
-	assert.Contains(t, string(body), "NIP-11")
-	assert.NotContains(t, string(body), "Connect")
-	assert.Contains(t, string(body), "test") // build version injected via NewRelayHandler
+	assert.Contains(t, string(body), "/admin")
+	assert.Contains(t, string(body), "application/nostr+json")
 }
 
 func TestNip11(t *testing.T) {

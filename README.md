@@ -1,6 +1,11 @@
-# Nostr Relay Implementation
+# Nostrfi Relay
 
-A robust and modern Nostr relay written in Go, supporting a wide range of Nostr Improvement Proposals (NIPs).
+A robust and modern Nostr relay written in Go, supporting a wide range of Nostr Improvement Proposals (NIPs), plus an admin dashboard (Nuxt 4, SSR) for operating it.
+
+This is a two-part monorepo:
+
+- **`backend/`** — the Go relay described below.
+- **`frontend/`** — the admin dashboard, reverse-proxied at `/admin` alongside the relay. See [`AGENTS.md`](AGENTS.md) for the full repository layout and the two-process architecture.
 
 ## Supported NIPs
 
@@ -27,13 +32,14 @@ The relay includes a comprehensive automated test suite and can also be tested m
 
 ### Automated Tests
 
-To run the full test suite, use the Go test tool:
+To run the full test suite, use the Go test tool from `backend/`:
 
 ```bash
+cd backend
 go test -v ./tests/...
 ```
 
-Each NIP has its own dedicated test function within `tests/relay_test.go` (e.g., `TestNip01`, `TestNip77`).
+Each NIP has its own dedicated test function within `backend/tests/relay_test.go` (e.g., `TestNip01`, `TestNip77`).
 
 ### Manual Testing with Curl
 
@@ -102,7 +108,7 @@ NIP-42 Authentication is required to retrieve these events.
 
 ## Configuration
 
-The relay can be configured via `config.yaml` in the root directory. You can customize the relay name, description, supported NIPs, and server limitations.
+The relay can be configured via `backend/config.yaml`. You can customize the relay name, description, supported NIPs, and server limitations.
 
 ```yaml
 relay_info:
@@ -119,7 +125,7 @@ server:
   shutdown_timeout_seconds: 5      # graceful-shutdown deadline
 
 storage:
-  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags
+  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags, relative to backend/
 ```
 
 All three settings default to the values shown above when unset. `storage.db_path` is read by `-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
@@ -215,11 +221,11 @@ Every request must carry an `Authorization: Nostr <base64>` header containing a 
 
 ## Database
 
-The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `db/relay.db`.
+The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `backend/db/relay.db`.
 
 ### Schema migrations
 
-Schema changes are applied by a versioned migration runner (`internal/infrastructure/duckdb/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
+Schema changes are applied by a versioned migration runner (`backend/internal/infrastructure/duckdb/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
 
 ### Retention and maintenance
 
@@ -233,7 +239,8 @@ A background worker deletes events whose NIP-40 `expiration` has passed (and the
 ### Backup and restore
 
 ```sh
-# Export the database to a directory (DuckDB's native EXPORT DATABASE, Parquet format)
+# Run from backend/. Exports the database to a directory (DuckDB's native
+# EXPORT DATABASE, Parquet format)
 go run ./cmd/relay -backup /path/to/backup-dir
 
 # Import a backup into a fresh database and verify it
@@ -246,36 +253,48 @@ This tool is deliberately not scheduled or triggered automatically by the relay 
 
 ## Deployment
 
-The relay itself never terminates TLS — see `operating-model.md`'s application-vs-deployment boundary. `docker-compose.yml`'s `image` now references `ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}`, the tag CI actually publishes (GitVersion-driven semver, `sha-<shortsha>`, and `latest`), so both TLS termination and rollback below use the real deployment artifact rather than a locally-built, disconnected image name.
+The relay itself never terminates TLS — see `operating-model.md`'s application-vs-deployment boundary. `docker-compose.yml`'s `relay.image` references `ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}` and `dashboard.image` references `ghcr.io/nostrfi/relay-dashboard:${DASHBOARD_VERSION:-latest}` — the tags CI actually publishes for each (GitVersion-driven semver, `sha-<shortsha>`, and `latest`), so both TLS termination and rollback below use the real deployment artifacts rather than locally-built, disconnected image names.
+
+The relay and the dashboard are **separate processes** (the dashboard is a Nuxt SSR app, not a static bundle baked into the relay binary) — see [`AGENTS.md`](AGENTS.md)'s "Two-process architecture" for how they're wired together.
 
 ### TLS termination
 
-`docker-compose.tls.yml` is an overlay that adds a [Caddy](https://caddyserver.com/) reverse proxy in front of the relay and removes the relay's own host-published port, so Caddy becomes the sole public entry point:
+`docker-compose.tls.yml` is an overlay that adds a [Caddy](https://caddyserver.com/) reverse proxy in front of the relay and dashboard and removes the relay's own host-published port, so Caddy becomes the sole public entry point. It routes `/admin/*` to the dashboard and everything else to the relay:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
-curl https://localhost:8443/ -H "Accept: application/nostr+json"   # self-signed locally; use -k or trust Caddy's local CA
+curl https://localhost:8443/ -H "Accept: application/nostr+json"   # relay NIP-11 document; self-signed locally, use -k or trust Caddy's local CA
+curl https://localhost:8443/admin                                  # admin dashboard
 ```
 
 The bundled `Caddyfile` uses `tls internal` (Caddy issues itself a locally-trusted certificate) so this works out of the box with no domain or DNS setup — exactly what's exercised above. For an internet-facing deployment: replace `localhost` in the `Caddyfile` with your real domain and delete the `tls internal` line; Caddy then obtains and renews a real Let's Encrypt certificate automatically via ACME, no other configuration changes needed. Port `8443` is used above because this was verified in a rootless-container environment that can't bind privileged host ports without extra host configuration — on a host that can, map `443:443` (and `80:80` for the ACME HTTP challenge) instead.
 
 ### Rollback
 
-Every CI build publishes to `ghcr.io/nostrfi/relay` under several tags (see `.github/workflows/ci.yml`): a full semver (`1.2.3`), `sha-<shortsha>`, and `latest` (non-prerelease builds only). To run a specific previously-published version, or roll back to one:
+Every CI build publishes to `ghcr.io/nostrfi/relay` and `ghcr.io/nostrfi/relay-dashboard` under several tags each (see `.github/workflows/ci.yml`): a full semver (`1.2.3`), `sha-<shortsha>`, and `latest` (non-prerelease builds only). To run a specific previously-published version, or roll back to one:
 
 ```sh
 RELAY_VERSION=1.2.2 docker compose pull relay
 RELAY_VERSION=1.2.2 docker compose up -d relay
+
+DASHBOARD_VERSION=1.2.2 docker compose pull dashboard
+DASHBOARD_VERSION=1.2.2 docker compose up -d dashboard
 ```
 
-This mechanism — swap `RELAY_VERSION`, then recreate the container — is what was exercised during development (using two locally-built images standing in for two releases, since pulling the real published tags requires registry credentials not available in every environment): deploying one version, then switching to the other, confirms the running version (visible in the NIP-11 `version` field) changes correctly on each swap.
+This mechanism — swap `RELAY_VERSION`/`DASHBOARD_VERSION`, then recreate the container — is what was exercised for the relay during development (using two locally-built images standing in for two releases, since pulling the real published tags requires registry credentials not available in every environment): deploying one version, then switching to the other, confirms the running version (visible in the NIP-11 `version` field) changes correctly on each swap. The dashboard image follows the same mechanism but has no equivalent version-visible-in-response check yet.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request against `master`:
+`.github/workflows/ci.yml` runs on every push and pull request against `master`, with separate jobs for the backend and frontend:
 
+Backend (`backend/`):
 1. `go vet ./...`
 2. **Vulnerability scan**: `go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...` — pinned to an exact version for reproducibility, not `@latest`. A finding fails the build; it is not merely reported. Since `govulncheck` also checks the standard library itself against the pinned toolchain, keeping `go.mod`'s `toolchain` directive reasonably current is part of keeping this gate green — it isn't only about this module's direct dependencies.
 3. `go build`, then `go test -race ./tests/...`
 
-Version tagging (GitVersion), the Docker image build/push to `ghcr.io/nostrfi/relay`, and GitHub Releases on tag pushes run in later jobs in the same workflow, gated on the steps above passing.
+Frontend (`frontend/`):
+1. `pnpm lint` (ESLint)
+2. `pnpm typecheck` (`nuxt typecheck`)
+3. `pnpm build`
+
+Version tagging (GitVersion), the Docker image build/push to `ghcr.io/nostrfi/relay` and `ghcr.io/nostrfi/relay-dashboard`, and GitHub Releases on tag pushes run in later jobs in the same workflow, gated on the steps above passing.

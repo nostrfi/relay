@@ -4,8 +4,8 @@
 *.dll
 *.so
 *.dylib
-/relay
-/loadtest
+/backend/relay
+/backend/loadtest
 
 # Test binary, built with `go test -c`
 *.test
@@ -23,13 +23,22 @@ go.work.sum
 vendor/
 
 # DuckDB database files
-db/*.db
-db/*.db.wal
+backend/db/*.db
+backend/db/*.db.wal
 
 # Environment and configuration files
 .env
 .env.local
 config.local.yaml
+
+# Nuxt dev/build outputs
+frontend/.output
+frontend/.data
+frontend/.nuxt
+frontend/.nitro
+frontend/.cache
+frontend/dist
+frontend/node_modules
 
 # JetBrains IDEs
 .idea/
