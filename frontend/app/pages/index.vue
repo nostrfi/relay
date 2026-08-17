@@ -3,9 +3,9 @@ const { data: relay } = await useFetch('/api/relay-info')
 </script>
 
 <template>
-  <div class="mx-auto max-w-3xl px-4 py-12">
-    <header class="mb-8 text-center">
-      <h1 class="text-3xl font-bold">
+  <div class="mx-auto max-w-3xl">
+    <header class="mb-8">
+      <h1 class="font-display text-3xl font-semibold tracking-tight">
         {{ relay?.name || 'Nostrfi Relay' }}
       </h1>
       <p
@@ -40,7 +40,9 @@ const { data: relay } = await useFetch('/api/relay-info')
           <dt class="text-sm text-(--ui-text-muted)">
             Version
           </dt>
-          <dd>{{ relay?.version }}</dd>
+          <dd class="nf-tabular">
+            {{ relay?.version }}
+          </dd>
         </div>
         <div>
           <dt class="text-sm text-(--ui-text-muted)">
@@ -87,13 +89,17 @@ const { data: relay } = await useFetch('/api/relay-info')
           <dt class="text-sm text-(--ui-text-muted)">
             Max Message Length
           </dt>
-          <dd>{{ relay.limitation.max_message_length }}</dd>
+          <dd class="nf-tabular">
+            {{ relay.limitation.max_message_length }}
+          </dd>
         </div>
         <div>
           <dt class="text-sm text-(--ui-text-muted)">
             Max Subscriptions
           </dt>
-          <dd>{{ relay.limitation.max_subscriptions }}</dd>
+          <dd class="nf-tabular">
+            {{ relay.limitation.max_subscriptions }}
+          </dd>
         </div>
         <div>
           <dt class="text-sm text-(--ui-text-muted)">

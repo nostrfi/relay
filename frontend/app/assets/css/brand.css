@@ -1,0 +1,97 @@
+/*
+ * Nostrfi brand tokens — Sovereign Signal 1.0
+ * Source: workspace 60-marketing/brand/tokens/brand.css
+ * Copied 2026-08-17. Do not change canonical values.
+ * See 60-marketing/brand/brand-system.md for usage rules.
+ */
+:root {
+  color-scheme: light;
+
+  --nf-ink-950: #100b1a;
+  --nf-canvas: #fbf9ff;
+  --nf-surface: #f3eeff;
+  --nf-white: #ffffff;
+  --nf-violet-700: #6d28d9;
+  --nf-violet-500: #8b5cf6;
+  --nf-violet-100: #ede9fe;
+  --nf-orange-700: #c2410c;
+  --nf-orange-500: #f7931a;
+  --nf-slate-600: #625b70;
+  --nf-border: #ddd6e8;
+  --nf-success: #15803d;
+  --nf-warning: #a16207;
+  --nf-danger: #b91c1c;
+  --nf-void: #09070d;
+  --nf-ultraviolet: #7c3aed;
+  --nf-pulse: #ff8a00;
+  --nf-plasma: #d946ef;
+  --nf-frost: #f5f3ff;
+
+  --nf-background: var(--nf-canvas);
+  --nf-foreground: var(--nf-ink-950);
+  --nf-muted-foreground: var(--nf-slate-600);
+  --nf-primary: var(--nf-violet-700);
+  --nf-primary-foreground: var(--nf-white);
+  --nf-accent: var(--nf-orange-500);
+  --nf-accent-foreground: var(--nf-ink-950);
+  --nf-focus: var(--nf-violet-500);
+
+  --nf-font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --nf-font-body: "Inter", system-ui, sans-serif;
+  --nf-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+
+  --nf-radius-compact: 8px;
+  --nf-radius-default: 12px;
+  --nf-radius-pill: 999px;
+
+  --nf-space-1: 4px;
+  --nf-space-2: 8px;
+  --nf-space-3: 12px;
+  --nf-space-4: 16px;
+  --nf-space-6: 24px;
+  --nf-space-8: 32px;
+  --nf-space-12: 48px;
+  --nf-space-16: 64px;
+  --nf-space-24: 96px;
+
+  --nf-shadow-marketing: 0 24px 70px rgb(16 11 26 / 12%);
+}
+
+[data-nf-mode="signal"] {
+  color-scheme: light;
+  --nf-background: var(--nf-canvas);
+  --nf-foreground: var(--nf-ink-950);
+  --nf-muted-foreground: var(--nf-slate-600);
+  --nf-surface: #f3eeff;
+  --nf-border: #ddd6e8;
+  --nf-primary: var(--nf-violet-700);
+  --nf-primary-foreground: var(--nf-white);
+  --nf-accent: var(--nf-orange-500);
+  --nf-accent-foreground: var(--nf-ink-950);
+}
+
+[data-nf-mode="sovereign"] {
+  color-scheme: dark;
+  --nf-background: var(--nf-void);
+  --nf-foreground: var(--nf-frost);
+  --nf-muted-foreground: #c8bfd6;
+  --nf-surface: #171021;
+  --nf-border: #3b2e49;
+  --nf-primary: var(--nf-pulse);
+  --nf-primary-foreground: var(--nf-void);
+  --nf-accent: var(--nf-ultraviolet);
+  --nf-accent-foreground: var(--nf-frost);
+  --nf-focus: var(--nf-pulse);
+  --nf-shadow-marketing: 0 30px 100px rgb(124 58 237 / 20%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-nf-mode]) {
+    color-scheme: dark;
+    --nf-background: #100b1a;
+    --nf-foreground: #f5f3ff;
+    --nf-muted-foreground: #c8bfd6;
+    --nf-surface: #1d1429;
+    --nf-border: #3b2e49;
+  }
+}
