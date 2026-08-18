@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"relay/internal/application"
+	domainevent "relay/internal/domain/event"
 	"relay/internal/infrastructure/duckdb"
 	"relay/internal/interfaces/ws"
 	"relay/pkg/metrics"
@@ -3416,6 +3418,15 @@ func TestNip86AcceptsValidValues(t *testing.T) {
 // cmd/relay/main.go builds.
 func startTestRelayWithAdminAPI(t *testing.T, cfg ws.Config) *httptest.Server {
 	t.Helper()
+	server, _ := startTestRelayWithOperatorAPIs(t, cfg)
+	return server
+}
+
+// startTestRelayWithOperatorAPIs is startTestRelayWithAdminAPI with the
+// repository handed back, for tests that seed the events the browse
+// endpoint then reads (nostrfi/workspace#36).
+func startTestRelayWithOperatorAPIs(t *testing.T, cfg ws.Config) (*httptest.Server, *duckdb.Repository) {
+	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "relay-config-api-*")
 	require.NoError(t, err)
@@ -3427,13 +3438,13 @@ func startTestRelayWithAdminAPI(t *testing.T, cfg ws.Config) *httptest.Server {
 	moderationService := application.NewModerationService(repo)
 	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, "test")
 
-	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg)))
+	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg), ws.WithEventsAPI(cfg, eventService)))
 	t.Cleanup(func() {
 		server.Close()
 		repo.Close()
 		os.RemoveAll(tmpDir)
 	})
-	return server
+	return server, repo
 }
 
 func callConfigAPI(t *testing.T, server *httptest.Server, sk string) (map[string]any, int) {
@@ -3678,4 +3689,228 @@ func TestOperatorRefusalNamesAnUnconfiguredRelay(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, status)
 	assert.Equal(t, "unauthorized", out["error"])
 	assert.Contains(t, out["reason"], "no operator pubkey configured")
+}
+
+// seedEvent signs and stores one event through the repository, which is how
+// the browse endpoint's tests populate the relay without going through the
+// WebSocket publish path they are not testing.
+func seedEvent(t *testing.T, repo *duckdb.Repository, sk string, ev *nostr.Event) *nostr.Event {
+	t.Helper()
+	pk, err := nostr.GetPublicKey(sk)
+	require.NoError(t, err)
+	ev.PubKey = pk
+	require.NoError(t, ev.Sign(sk))
+	wrapped, err := domainevent.NewEvent(ev)
+	require.NoError(t, err)
+	stored, err := repo.SaveEvent(context.Background(), wrapped)
+	require.NoError(t, err)
+	require.True(t, stored)
+	return ev
+}
+
+// callEventsAPI posts a browse query, signed by sk when one is given.
+func callEventsAPI(t *testing.T, server *httptest.Server, sk string, query map[string]any) (map[string]any, int) {
+	t.Helper()
+
+	body, err := json.Marshal(query)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/events/query", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	if sk != "" {
+		req.Header.Set("Authorization", nip98AuthHeader(t, sk, server.URL+"/api/events/query", body))
+	}
+
+	resp, err := server.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out, resp.StatusCode
+}
+
+// eventIDs pulls the ids out of a browse response, in the order returned.
+func eventIDs(t *testing.T, out map[string]any) []string {
+	t.Helper()
+	raw, ok := out["events"].([]any)
+	require.True(t, ok, "response has no events array: %v", out)
+	ids := make([]string, len(raw))
+	for i, item := range raw {
+		ev, ok := item.(map[string]any)
+		require.True(t, ok)
+		ids[i] = ev["id"].(string)
+	}
+	return ids
+}
+
+// TestEventsQueryAPIRequiresTheOperator pins the admission check on the
+// browse endpoint. It reads stored event content, so it is authorized
+// exactly like NIP-86 and the configuration endpoint: the relay is publicly
+// reachable, and network position guards nothing.
+func TestEventsQueryAPIRequiresTheOperator(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	cfg := ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	}
+	server, repo := startTestRelayWithOperatorAPIs(t, cfg)
+	seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "operator eyes only"})
+
+	t.Run("no Authorization header", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, "", map[string]any{})
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Equal(t, "unauthorized", out["error"])
+		assert.Nil(t, out["events"], "a refused request must not return events")
+	})
+
+	t.Run("signed by a non-operator pubkey", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, nostr.GeneratePrivateKey(), map[string]any{})
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Equal(t, "unauthorized", out["error"])
+		assert.Nil(t, out["reason"], "an identity failure must stay generic")
+		assert.Nil(t, out["events"])
+	})
+
+	t.Run("signed by the operator", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{})
+		require.Equal(t, http.StatusOK, status)
+		assert.Len(t, eventIDs(t, out), 1)
+	})
+}
+
+// TestEventsQueryAPIFilters covers each dimension the browser offers,
+// including the content substring NIP-01 does not model.
+func TestEventsQueryAPIFilters(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	otherSk := nostr.GeneratePrivateKey()
+	otherPk, _ := nostr.GetPublicKey(otherSk)
+
+	now := nostr.Now()
+	note := seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: now, Kind: 1, Content: "a note about relays"})
+	reaction := seedEvent(t, repo, otherSk, &nostr.Event{
+		CreatedAt: now - 3600,
+		Kind:      7,
+		Content:   "+",
+		Tags:      nostr.Tags{{"e", "aa" + strings.Repeat("0", 62)}},
+	})
+
+	t.Run("by kind", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"kinds": []int{7}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{reaction.ID}, eventIDs(t, out))
+	})
+
+	t.Run("by author", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"authors": []string{otherPk}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{reaction.ID}, eventIDs(t, out))
+	})
+
+	t.Run("by id", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"ids": []string{note.ID}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{note.ID}, eventIDs(t, out))
+	})
+
+	t.Run("by tag", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{
+			"tags": map[string][]string{"e": {"aa" + strings.Repeat("0", 62)}},
+		})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{reaction.ID}, eventIDs(t, out))
+	})
+
+	t.Run("by time range", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"since": now - 60})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{note.ID}, eventIDs(t, out))
+	})
+
+	t.Run("by content substring", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"content_contains": "RELAYS"})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{note.ID}, eventIDs(t, out))
+	})
+
+	t.Run("a content search below the minimum is refused, not run", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"content_contains": "re"})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Contains(t, out["error"], "at least 3 characters")
+	})
+
+	t.Run("newest first", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, []string{note.ID, reaction.ID}, eventIDs(t, out))
+	})
+}
+
+// TestEventsQueryAPILimitAndPaging covers the two bounds the acceptance
+// criteria ask for: no unbounded scan reaches the UI, and paging terminates.
+func TestEventsQueryAPILimitAndPaging(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo: ws.RelayInfo{
+			Pubkey:     operatorPk,
+			Limitation: &ws.RelayLimitation{MaxLimit: 5},
+		},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	now := nostr.Now()
+	for i := range 7 {
+		seedEvent(t, repo, operatorSk, &nostr.Event{
+			CreatedAt: now - nostr.Timestamp(i*60),
+			Kind:      1,
+			Content:   fmt.Sprintf("event %d", i),
+		})
+	}
+
+	t.Run("a limit above the relay's cap is clamped, and says so", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"limit": 500})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, float64(5), out["limit"], "the response must report the limit actually applied")
+		assert.Len(t, eventIDs(t, out), 5)
+	})
+
+	t.Run("the cursor pages through and terminates", func(t *testing.T) {
+		seen := []string{}
+		query := map[string]any{"limit": 3}
+		for page := 0; page < 5; page++ {
+			out, status := callEventsAPI(t, server, operatorSk, query)
+			require.Equal(t, http.StatusOK, status)
+
+			for _, id := range eventIDs(t, out) {
+				// Events sharing the boundary timestamp can repeat across
+				// pages; the documented contract is that callers dedupe.
+				if !slices.Contains(seen, id) {
+					seen = append(seen, id)
+				}
+			}
+
+			next, more := out["next_until"]
+			if !more {
+				break
+			}
+			query["until"] = next
+		}
+		assert.Len(t, seen, 7, "paging must reach every event and then stop")
+	})
+
+	t.Run("no limit means a bounded default, not everything", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{})
+		require.Equal(t, http.StatusOK, status)
+		// The default is 100, clamped here by the relay's max_limit of 5.
+		assert.Equal(t, float64(5), out["limit"])
+	})
 }

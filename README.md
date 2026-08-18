@@ -293,6 +293,51 @@ Configuration is read at start, so this reflects the running process and can dif
 disk if it has been edited since. There is no write endpoint: changes are a deployment concern and
 take effect on restart.
 
+### Event browse API (operator only)
+
+`POST /api/events/query` returns stored events for the dashboard's event browser. It is authorized
+exactly like the configuration and NIP-86 APIs: an `Authorization: Nostr <base64>` header carrying a
+signed NIP-98 kind-`27235` event whose pubkey matches `moderation.admin_pubkey`. POST rather than
+GET so the NIP-98 `payload` tag has a body to hash.
+
+```bash
+curl -X POST https://relay.example.com/api/events/query \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Nostr $(...)" \
+  -d '{"kinds":[1],"content_contains":"relay","limit":50}'
+```
+
+Request fields, all optional:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `ids` | `string[]` | Event ids, or prefixes of them (NIP-01 prefix matching) |
+| `authors` | `string[]` | Pubkeys, or prefixes |
+| `kinds` | `number[]` | Event kinds |
+| `tags` | `{ "e": ["..."] }` | Single-letter tag name to values |
+| `since` / `until` | `number` | Unix seconds, inclusive |
+| `content_contains` | `string` | Case-insensitive substring of the content, **minimum 3 characters** |
+| `limit` | `number` | Page size; defaults to `100` |
+
+The response is `{"events": [...], "limit": <applied>, "next_until": <unix seconds>}`. Events are
+newest first, in the same shape the relay stores them, and the same exclusions apply as to any read:
+expired events and events banned through NIP-86 are not returned.
+
+Three behaviours are worth knowing:
+
+- **`limit` is clamped, not refused.** Anything above `relay_info.limitation.max_limit` (500 in the
+  shipped config) is reduced, and `limit` in the response reports what was actually applied. A
+  request that names no limit gets 100 — there is no way to ask for the whole table.
+- **Pagination is by cursor, not offset.** `next_until` is the oldest `created_at` in the page; send
+  it back as `until` for the next one, and it is absent on the last page. Because the cursor is a
+  timestamp, events sharing that second can appear on two consecutive pages, so **callers must
+  de-duplicate by id** — the dashboard does. Offset paging was avoided deliberately: it re-scans
+  everything it skips, so it degrades as the relay fills up.
+- **`content_contains` is the one unindexed filter.** It is a case-insensitive scan (`ILIKE`),
+  bounded by the rest of the filter and by `limit`, with `%` and `_` in the search text treated as
+  literal characters rather than wildcards. It is the first thing that will hurt on a large
+  database; narrow it with a kind, author, or time range.
+
 ### Admin dashboard moderation
 
 The dashboard's `/admin/dashboard/moderation` page is a client of the management API above — it holds no
