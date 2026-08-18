@@ -77,15 +77,9 @@ func (h *RelayHandler) handleManagementRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	pubkey, err := verifyNip98(r, body, h.moderation.MaxEventAgeSeconds)
+	pubkey, err := authorizeOperator(r, body, h.moderation.AdminPubkey, h.moderation.MaxEventAgeSeconds)
 	if err != nil {
-		slog.Warn("NIP-86 request rejected: NIP-98 verification failed", "error", err)
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(nip86Response{Error: "unauthorized"})
-		return
-	}
-	if h.moderation.AdminPubkey == "" || pubkey != h.moderation.AdminPubkey {
-		slog.Warn("NIP-86 request rejected: pubkey is not the configured operator", "pubkey", pubkey)
+		logRejectedOperatorRequest("nip86", err)
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(nip86Response{Error: "unauthorized"})
 		return

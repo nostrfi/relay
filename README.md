@@ -232,6 +232,44 @@ operator could believe an address was blocked when it was not.
 - **`blockip`**: rejects future WebSocket upgrade attempts from that IP or CIDR with `403`. Uses the request's observed remote address, not a proxy header like `X-Forwarded-For` — behind a reverse proxy this sees the proxy's address, not the real client's.
 - Every management call, successful or not, is logged (`method`, `operator_pubkey`, and outcome) — never event content, private keys, or the raw request body.
 
+### Configuration API (operator only)
+
+`POST /api/config` returns the relay's **effective** operational configuration — what the running
+process is enforcing after code defaults are applied, not a copy of `config.yaml`. It is authorized
+exactly like the NIP-86 management API: an `Authorization: Nostr <base64>` header carrying a signed
+NIP-98 kind-`27235` event whose pubkey matches `moderation.admin_pubkey`. The request body is `{}`;
+it exists only so the NIP-98 `payload` tag has something to hash.
+
+```bash
+# body must be exactly what the payload tag hashes
+curl -X POST https://relay.example.com/api/config \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Nostr $(...)" \
+  -d '{}'
+```
+
+The response carries seven sections — `resource_limits`, `auth`, `moderation`, `websocket`,
+`retention`, `server`, `storage` — and deliberately **omits the NIP-11 identity fields**, which the
+relay already publishes to anyone.
+
+It is an explicit allow-list of fields, not a dump of the configuration struct: anything added to
+the config later stays invisible here until someone exposes it on purpose, so a credential cannot be
+published by accident. A test (`TestConfigSnapshotCoversEveryConfigField`) fails the build when a
+new config field is neither exposed nor recorded as deliberately withheld.
+
+Two values are worth reading carefully:
+
+- **`resource_limits` of `0` means unlimited, not zero.** Omitting the section from `config.yaml`
+  disables the connection cap and rate limiting entirely rather than applying a default — the
+  limiter is only created above zero. The dashboard renders these as "Unlimited" and warns when all
+  three are off.
+- **`websocket.mode` of `development` accepts a WebSocket connection from any Origin.** `production`
+  requires a non-empty `allowed_origins` and refuses to start without one.
+
+Configuration is read at start, so this reflects the running process and can differ from the file on
+disk if it has been edited since. There is no write endpoint: changes are a deployment concern and
+take effect on restart.
+
 ### Admin dashboard moderation
 
 The dashboard's `/admin/moderation` page is a client of the management API above — it holds no

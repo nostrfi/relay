@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -3337,5 +3338,199 @@ func TestNip86AcceptsValidValues(t *testing.T) {
 		out, status := callManagement(t, server, operatorSk, tc.method, tc.params)
 		require.Equal(t, http.StatusOK, status)
 		assert.Equal(t, true, out["result"], "%s %v should be accepted, got %v", tc.method, tc.params, out)
+	}
+}
+
+// startTestRelayWithAdminAPI mirrors production routing for the operator
+// API: NewMux plus WithAdminAPI, so these tests exercise the same wiring
+// cmd/relay/main.go builds.
+func startTestRelayWithAdminAPI(t *testing.T, cfg ws.Config) *httptest.Server {
+	t.Helper()
+
+	tmpDir, err := os.MkdirTemp("", "relay-config-api-*")
+	require.NoError(t, err)
+
+	repo, err := duckdb.NewRepository(filepath.Join(tmpDir, "test.db"))
+	require.NoError(t, err)
+
+	eventService := application.NewEventService(repo)
+	moderationService := application.NewModerationService(repo)
+	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, "test")
+
+	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg)))
+	t.Cleanup(func() {
+		server.Close()
+		repo.Close()
+		os.RemoveAll(tmpDir)
+	})
+	return server
+}
+
+func callConfigAPI(t *testing.T, server *httptest.Server, sk string) (map[string]any, int) {
+	t.Helper()
+
+	body := []byte("{}")
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/config", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	if sk != "" {
+		req.Header.Set("Authorization", nip98AuthHeader(t, sk, server.URL+"/api/config", body))
+	}
+
+	resp, err := server.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out, resp.StatusCode
+}
+
+func TestConfigAPIRequiresTheOperator(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	cfg := ws.Config{RelayInfo: ws.RelayInfo{Pubkey: operatorPk}, Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60}}
+	server := startTestRelayWithAdminAPI(t, cfg)
+
+	t.Run("no Authorization header", func(t *testing.T) {
+		out, status := callConfigAPI(t, server, "")
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Equal(t, "unauthorized", out["error"])
+	})
+
+	t.Run("signed by a non-operator pubkey", func(t *testing.T) {
+		out, status := callConfigAPI(t, server, nostr.GeneratePrivateKey())
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Equal(t, "unauthorized", out["error"])
+		assert.Nil(t, out["storage"], "an unauthorized response must not leak any configuration")
+	})
+
+	t.Run("signed by the operator", func(t *testing.T) {
+		_, status := callConfigAPI(t, server, operatorSk)
+		assert.Equal(t, http.StatusOK, status)
+	})
+}
+
+func TestConfigAPIReportsEffectiveValues(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+
+	cfg := ws.Config{
+		RelayInfo:      ws.RelayInfo{Pubkey: operatorPk},
+		ResourceLimits: ws.ResourceLimits{MaxConnections: 1000, MessagesPerSecond: 20, EventsPerSecond: 5},
+		Auth:           ws.AuthConfig{RelayURL: "wss://relay.example.com", MaxEventAgeSeconds: 600},
+		Moderation:     ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+		Websocket:      ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://relay.example.com"}},
+		Retention:      ws.RetentionConfig{PurgeIntervalSeconds: 3600},
+		Server:         ws.ServerConfig{ListenAddr: ":8080", ShutdownTimeoutSeconds: 5},
+		Storage:        ws.StorageConfig{DBPath: "db/relay.db"},
+	}
+	server := startTestRelayWithAdminAPI(t, cfg)
+
+	out, status := callConfigAPI(t, server, operatorSk)
+	require.Equal(t, http.StatusOK, status)
+
+	section := func(name string) map[string]any {
+		s, ok := out[name].(map[string]any)
+		require.True(t, ok, "missing section %q in %v", name, out)
+		return s
+	}
+
+	assert.Equal(t, float64(1000), section("resource_limits")["max_connections"])
+	assert.Equal(t, "wss://relay.example.com", section("auth")["relay_url"])
+	assert.Equal(t, operatorPk, section("moderation")["admin_pubkey"])
+	assert.Equal(t, "production", section("websocket")["mode"])
+	assert.Equal(t, []any{"https://relay.example.com"}, section("websocket")["allowed_origins"])
+	assert.Equal(t, float64(3600), section("retention")["purge_interval_seconds"])
+	assert.Equal(t, ":8080", section("server")["listen_addr"])
+	assert.Equal(t, "db/relay.db", section("storage")["db_path"])
+
+	// The identity fields stay on NIP-11, which the dashboard reads
+	// separately: this endpoint must not duplicate them.
+	assert.Nil(t, out["relay_info"])
+}
+
+// TestConfigAPIReportsCodeDefaults covers the acceptance criterion that the
+// view is the running configuration, not a file dump: a config.yaml with a
+// section omitted must still report what the relay is actually enforcing.
+func TestConfigAPIReportsCodeDefaults(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+
+	// Nothing set beyond the operator identity — as if config.yaml carried
+	// only relay_info. LoadConfig applies the defaults; this mirrors the
+	// result of that, which is what main.go hands to WithAdminAPI.
+	cfg := ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+		Websocket:  ws.WebsocketConfig{Mode: "development"},
+	}
+	server := startTestRelayWithAdminAPI(t, cfg)
+
+	out, status := callConfigAPI(t, server, operatorSk)
+	require.Equal(t, http.StatusOK, status)
+
+	websocket, _ := out["websocket"].(map[string]any)
+	assert.Equal(t, "development", websocket["mode"], "the effective mode must be reported, not an empty string")
+	assert.Equal(t, []any{}, websocket["allowed_origins"], "an unset origin list must render as an empty list, not null")
+
+	// Resource limits have no code default: omitting the section disables
+	// them, because newLimiter returns no limiter below 1 and the connection
+	// cap is skipped unless positive. The endpoint reports that faithfully
+	// as zero rather than inventing a limit that is not being enforced; the
+	// dashboard is what renders zero as "Unlimited", so an operator is not
+	// misled into reading it as "nothing allowed".
+	limits, _ := out["resource_limits"].(map[string]any)
+	assert.Equal(t, float64(0), limits["max_connections"], "an omitted connection cap is genuinely absent, and must be reported as such")
+	assert.Equal(t, float64(0), limits["messages_per_second"])
+	assert.Equal(t, float64(0), limits["events_per_second"])
+}
+
+// TestConfigSnapshotCoversEveryConfigField is the guard that keeps the
+// allow-list honest. ConfigSnapshot deliberately exposes a chosen list
+// rather than marshalling Config, so that a field added later — a
+// credential, say — is invisible until someone exposes it on purpose. The
+// cost of that choice is silent staleness, which this converts into a
+// failing build: add a field to Config and you must either expose it or
+// name it here as deliberately withheld.
+func TestConfigSnapshotCoversEveryConfigField(t *testing.T) {
+	// Fields intentionally not exposed, with why.
+	withheld := map[string]string{
+		"Config.RelayInfo": "published separately as the NIP-11 document; the dashboard reads it from there",
+	}
+
+	exposed := map[string]bool{}
+	collect(reflect.TypeOf(ws.ConfigSnapshot{}), "ConfigSnapshot", exposed)
+
+	var missing []string
+	configType := reflect.TypeOf(ws.Config{})
+	for i := range configType.NumField() {
+		section := configType.Field(i)
+		if _, ok := withheld["Config."+section.Name]; ok {
+			continue
+		}
+		if section.Type.Kind() != reflect.Struct {
+			continue
+		}
+		for j := range section.Type.NumField() {
+			field := section.Type.Field(j)
+			if !exposed[field.Name] {
+				missing = append(missing, section.Name+"."+field.Name)
+			}
+		}
+	}
+
+	assert.Empty(t, missing,
+		"ConfigSnapshot does not expose these Config fields. Add them to the snapshot, or record them in this test's withheld list with the reason: %v", missing)
+}
+
+func collect(t reflect.Type, _ string, into map[string]bool) {
+	for i := range t.NumField() {
+		field := t.Field(i)
+		if field.Type.Kind() == reflect.Struct {
+			collect(field.Type, field.Name, into)
+			continue
+		}
+		into[field.Name] = true
 	}
 }
