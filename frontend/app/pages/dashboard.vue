@@ -19,10 +19,10 @@ const npub = computed(() => {
  * facing an empty page.
  */
 const areas = [
-  { name: 'Event browser', issue: 36, description: 'Search and inspect stored events.' },
-  { name: 'Moderation', issue: 37, description: 'Ban pubkeys, events, and IP ranges via NIP-86.' },
-  { name: 'Configuration', issue: 38, description: 'Review the relay\'s effective settings.' },
-  { name: 'Metrics', issue: 39, description: 'Connection, storage, and throughput observability.' }
+  { name: 'Event browser', issue: 36, description: 'Search and inspect stored events.', to: null },
+  { name: 'Moderation', issue: 37, description: 'Ban pubkeys, events, and IP ranges via NIP-86.', to: '/moderation' },
+  { name: 'Configuration', issue: 38, description: 'Review the relay\'s effective settings.', to: null },
+  { name: 'Metrics', issue: 39, description: 'Connection, storage, and throughput observability.', to: null }
 ]
 </script>
 
@@ -61,7 +61,16 @@ const areas = [
               {{ area.description }}
             </p>
           </div>
+          <UButton
+            v-if="area.to"
+            :to="area.to"
+            size="xs"
+            variant="subtle"
+          >
+            Open
+          </UButton>
           <UBadge
+            v-else
             variant="subtle"
             color="neutral"
           >

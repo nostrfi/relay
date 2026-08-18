@@ -214,10 +214,33 @@ The relay exposes the ban-list subset of the [NIP-86 relay management API](https
 
 Every request must carry an `Authorization: Nostr <base64>` header containing a signed [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) kind-`27235` event, with the `payload` tag set (NIP-86 requires it; generic NIP-98 only recommends it) to the hex-encoded SHA-256 of the exact request body. A request is rejected with `401` if the signature, `u`/`method`/`payload` tags, or freshness check fails, or if the signing pubkey does not match `moderation.admin_pubkey`. Any NIP-98-capable client or tool (e.g. [`nak`](https://github.com/fiatjaf/nak)) can construct this header; the relay does not provide a browser UI for it.
 
+Parameter validation (added in nostrfi/workspace#37, so it applies to every caller, not just the
+dashboard):
+
+- `banpubkey`/`unbanpubkey` and `banevent`/`allowevent` require a 64-character **lowercase hex**
+  identifier. An `npub1…`/`note1…` bech32 form, a prefix, or uppercase hex is rejected.
+- `blockip`/`unblockip` require a value `net.ParseIP` or `net.ParseCIDR` accepts — an IPv4 or IPv6
+  address, or a CIDR range.
+- The optional reason is capped at 500 characters and may not be only whitespace.
+
+A rejected call answers with the normal `{"error": "..."}` envelope and stores nothing. Before this,
+malformed values were stored as given: a junk IP entry silently matched no connection at all, so an
+operator could believe an address was blocked when it was not.
+
 - **`banpubkey`**: rejects future `EVENT` publishes from that pubkey with `blocked:`. It does not retroactively hide events that pubkey already published — use `banevent` for a specific event.
 - **`banevent`**: excludes that event ID from `REQ` results. The underlying row is not deleted, so `allowevent` reverses it; independent of NIP-09 same-author deletion.
 - **`blockip`**: rejects future WebSocket upgrade attempts from that IP or CIDR with `403`. Uses the request's observed remote address, not a proxy header like `X-Forwarded-For` — behind a reverse proxy this sees the proxy's address, not the real client's.
 - Every management call, successful or not, is logged (`method`, `operator_pubkey`, and outcome) — never event content, private keys, or the raw request body.
+
+### Admin dashboard moderation
+
+The dashboard's `/admin/moderation` page is a client of the management API above — it holds no
+moderation state of its own and adds no endpoints. Each action is signed in the browser by the
+operator's key (NIP-07 extension or NIP-46 bunker) and forwarded verbatim by the dashboard server,
+so the relay authorizes every call exactly as it would from `nak` or curl.
+
+Because each call carries its own signature, the page needs the operator's signer present, not just
+a dashboard session. With the signer unavailable the page says so rather than showing an empty list.
 
 ### Admin dashboard sign-in
 

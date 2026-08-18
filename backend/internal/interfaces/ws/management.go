@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 
 	"relay/internal/domain/moderation"
 )
@@ -113,6 +115,54 @@ func (h *RelayHandler) handleManagementRequest(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(nip86Response{Result: result})
 }
 
+// maxReasonLength bounds the free-text reason stored alongside a ban or
+// block, so a caller cannot push an unbounded string into the database
+// through an otherwise small management call.
+const maxReasonLength = 500
+
+// hexIDLength is the length of a lowercase-hex event id or pubkey.
+const hexIDLength = 64
+
+// validateHexID rejects anything that is not a 64-character lowercase hex
+// identifier. Without this the ban tables accept arbitrary text: a stored
+// non-identifier can never match a real event or pubkey, so the operator
+// believes a ban is in force when nothing is enforced.
+func validateHexID(value, label string) error {
+	if len(value) != hexIDLength {
+		return newManagementError("%s must be %d hex characters, got %d", label, hexIDLength, len(value))
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return newManagementError("%s must be lowercase hex characters", label)
+		}
+	}
+	return nil
+}
+
+// validateIPOrCIDR rejects anything net.ParseIP and net.ParseCIDR both
+// refuse. isConnectionSourceBlocked parses stored values to match a
+// connecting address, so an unparseable entry silently blocks nothing.
+func validateIPOrCIDR(value string) error {
+	if net.ParseIP(value) != nil {
+		return nil
+	}
+	if _, _, err := net.ParseCIDR(value); err == nil {
+		return nil
+	}
+	return newManagementError("%q is not a valid IP address or CIDR range", value)
+}
+
+// validateReason bounds the optional second parameter.
+func validateReason(reason string) error {
+	if len(reason) > maxReasonLength {
+		return newManagementError("reason must be %d characters or fewer, got %d", maxReasonLength, len(reason))
+	}
+	if strings.TrimSpace(reason) == "" && reason != "" {
+		return newManagementError("reason must not be only whitespace")
+	}
+	return nil
+}
+
 func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method string, params []json.RawMessage) (any, error) {
 	switch method {
 	case "supportedmethods":
@@ -123,6 +173,12 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method stri
 		if err != nil {
 			return nil, err
 		}
+		if err := validateHexID(pubkey, "pubkey"); err != nil {
+			return nil, err
+		}
+		if err := validateReason(reason); err != nil {
+			return nil, err
+		}
 		if err := h.moderationService.BanPubkey(ctx, pubkey, reason); err != nil {
 			return nil, err
 		}
@@ -131,6 +187,9 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method stri
 	case "unbanpubkey":
 		pubkey, _, err := parseValueReasonParams(params)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateHexID(pubkey, "pubkey"); err != nil {
 			return nil, err
 		}
 		if err := h.moderationService.UnbanPubkey(ctx, pubkey); err != nil {
@@ -150,6 +209,12 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method stri
 		if err != nil {
 			return nil, err
 		}
+		if err := validateHexID(id, "event id"); err != nil {
+			return nil, err
+		}
+		if err := validateReason(reason); err != nil {
+			return nil, err
+		}
 		if err := h.moderationService.BanEvent(ctx, id, reason); err != nil {
 			return nil, err
 		}
@@ -158,6 +223,9 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method stri
 	case "allowevent":
 		id, _, err := parseValueReasonParams(params)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateHexID(id, "event id"); err != nil {
 			return nil, err
 		}
 		if err := h.moderationService.AllowEvent(ctx, id); err != nil {
@@ -177,6 +245,12 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method stri
 		if err != nil {
 			return nil, err
 		}
+		if err := validateIPOrCIDR(ip); err != nil {
+			return nil, err
+		}
+		if err := validateReason(reason); err != nil {
+			return nil, err
+		}
 		if err := h.moderationService.BlockIP(ctx, ip, reason); err != nil {
 			return nil, err
 		}
@@ -185,6 +259,9 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method stri
 	case "unblockip":
 		ip, _, err := parseValueReasonParams(params)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateIPOrCIDR(ip); err != nil {
 			return nil, err
 		}
 		if err := h.moderationService.UnblockIP(ctx, ip); err != nil {

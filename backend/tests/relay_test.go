@@ -3178,3 +3178,108 @@ func TestNip86Unauthorized(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, "a payload hash that doesn't match the actual body must be rejected")
 	})
 }
+
+// TestNip86RejectsMalformedValues covers the validation added for
+// nostrfi/workspace#37. Before it, every one of these calls returned
+// {"result": true} and stored a row that could never match a real pubkey,
+// event, or connecting address — the operator believed a ban was in force
+// while nothing was enforced.
+func TestNip86RejectsMalformedValues(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
+	defer cleanup()
+
+	validHex := strings.Repeat("a", 64)
+
+	cases := []struct {
+		name    string
+		method  string
+		params  []any
+		wantErr string
+	}{
+		{"pubkey too short", "banpubkey", []any{"abc123", "spam"}, "hex characters"},
+		{"pubkey not hex", "banpubkey", []any{strings.Repeat("z", 64), "spam"}, "lowercase hex"},
+		{"pubkey uppercase hex", "banpubkey", []any{strings.Repeat("A", 64), "spam"}, "lowercase hex"},
+		{"pubkey in npub form", "banpubkey", []any{"npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq", "spam"}, "hex characters"},
+		{"unban pubkey malformed", "unbanpubkey", []any{"nope"}, "hex characters"},
+		{"event id malformed", "banevent", []any{"not-an-id", "reported"}, "hex characters"},
+		{"allow event malformed", "allowevent", []any{"not-an-id"}, "hex characters"},
+		{"ip not an address", "blockip", []any{"banana", "abuse"}, "not a valid IP address"},
+		{"ip with stray space", "blockip", []any{"127.0.0.1 ", "abuse"}, "not a valid IP address"},
+		{"cidr malformed", "blockip", []any{"10.0.0.0/99", "abuse"}, "not a valid IP address"},
+		{"unblock ip malformed", "unblockip", []any{"banana"}, "not a valid IP address"},
+		{"reason too long", "banpubkey", []any{validHex, strings.Repeat("x", 501)}, "characters or fewer"},
+		{"reason only whitespace", "banpubkey", []any{validHex, "   "}, "only whitespace"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, status := callManagement(t, server, operatorSk, tc.method, tc.params)
+
+			// NIP-86 method-level failures use the response envelope, not an
+			// HTTP error status: only auth failures are a 401.
+			require.Equal(t, http.StatusOK, status)
+			errMsg, ok := out["error"].(string)
+			require.True(t, ok, "expected an error envelope, got %v", out)
+			assert.Contains(t, errMsg, tc.wantErr)
+			assert.Nil(t, out["result"])
+		})
+	}
+}
+
+// TestNip86RejectedValuesAreNotStored proves the rejection happens before
+// the write, so a malformed call cannot leave a row behind.
+func TestNip86RejectedValuesAreNotStored(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
+	defer cleanup()
+
+	_, status := callManagement(t, server, operatorSk, "blockip", []any{"banana", "abuse"})
+	require.Equal(t, http.StatusOK, status)
+
+	out, status := callManagement(t, server, operatorSk, "listblockedips", []any{})
+	require.Equal(t, http.StatusOK, status)
+	blocked, _ := out["result"].([]any)
+	assert.Empty(t, blocked, "a rejected blockip must not store a row")
+
+	_, status = callManagement(t, server, operatorSk, "banpubkey", []any{"not-a-pubkey", "spam"})
+	require.Equal(t, http.StatusOK, status)
+
+	out, status = callManagement(t, server, operatorSk, "listbannedpubkeys", []any{})
+	require.Equal(t, http.StatusOK, status)
+	banned, _ := out["result"].([]any)
+	assert.Empty(t, banned, "a rejected banpubkey must not store a row")
+}
+
+// TestNip86AcceptsValidValues guards against the validation being too
+// strict: the forms operators actually use must still work.
+func TestNip86AcceptsValidValues(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
+	defer cleanup()
+
+	targetSk := nostr.GeneratePrivateKey()
+	targetPk, _ := nostr.GetPublicKey(targetSk)
+
+	accepted := []struct {
+		method string
+		params []any
+	}{
+		{"banpubkey", []any{targetPk, "spam"}},
+		{"banpubkey", []any{targetPk, ""}}, // an empty reason stays optional
+		{"banevent", []any{strings.Repeat("f", 64), "reported"}},
+		{"blockip", []any{"127.0.0.1", "abuse"}},
+		{"blockip", []any{"10.0.0.0/8", "range"}},
+		{"blockip", []any{"2001:db8::1", "v6"}},
+		{"blockip", []any{"2001:db8::/32", "v6 range"}},
+	}
+
+	for _, tc := range accepted {
+		out, status := callManagement(t, server, operatorSk, tc.method, tc.params)
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, true, out["result"], "%s %v should be accepted, got %v", tc.method, tc.params, out)
+	}
+}

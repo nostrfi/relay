@@ -52,7 +52,56 @@ function readStoredBunker(): StoredBunker | null {
 export function clearStoredBunker(): void {
   if (import.meta.client) {
     window.localStorage.removeItem(BUNKER_STORAGE_KEY)
+    window.localStorage.removeItem(SIGNER_KIND_KEY)
   }
+}
+
+/**
+ * Which signer opened the current session.
+ *
+ * Privileged relay calls need a signature long after login, and both signer
+ * types can be present at once — an operator with an extension installed may
+ * still have signed in through a bunker. Remembering the choice avoids
+ * guessing, and avoids prompting the wrong signer.
+ */
+const SIGNER_KIND_KEY = 'nf-admin-signer'
+
+export function rememberSignerKind(kind: Signer['kind']): void {
+  if (import.meta.client) {
+    window.localStorage.setItem(SIGNER_KIND_KEY, kind)
+  }
+}
+
+export function storedSignerKind(): Signer['kind'] | null {
+  if (import.meta.server) {
+    return null
+  }
+  const kind = window.localStorage.getItem(SIGNER_KIND_KEY)
+  return kind === 'nip07' || kind === 'nip46' ? kind : null
+}
+
+/**
+ * Returns a signer for a privileged call made after login. Callers must
+ * close it when done: a NIP-46 signer holds a live relay subscription.
+ */
+export async function acquireSigner(): Promise<Signer> {
+  const kind = storedSignerKind()
+
+  if (kind === 'nip46') {
+    const signer = await restoreBunkerSigner()
+    if (!signer) {
+      throw new Error('Could not reach the remote signer. Check it is running, then sign in again to re-pair.')
+    }
+    return signer
+  }
+
+  if (hasNip07()) {
+    return nip07Signer()
+  }
+
+  // The session proves who signed in; it is not a credential the relay
+  // accepts. Every privileged call needs the operator's signer present.
+  throw new Error('No signer available in this browser. Unlock your Nostr extension, or sign in again to re-pair a remote signer.')
 }
 
 /** True when this browser has a bunker pairing to reconnect with. */

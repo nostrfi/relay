@@ -44,6 +44,9 @@ async function signIn(create: () => Promise<Signer>, kind: Pending) {
   try {
     signer = await create()
     await login(signer)
+    // Privileged relay calls need a signature long after login; remember
+    // which signer to reach for rather than guessing later.
+    rememberSignerKind(signer.kind)
     open.value = false
     await navigateTo('/dashboard')
   } catch (cause) {
