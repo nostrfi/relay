@@ -1,5 +1,5 @@
 import type { RelayConfig } from '~~/shared/types/relay-config'
-import { createRelayRefusalError } from '~~/shared/utils/relay-refusal'
+import { createRelayRefusalError, refusalDiagnosticsFrom } from '~~/shared/utils/relay-refusal'
 
 /**
  * Reads the relay's effective operational configuration.
@@ -16,7 +16,7 @@ export function useRelayConfig() {
     try {
       // The relay serves this at /api/config, which is the path signed into
       // the u tag — not the dashboard route the request is sent to.
-      const { authorization, body, signingMs } = await sign(signer, '/api/config', {})
+      const { authorization, body, signingMs, pubkey, signedPath } = await sign(signer, '/api/config', {})
 
       try {
         return await $fetch<RelayConfig>('/api/config', {
@@ -32,7 +32,13 @@ export function useRelayConfig() {
           throw cause
         }
         // The relay will not say which check failed, so neither will we.
-        throw createRelayRefusalError({ signingMs, signedInPubkey: state.value?.pubkey })
+        throw createRelayRefusalError({
+          signingMs,
+          signedInPubkey: state.value?.pubkey,
+          signingPubkey: pubkey,
+          signedPath,
+          ...refusalDiagnosticsFrom(cause)
+        })
       }
     } finally {
       await signer.close()

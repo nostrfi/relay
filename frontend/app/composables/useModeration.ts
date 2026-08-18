@@ -4,7 +4,7 @@ import type {
   BlockedIP,
   Nip86Response
 } from '~~/shared/types/moderation'
-import { createRelayRefusalError } from '~~/shared/utils/relay-refusal'
+import { createRelayRefusalError, refusalDiagnosticsFrom } from '~~/shared/utils/relay-refusal'
 
 /**
  * One function per NIP-86 method the relay supports. Each returns the
@@ -21,7 +21,7 @@ export function useModeration() {
     try {
       // The relay serves NIP-86 from its root, so that is the path signed
       // into the u tag — not the dashboard route this request is sent to.
-      const { authorization, body, signingMs } = await sign(signer, '/', { method, params })
+      const { authorization, body, signingMs, pubkey, signedPath } = await sign(signer, '/', { method, params })
 
       try {
         return await $fetch<Nip86Response<T>>('/api/moderation/rpc', {
@@ -39,7 +39,13 @@ export function useModeration() {
         // A refused operator check, which the relay will not explain. Method
         // errors are unaffected: those arrive as a 200 error envelope and
         // still reach the page verbatim.
-        throw createRelayRefusalError({ signingMs, signedInPubkey: state.value?.pubkey })
+        throw createRelayRefusalError({
+          signingMs,
+          signedInPubkey: state.value?.pubkey,
+          signingPubkey: pubkey,
+          signedPath,
+          ...refusalDiagnosticsFrom(cause)
+        })
       }
     } finally {
       // A NIP-46 signer holds a live relay subscription.

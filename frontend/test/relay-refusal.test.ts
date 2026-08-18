@@ -90,3 +90,120 @@ describe('createRelayRefusalError', () => {
     expect(error.logHint).toBe('')
   })
 })
+
+describe('describeRelayRefusal with observed facts', () => {
+  const NOW = 1_800_000_000
+
+  it('proves a clock skew rather than listing it as a possibility', () => {
+    // The relay's own Date header against this browser's clock. No signature
+    // made here can satisfy the relay until one of them is fixed, so saying
+    // "try again" would be wrong.
+    const refusal = describeRelayRefusal({
+      signingMs: 500,
+      browserTimeSeconds: NOW,
+      relayTimeSeconds: NOW + 3600
+    })
+    expect(refusal.headline).toContain('3600 seconds ahead')
+    expect(refusal.headline).toContain('Fix the clock')
+    expect(refusal.causes).toEqual([])
+  })
+
+  it('reports which way the clocks disagree', () => {
+    expect(describeRelayRefusal({ browserTimeSeconds: NOW, relayTimeSeconds: NOW - 600 }).headline)
+      .toContain('600 seconds behind')
+  })
+
+  it('ignores a skew inside the window, which cannot be the cause', () => {
+    const refusal = describeRelayRefusal({ browserTimeSeconds: NOW, relayTimeSeconds: NOW + 5 })
+    expect(refusal.causes.length).toBeGreaterThan(0)
+  })
+
+  it('proves a path mismatch, which the relay compares exactly', () => {
+    const refusal = describeRelayRefusal({
+      signedPath: '/api/config',
+      requestedPath: '/relay/api/config',
+      browserTimeSeconds: NOW
+    })
+    expect(refusal.headline).toContain('/api/config')
+    expect(refusal.headline).toContain('/relay/api/config')
+    expect(refusal.causes).toEqual([])
+  })
+
+  it('says nothing about paths when they agree', () => {
+    const refusal = describeRelayRefusal({
+      signedPath: '/api/config',
+      requestedPath: '/api/config',
+      browserTimeSeconds: NOW
+    })
+    expect(refusal.headline).not.toContain('signed for')
+  })
+
+  it('names a key mismatch from the relay\'s public identity', () => {
+    const refusal = describeRelayRefusal({
+      signingPubkey: 'a'.repeat(64),
+      relayPubkey: 'b'.repeat(64),
+      browserTimeSeconds: NOW
+    })
+    expect(refusal.headline).toContain('a'.repeat(64))
+    expect(refusal.headline).toContain('b'.repeat(64))
+    expect(refusal.headline).toContain('moderation.admin_pubkey')
+    expect(refusal.causes).toEqual([])
+  })
+
+  it('stays quiet when the signing key matches the published operator', () => {
+    // The relay may still refuse — moderation.admin_pubkey can be set to a
+    // third key — so this falls back to the list rather than claiming a cause.
+    const refusal = describeRelayRefusal({
+      signingPubkey: 'a'.repeat(64),
+      relayPubkey: 'a'.repeat(64),
+      browserTimeSeconds: NOW
+    })
+    expect(refusal.causes.length).toBe(3)
+  })
+
+  it('prefers the certain explanation over the merely likely one', () => {
+    // Both a skew and a key mismatch are present; the skew is provable.
+    const refusal = describeRelayRefusal({
+      browserTimeSeconds: NOW,
+      relayTimeSeconds: NOW + 3600,
+      signingPubkey: 'a'.repeat(64),
+      relayPubkey: 'b'.repeat(64)
+    })
+    expect(refusal.headline).toContain('clock')
+  })
+
+  it('falls back to possibilities when nothing was observable', () => {
+    expect(describeRelayRefusal({ signingMs: 500, browserTimeSeconds: NOW }).causes.length).toBe(3)
+  })
+})
+
+describe('refusalDiagnosticsFrom', () => {
+  const facts = { relayTimeSeconds: 1_800_000_000, relayPubkey: 'a'.repeat(64), requestedPath: '/api/config' }
+
+  it('reads the shape $fetch actually throws', async () => {
+    const { refusalDiagnosticsFrom } = await import('../shared/utils/relay-refusal')
+    // createError({ data }) arrives as error.data.data, one level deeper
+    // than it is natural to assume. Reading too shallow silently produced
+    // no diagnosis at all.
+    expect(refusalDiagnosticsFrom({ data: { statusCode: 401, data: facts } })).toEqual(facts)
+  })
+
+  it('also accepts the flat shape, so the caller need not care', async () => {
+    const { refusalDiagnosticsFrom } = await import('../shared/utils/relay-refusal')
+    expect(refusalDiagnosticsFrom({ data: facts })).toEqual(facts)
+  })
+
+  it('yields nothing usable from an unrelated error', async () => {
+    const { refusalDiagnosticsFrom } = await import('../shared/utils/relay-refusal')
+    expect(refusalDiagnosticsFrom(new Error('network down'))).toEqual({
+      relayTimeSeconds: undefined, relayPubkey: undefined, requestedPath: undefined
+    })
+    expect(refusalDiagnosticsFrom(undefined)).toEqual({})
+  })
+
+  it('ignores values of the wrong type rather than passing them through', async () => {
+    const { refusalDiagnosticsFrom } = await import('../shared/utils/relay-refusal')
+    const result = refusalDiagnosticsFrom({ data: { data: { relayPubkey: 42, requestedPath: null, relayTimeSeconds: 'soon' } } })
+    expect(result).toEqual({ relayTimeSeconds: undefined, relayPubkey: undefined, requestedPath: undefined })
+  })
+})

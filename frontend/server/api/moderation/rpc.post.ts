@@ -51,7 +51,10 @@ export default defineEventHandler(async (event) => {
   if (!response.ok) {
     throw createError({
       statusCode: response.status,
-      statusMessage: (parsed as { error?: string })?.error ?? 'The relay refused the request'
+      statusMessage: (parsed as { error?: string })?.error ?? 'The relay refused the request',
+      // The relay will not say which check failed. These are the facts that
+      // let the browser test the likely causes instead of listing them.
+      data: await collectRefusalDiagnostics(relayApiBase, response, '/')
     })
   }
 

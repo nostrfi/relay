@@ -20,6 +20,10 @@ export interface SignedRelayRequest {
    * guessing — see shared/utils/relay-refusal.ts.
    */
   signingMs: number
+  /** Who actually signed, which need not be who logged in. */
+  pubkey: string
+  /** The path signed into the `u` tag, for comparison against the relay's. */
+  signedPath: string
 }
 
 export function useRelayRequest() {
@@ -37,7 +41,9 @@ export function useRelayRequest() {
     return {
       authorization: `Nostr ${btoa(JSON.stringify(signed))}`,
       body,
-      signingMs: Date.now() - startedAt
+      signingMs: Date.now() - startedAt,
+      pubkey: signed.pubkey,
+      signedPath: path
     }
   }
 

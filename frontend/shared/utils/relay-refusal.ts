@@ -21,8 +21,23 @@ export interface RelayRefusalContext {
   signingMs?: number
   /** The pubkey the operator signed into the dashboard with. */
   signedInPubkey?: string
+  /** The pubkey that actually signed the refused request. */
+  signingPubkey?: string
+  /** The path signed into the `u` tag. */
+  signedPath?: string
   /** The relay's freshness window, when known. */
   maxAgeSeconds?: number
+
+  /* Facts observed by the server proxy, which turn guesses into checks. */
+
+  /** The relay's own clock, in unix seconds. */
+  relayTimeSeconds?: number
+  /** The relay's public NIP-11 pubkey. */
+  relayPubkey?: string
+  /** The path the relay was actually asked for. */
+  requestedPath?: string
+  /** This browser's clock, injectable for testing. */
+  browserTimeSeconds?: number
 }
 
 export interface RelayRefusal {
@@ -40,6 +55,38 @@ export function describeRelayRefusal(context: RelayRefusalContext = {}): RelayRe
   if (signingSeconds !== undefined && signingSeconds > maxAge) {
     return {
       headline: `Your signature took ${signingSeconds} seconds to approve, and the relay rejects any older than ${maxAge}. Try again and approve promptly.`,
+      causes: []
+    }
+  }
+
+  // Known for certain: the two clocks disagree by more than the window, so
+  // any signature this browser makes is already outside it.
+  const browserTime = context.browserTimeSeconds ?? Math.floor(Date.now() / 1000)
+  if (context.relayTimeSeconds !== undefined) {
+    const skew = Math.abs(context.relayTimeSeconds - browserTime)
+    if (skew > maxAge) {
+      const direction = context.relayTimeSeconds > browserTime ? 'ahead of' : 'behind'
+      return {
+        headline: `The relay's clock is ${skew} seconds ${direction} this browser's, and it rejects signatures more than ${maxAge} seconds old. Fix the clock on either machine — no signature from here can satisfy it until then.`,
+        causes: []
+      }
+    }
+  }
+
+  // Known for certain: the relay was asked for a path other than the one
+  // signed, which its u-tag check compares exactly.
+  if (context.signedPath && context.requestedPath && context.signedPath !== context.requestedPath) {
+    return {
+      headline: `The request was signed for ${context.signedPath} but the relay was asked for ${context.requestedPath}. The relay compares those exactly, so the signature cannot match.`,
+      causes: []
+    }
+  }
+
+  // Strong, from public information: the relay publishes its operator
+  // identity, and moderation.admin_pubkey defaults to it.
+  if (context.relayPubkey && context.signingPubkey && context.relayPubkey !== context.signingPubkey) {
+    return {
+      headline: `You signed as ${context.signingPubkey}, but the relay publishes ${context.relayPubkey} as its operator. Unless moderation.admin_pubkey is set to your key, the relay will refuse every privileged call.`,
       causes: []
     }
   }
@@ -78,4 +125,31 @@ export function createRelayRefusalError(context: RelayRefusalContext = {}): Rela
   error.refusal = refusal
   error.logHint = refusal.causes.length > 0 ? RELAY_REFUSAL_LOG_HINT : ''
   return error
+}
+
+/**
+ * Pulls the proxy's diagnostics out of a thrown fetch error.
+ *
+ * `$fetch` throws with `error.data` set to the *whole* error body, so a
+ * route that answered `createError({ data })` lands at `error.data.data`.
+ * Reading one level too shallow silently yields nothing and the diagnosis
+ * quietly degrades to guesswork — which is exactly what happened before
+ * this helper existed, so it is tested rather than assumed.
+ */
+export function refusalDiagnosticsFrom(cause: unknown): Partial<RelayRefusalContext> {
+  const body = (cause as { data?: Record<string, unknown> })?.data
+  if (!body || typeof body !== 'object') {
+    return {}
+  }
+
+  const nested = (body as { data?: Record<string, unknown> }).data
+  const facts = (nested && typeof nested === 'object' ? nested : body) as Partial<RelayRefusalContext>
+
+  // Only the fields this module understands, so an unrelated error body
+  // cannot smuggle values into the diagnosis.
+  return {
+    relayTimeSeconds: typeof facts.relayTimeSeconds === 'number' ? facts.relayTimeSeconds : undefined,
+    relayPubkey: typeof facts.relayPubkey === 'string' ? facts.relayPubkey : undefined,
+    requestedPath: typeof facts.requestedPath === 'string' ? facts.requestedPath : undefined
+  }
 }
