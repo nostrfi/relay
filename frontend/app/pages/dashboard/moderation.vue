@@ -4,6 +4,9 @@ import { validateHexId, validateIpOrCidr, validateReason } from '~~/shared/utils
 
 useSeoMeta({ title: 'Moderation' })
 
+// Private by default — see app/middleware/auth.global.ts.
+definePageMeta({ layout: 'dashboard' })
+
 const moderation = useModeration()
 
 interface Entry { value: string, reason?: string }
@@ -254,185 +257,189 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="mx-auto max-w-3xl">
-    <header class="mb-8">
-      <h1 class="font-display text-3xl font-semibold tracking-tight">
-        Moderation
-      </h1>
-      <p class="mt-2 text-(--ui-text-muted)">
+  <UDashboardPanel
+    id="moderation"
+    :ui="{ body: 'max-w-3xl' }"
+  >
+    <template #header>
+      <UDashboardNavbar title="Moderation" />
+    </template>
+
+    <template #body>
+      <p class="mb-6 text-(--ui-text-muted)">
         Bans and blocks are applied through the relay's NIP-86 management API. They are not
         retroactive: banning a pubkey stops future publishes but leaves its existing events
         readable, and banning an event hides that one event.
       </p>
-    </header>
 
-    <div
-      v-if="error"
-      class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
-      role="alert"
-    >
-      <p>{{ error }}</p>
-
-      <ul
-        v-if="refusalCauses.length > 0"
-        class="mt-3 flex list-disc flex-col gap-2 pl-5"
+      <div
+        v-if="error"
+        class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
+        role="alert"
       >
-        <li
-          v-for="cause in refusalCauses"
-          :key="cause"
+        <p>{{ error }}</p>
+
+        <ul
+          v-if="refusalCauses.length > 0"
+          class="mt-3 flex list-disc flex-col gap-2 pl-5"
         >
-          {{ cause }}
-        </li>
-      </ul>
-
-      <p
-        v-if="refusalLogHint"
-        class="mt-3"
-      >
-        {{ refusalLogHint }}
-      </p>
-
-      <UButton
-        v-if="refusalCauses.length > 0 || refusalLogHint || error.includes('signature')"
-        class="mt-4"
-        size="xs"
-        variant="subtle"
-        :loading="busy"
-        @click="retry"
-      >
-        Try again
-      </UButton>
-    </div>
-    <p
-      v-else-if="notice"
-      class="mb-6 rounded-(--ui-radius) border border-(--ui-success) px-4 py-3 text-sm text-(--ui-success)"
-      role="status"
-    >
-      {{ notice }}
-    </p>
-
-    <UCard
-      v-for="section in sections"
-      :key="section.key"
-      class="mb-6"
-    >
-      <template #header>
-        <span class="text-sm font-semibold uppercase tracking-wide text-(--ui-text-muted)">{{ section.title }}</span>
-      </template>
-
-      <p
-        v-if="loading"
-        class="text-sm text-(--ui-text-muted)"
-      >
-        Loading…
-      </p>
-      <p
-        v-else-if="!section.loaded.value"
-        class="text-sm text-(--ui-text-muted)"
-      >
-        This list could not be loaded, so it is not shown. It is not necessarily empty.
-      </p>
-      <p
-        v-else-if="section.entries.value.length === 0"
-        class="text-sm text-(--ui-text-muted)"
-      >
-        Nothing {{ section.key === 'ips' ? 'blocked' : 'banned' }} yet.
-      </p>
-
-      <ul
-        v-else
-        class="mb-6 flex flex-col gap-3"
-      >
-        <li
-          v-for="entry in section.entries.value"
-          :key="entry.value"
-          class="flex items-start justify-between gap-4 border-b border-(--ui-border-muted) pb-3 last:border-0 last:pb-0"
-        >
-          <div class="min-w-0">
-            <p class="break-all font-mono text-sm">
-              {{ entry.value }}
-            </p>
-            <p
-              v-if="entry.reason"
-              class="text-sm text-(--ui-text-muted)"
-            >
-              {{ entry.reason }}
-            </p>
-          </div>
-          <UButton
-            size="xs"
-            variant="ghost"
-            :disabled="busy"
-            @click="askRemove(section, entry.value)"
+          <li
+            v-for="cause in refusalCauses"
+            :key="cause"
           >
-            {{ section.removeLabel }}
-          </UButton>
-        </li>
-      </ul>
+            {{ cause }}
+          </li>
+        </ul>
 
-      <form
-        class="flex flex-col gap-3"
-        @submit.prevent="submit(section)"
-      >
-        <div class="flex flex-col gap-3 sm:flex-row">
-          <UInput
-            v-model="section.input.value"
-            class="flex-1"
-            :placeholder="section.placeholder"
-            :aria-label="section.valueLabel"
-            autocomplete="off"
-            spellcheck="false"
-          />
-          <UInput
-            v-model="section.reason.value"
-            class="flex-1"
-            placeholder="Reason (optional)"
-            aria-label="Reason"
-            autocomplete="off"
-          />
-          <UButton
-            type="submit"
-            :loading="busy"
-            :disabled="busy || section.input.value.trim() === '' || problemFor(section) !== null"
-          >
-            {{ section.addLabel }}
-          </UButton>
-        </div>
         <p
-          v-if="problemFor(section)"
-          class="text-sm text-(--ui-error)"
+          v-if="refusalLogHint"
+          class="mt-3"
         >
-          {{ problemFor(section) }}
+          {{ refusalLogHint }}
         </p>
-      </form>
-    </UCard>
 
-    <UModal
-      v-model:open="confirmOpen"
-      title="Confirm"
-      :description="pendingRemoval ? `${pendingRemoval.section.removeLabel} this entry? It takes effect immediately.` : ''"
-    >
-      <template #body>
-        <p class="break-all font-mono text-sm">
-          {{ pendingRemoval?.value }}
+        <UButton
+          v-if="refusalCauses.length > 0 || refusalLogHint || error.includes('signature')"
+          class="mt-4"
+          size="xs"
+          variant="subtle"
+          :loading="busy"
+          @click="retry"
+        >
+          Try again
+        </UButton>
+      </div>
+      <p
+        v-else-if="notice"
+        class="mb-6 rounded-(--ui-radius) border border-(--ui-success) px-4 py-3 text-sm text-(--ui-success)"
+        role="status"
+      >
+        {{ notice }}
+      </p>
+
+      <UCard
+        v-for="section in sections"
+        :key="section.key"
+        class="mb-6"
+      >
+        <template #header>
+          <span class="text-sm font-semibold uppercase tracking-wide text-(--ui-text-muted)">{{ section.title }}</span>
+        </template>
+
+        <p
+          v-if="loading"
+          class="text-sm text-(--ui-text-muted)"
+        >
+          Loading…
         </p>
-      </template>
-      <template #footer>
-        <div class="flex justify-end gap-3">
-          <UButton
-            variant="ghost"
-            @click="confirmOpen = false"
+        <p
+          v-else-if="!section.loaded.value"
+          class="text-sm text-(--ui-text-muted)"
+        >
+          This list could not be loaded, so it is not shown. It is not necessarily empty.
+        </p>
+        <p
+          v-else-if="section.entries.value.length === 0"
+          class="text-sm text-(--ui-text-muted)"
+        >
+          Nothing {{ section.key === 'ips' ? 'blocked' : 'banned' }} yet.
+        </p>
+
+        <ul
+          v-else
+          class="mb-6 flex flex-col gap-3"
+        >
+          <li
+            v-for="entry in section.entries.value"
+            :key="entry.value"
+            class="flex items-start justify-between gap-4 border-b border-(--ui-border-muted) pb-3 last:border-0 last:pb-0"
           >
-            Cancel
-          </UButton>
-          <UButton
-            color="error"
-            @click="confirmRemove"
+            <div class="min-w-0">
+              <p class="break-all font-mono text-sm">
+                {{ entry.value }}
+              </p>
+              <p
+                v-if="entry.reason"
+                class="text-sm text-(--ui-text-muted)"
+              >
+                {{ entry.reason }}
+              </p>
+            </div>
+            <UButton
+              size="xs"
+              variant="ghost"
+              :disabled="busy"
+              @click="askRemove(section, entry.value)"
+            >
+              {{ section.removeLabel }}
+            </UButton>
+          </li>
+        </ul>
+
+        <form
+          class="flex flex-col gap-3"
+          @submit.prevent="submit(section)"
+        >
+          <div class="flex flex-col gap-3 sm:flex-row">
+            <UInput
+              v-model="section.input.value"
+              class="flex-1"
+              :placeholder="section.placeholder"
+              :aria-label="section.valueLabel"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <UInput
+              v-model="section.reason.value"
+              class="flex-1"
+              placeholder="Reason (optional)"
+              aria-label="Reason"
+              autocomplete="off"
+            />
+            <UButton
+              type="submit"
+              :loading="busy"
+              :disabled="busy || section.input.value.trim() === '' || problemFor(section) !== null"
+            >
+              {{ section.addLabel }}
+            </UButton>
+          </div>
+          <p
+            v-if="problemFor(section)"
+            class="text-sm text-(--ui-error)"
           >
-            {{ pendingRemoval?.section.removeLabel }}
-          </UButton>
-        </div>
-      </template>
-    </UModal>
-  </div>
+            {{ problemFor(section) }}
+          </p>
+        </form>
+      </UCard>
+
+      <UModal
+        v-model:open="confirmOpen"
+        title="Confirm"
+        :description="pendingRemoval ? `${pendingRemoval.section.removeLabel} this entry? It takes effect immediately.` : ''"
+      >
+        <template #body>
+          <p class="break-all font-mono text-sm">
+            {{ pendingRemoval?.value }}
+          </p>
+        </template>
+        <template #footer>
+          <div class="flex justify-end gap-3">
+            <UButton
+              variant="ghost"
+              @click="confirmOpen = false"
+            >
+              Cancel
+            </UButton>
+            <UButton
+              color="error"
+              @click="confirmRemove"
+            >
+              {{ pendingRemoval?.section.removeLabel }}
+            </UButton>
+          </div>
+        </template>
+      </UModal>
+    </template>
+  </UDashboardPanel>
 </template>
