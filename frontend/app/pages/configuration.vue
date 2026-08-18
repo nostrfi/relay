@@ -17,23 +17,33 @@ const { data: relay } = await useFetch('/api/relay-info')
 const config = ref<RelayConfig | null>(null)
 const loading = ref(true)
 const error = ref('')
-const refusedByRelay = ref(false)
+const refusalCauses = ref<string[]>([])
+const refusalLogHint = ref('')
 
-onMounted(async () => {
+async function load() {
+  loading.value = true
+  error.value = ''
+  refusalCauses.value = []
+  refusalLogHint.value = ''
+
   try {
     config.value = await fetchConfig()
   } catch (cause) {
-    // A 401 here has one likely cause worth naming: the relay authorizes
-    // this read against its own moderation.admin_pubkey, which is set
-    // separately from the dashboard's NUXT_ADMIN_PUBKEY. When they name
-    // different keys the operator can sign in and still be refused, and
-    // this is the only place that says why.
-    refusedByRelay.value = (cause as { statusCode?: number })?.statusCode === 401
-    error.value = (cause as Error)?.message || 'The configuration could not be read.'
+    // useRelayConfig turns a relay refusal into a headline plus the causes
+    // that could produce it. It deliberately does not assert one: the relay
+    // answers every failed check with a bare "unauthorized", so a stale
+    // signature, a wrong key and a rewritten path are indistinguishable
+    // here. Only the relay's own log knows.
+    const refused = cause as { refusal?: { headline: string, causes: string[] }, logHint?: string }
+    error.value = refused.refusal?.headline || (cause as Error)?.message || 'The configuration could not be read.'
+    refusalCauses.value = refused.refusal?.causes ?? []
+    refusalLogHint.value = refused.logHint ?? ''
   } finally {
     loading.value = false
   }
-})
+}
+
+onMounted(load)
 
 const identity = computed<ConfigRow[]>(() => [
   { label: 'Name', value: formatText(relay.value?.name) },
@@ -55,8 +65,6 @@ const noResourceLimits = computed(() => hasNoResourceLimits(config.value))
  * drifted apart.
  */
 const operatorMatch = computed(() => operatorKeysMatch(config.value?.moderation.admin_pubkey, state.value?.pubkey))
-
-const signedInPubkey = computed(() => formatText(state.value?.pubkey))
 </script>
 
 <template>
@@ -77,17 +85,36 @@ const signedInPubkey = computed(() => formatText(state.value?.pubkey))
       class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
       role="alert"
     >
-      <p>{{ refusedByRelay ? 'The relay refused this request.' : error }}</p>
-      <p
-        v-if="refusedByRelay"
-        class="mt-2"
+      <p>{{ error }}</p>
+
+      <ul
+        v-if="refusalCauses.length > 0"
+        class="mt-3 flex list-disc flex-col gap-2 pl-5"
       >
-        The relay authorizes this read against its own
-        <code class="font-mono">moderation.admin_pubkey</code>, which is configured separately from
-        the dashboard's <code class="font-mono">NUXT_ADMIN_PUBKEY</code>. You signed in as
-        <span class="font-mono">{{ signedInPubkey }}</span>; if that is not the relay's admin key,
-        every privileged relay call will be refused until the two agree.
+        <li
+          v-for="cause in refusalCauses"
+          :key="cause"
+        >
+          {{ cause }}
+        </li>
+      </ul>
+
+      <p
+        v-if="refusalLogHint"
+        class="mt-3"
+      >
+        {{ refusalLogHint }}
       </p>
+
+      <UButton
+        class="mt-4"
+        size="xs"
+        variant="subtle"
+        :loading="loading"
+        @click="load"
+      >
+        Try again
+      </UButton>
     </div>
 
     <UCard class="mb-6">
