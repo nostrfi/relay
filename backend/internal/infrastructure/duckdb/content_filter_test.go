@@ -2,6 +2,7 @@ package duckdb
 
 import (
 	"context"
+	"strconv"
 	"testing"
 
 	domainevent "relay/internal/domain/event"
@@ -80,4 +81,43 @@ func TestQueryEventsMatchingContent(t *testing.T) {
 		ids := matching(t, domainevent.Query{ContentContains: "ordering probe"})
 		assert.Equal(t, []string{newer.ID, older.ID}, ids)
 	})
+}
+
+// TestCountEventsCountsWhatIsOnDisk pins the startup count to the whole
+// table. It answers "is this the database I filled", so an event that a
+// query would exclude must still be counted — otherwise a relay holding
+// only expired or banned events would report zero and look like the wrong
+// file (nostrfi/workspace#49).
+func TestCountEventsCountsWhatIsOnDisk(t *testing.T) {
+	db, _ := openTempDB(t)
+	ctx := context.Background()
+	require.NoError(t, RunMigrations(ctx, db))
+	repo := &Repository{db: db}
+
+	count, err := repo.CountEvents(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), count, "a fresh database holds nothing")
+
+	sk := nostr.GeneratePrivateKey()
+	visible := nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "counted"}
+	signAndSave(t, ctx, repo, sk, &visible)
+
+	// Valid when published — its expiration is after its created_at — but
+	// both are in the past now, which is the only way to reach that state
+	// (SaveEvent refuses an event already expired at publish time).
+	expired := nostr.Event{
+		CreatedAt: nostr.Now() - 7200,
+		Kind:      1,
+		Content:   "expired but still on disk",
+		Tags:      nostr.Tags{{"expiration", strconv.FormatInt(int64(nostr.Now())-3600, 10)}},
+	}
+	signAndSave(t, ctx, repo, sk, &expired)
+
+	count, err = repo.CountEvents(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), count)
+
+	served, err := repo.QueryEvents(ctx, nostr.Filter{})
+	require.NoError(t, err)
+	assert.Len(t, served, 1, "the expired event is on disk but not served — the count is not the query")
 }

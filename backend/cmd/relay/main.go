@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -18,6 +19,10 @@ import (
 
 // version is injected at build time via -ldflags "-X main.version=..."
 var version = "dev"
+
+// storageCountTimeout bounds the startup event count, so a slow or huge
+// database delays the log line rather than the relay.
+const storageCountTimeout = 5 * time.Second
 
 func main() {
 	backupDir := flag.String("backup", "", "export the database to this directory and exit")
@@ -53,6 +58,7 @@ func main() {
 		slog.Error("failed to open storage", "error", err)
 		os.Exit(1)
 	}
+	logOpenedStorage(cfg.Storage.DBPath, repo)
 
 	// 4. Initialize Services
 	eventService := application.NewEventService(repo)
@@ -104,4 +110,35 @@ func main() {
 	}
 
 	slog.Info("Relay stopped")
+}
+
+// logOpenedStorage names the database this process is actually reading, and
+// how many events are in it.
+//
+// The relay already says which configuration file it loaded; it said nothing
+// about which database that configuration pointed it at. An operator whose
+// dashboard shows no events cannot otherwise tell an empty relay from one
+// reading a different file than the one they filled — a relative db_path
+// resolves against the configuration file, so starting the relay a different
+// way can silently open a different database (nostrfi/workspace#49).
+//
+// The count is a startup-only query, and deliberately counts every row,
+// including expired and banned events: it answers "is this the database I
+// filled", which a filtered count would not.
+func logOpenedStorage(dbPath string, repo *duckdb.Repository) {
+	absolute := dbPath
+	if resolved, err := filepath.Abs(dbPath); err == nil {
+		absolute = resolved
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), storageCountTimeout)
+	defer cancel()
+
+	count, err := repo.CountEvents(ctx)
+	if err != nil {
+		// Not fatal: the relay is open and serving either way.
+		slog.Info("storage opened", "db_path", absolute, "events", "unknown", "count_error", err)
+		return
+	}
+	slog.Info("storage opened", "db_path", absolute, "events", count)
 }
