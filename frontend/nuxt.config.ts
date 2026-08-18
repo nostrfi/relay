@@ -1,4 +1,11 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+
+// Where the dashboard is mounted behind the reverse proxy. One constant
+// because two places need it: app.baseURL, and the redirect targets below —
+// a route rule matches the path with the base already stripped, but answers
+// with its Location verbatim, so those targets have to carry it.
+const baseURL = '/admin'
+
 export default defineNuxtConfig({
   modules: ['@nuxt/eslint', '@nuxt/ui'],
 
@@ -7,7 +14,7 @@ export default defineNuxtConfig({
   },
 
   app: {
-    baseURL: '/admin'
+    baseURL
   },
 
   css: ['~/assets/css/main.css'],
@@ -29,6 +36,14 @@ export default defineNuxtConfig({
     // the relay's moderation.admin_pubkey: the relay, not this value, is
     // what authorizes privileged actions.
     adminPubkey: process.env.NUXT_ADMIN_PUBKEY || ''
+  },
+
+  // The private pages moved under /dashboard when they gained the shared
+  // dashboard shell (nostrfi/workspace#47). Bookmarks of the old paths still
+  // land rather than 404.
+  routeRules: {
+    '/moderation': { redirect: `${baseURL}/dashboard/moderation` },
+    '/configuration': { redirect: `${baseURL}/dashboard/configuration` }
   },
 
   compatibilityDate: '2026-08-17',

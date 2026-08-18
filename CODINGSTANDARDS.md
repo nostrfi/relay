@@ -84,7 +84,8 @@ checks colour, so these rules are the only thing preventing drift — treat them
 
 - **Signal mode only.** The dashboard is a configuration, moderation, and trust surface, so it
   never takes the Sovereign hero treatment: no glow, no oversized display type, no decorative
-  motion. `app/layouts/default.vue` sets `data-nf-mode="signal"` on its root; keep it there.
+  motion. Both shells set `data-nf-mode="signal"` on their root — `app/layouts/default.vue` for the
+  public page and `app/layouts/dashboard.vue` for the signed-in pages; keep it on both.
 - **`app/assets/css/brand.css` is a pinned copy of the canonical workspace tokens**, not a file to
   edit. Change it only by re-copying from the workspace (`60-marketing/brand/tokens/brand.css`) and
   updating the provenance header with the new version and date. Never alter a token value locally.

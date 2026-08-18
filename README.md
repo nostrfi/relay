@@ -295,7 +295,7 @@ take effect on restart.
 
 ### Admin dashboard moderation
 
-The dashboard's `/admin/moderation` page is a client of the management API above — it holds no
+The dashboard's `/admin/dashboard/moderation` page is a client of the management API above — it holds no
 moderation state of its own and adds no endpoints. Each action is signed in the browser by the
 operator's key (NIP-07 extension or NIP-46 bunker) and forwarded verbatim by the dashboard server,
 so the relay authorizes every call exactly as it would from `nak` or curl.
@@ -306,12 +306,13 @@ a dashboard session. With the signer unavailable the page says so rather than sh
 ### Admin dashboard sign-in
 
 `/admin` itself is public: it renders the relay's NIP-11 information, the same document the relay
-serves to any anonymous caller. Everything else — starting with `/admin/dashboard` — requires a
-pubkey login. The operator proves ownership of a key by signing a NIP-98 kind-`27235` event over
+serves to any anonymous caller. Everything else lives under `/admin/dashboard` — the overview, plus
+`/moderation` and `/configuration` beneath it — and requires a pubkey login. The operator proves ownership of a key by signing a NIP-98 kind-`27235` event over
 the login endpoint, with a browser extension (NIP-07) or a remote signer (NIP-46 bunker), and the
 dashboard's Nuxt server opens a session for them.
 
-Sign-in is a **Sign in** action in the dashboard header, which opens a modal with both options.
+Sign-in is a **Sign in** action in the public page's header, which opens a modal with both
+options; the signed-in pages carry the identity and a **Sign out** in their sidebar instead.
 Reaching a private page while signed out returns to `/admin` with that modal open.
 
 Two environment variables configure it on the `dashboard` service:
