@@ -3209,8 +3209,27 @@ func TestNip86RejectsMalformedValues(t *testing.T) {
 		{"ip with stray space", "blockip", []any{"127.0.0.1 ", "abuse"}, "not a valid IP address"},
 		{"cidr malformed", "blockip", []any{"10.0.0.0/99", "abuse"}, "not a valid IP address"},
 		{"unblock ip malformed", "unblockip", []any{"banana"}, "not a valid IP address"},
+		{"pubkey too long", "banpubkey", []any{strings.Repeat("a", 65), "spam"}, "hex characters"},
+		{"event id too long", "banevent", []any{strings.Repeat("a", 65), "reported"}, "hex characters"},
+		{"event id uppercase hex", "banevent", []any{strings.Repeat("A", 64), "reported"}, "lowercase hex"},
+		{"allow event uppercase hex", "allowevent", []any{strings.Repeat("A", 64)}, "lowercase hex"},
+		{"unban pubkey uppercase hex", "unbanpubkey", []any{strings.Repeat("A", 64)}, "lowercase hex"},
+		{"ipv6 with a zone", "blockip", []any{"fe80::1%eth0", "abuse"}, "not a valid IP address"},
+		{"cidr without an address", "blockip", []any{"/24", "abuse"}, "not a valid IP address"},
+
+		// The reason rules apply wherever a reason is stored, not just to
+		// banpubkey.
 		{"reason too long", "banpubkey", []any{validHex, strings.Repeat("x", 501)}, "characters or fewer"},
+		{"reason too long on banevent", "banevent", []any{validHex, strings.Repeat("x", 501)}, "characters or fewer"},
+		{"reason too long on blockip", "blockip", []any{"198.51.100.7", strings.Repeat("x", 501)}, "characters or fewer"},
 		{"reason only whitespace", "banpubkey", []any{validHex, "   "}, "only whitespace"},
+		{"reason only whitespace on banevent", "banevent", []any{validHex, "\t\n"}, "only whitespace"},
+		{"reason only whitespace on blockip", "blockip", []any{"198.51.100.7", " "}, "only whitespace"},
+
+		// parseValueReasonParams' own guards, which the validation runs after.
+		{"no parameters at all", "banpubkey", []any{}, "missing required first parameter"},
+		{"empty value", "banpubkey", []any{""}, "non-empty string"},
+		{"value is not a string", "banpubkey", []any{42}, "non-empty string"},
 	}
 
 	for _, tc := range cases {
@@ -3251,6 +3270,43 @@ func TestNip86RejectedValuesAreNotStored(t *testing.T) {
 	require.Equal(t, http.StatusOK, status)
 	banned, _ := out["result"].([]any)
 	assert.Empty(t, banned, "a rejected banpubkey must not store a row")
+
+	_, status = callManagement(t, server, operatorSk, "banevent", []any{"not-an-event", "reported"})
+	require.Equal(t, http.StatusOK, status)
+
+	out, status = callManagement(t, server, operatorSk, "listbannedevents", []any{})
+	require.Equal(t, http.StatusOK, status)
+	bannedEvents, _ := out["result"].([]any)
+	assert.Empty(t, bannedEvents, "a rejected banevent must not store a row")
+}
+
+// TestNip86ReasonLimitCountsCharactersNotBytes pins the limit to runes. With
+// a byte count, a reason written in a language that does not fit in ASCII
+// would be refused well before 500 characters — and the dashboard, which
+// counts characters, would have accepted it before asking the operator to
+// sign.
+func TestNip86ReasonLimitCountsCharactersNotBytes(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: operatorPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
+	defer cleanup()
+
+	targetSk := nostr.GeneratePrivateKey()
+	targetPk, _ := nostr.GetPublicKey(targetSk)
+
+	// 400 characters, 800 bytes: comfortably inside the limit as characters,
+	// well over it as bytes.
+	multibyte := strings.Repeat("é", 400)
+	require.Greater(t, len(multibyte), 500, "the fixture must exceed the limit when counted as bytes")
+
+	out, status := callManagement(t, server, operatorSk, "banpubkey", []any{targetPk, multibyte})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"], "a 400-character reason must be accepted, got %v", out)
+
+	// And the limit still bites at 501 characters.
+	out, status = callManagement(t, server, operatorSk, "banpubkey", []any{targetPk, strings.Repeat("é", 501)})
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, out["error"], "characters or fewer")
 }
 
 // TestNip86AcceptsValidValues guards against the validation being too

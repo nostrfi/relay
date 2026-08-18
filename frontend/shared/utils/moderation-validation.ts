@@ -49,7 +49,10 @@ export function validateIpOrCidr(value: string): string | null {
 export const MAX_REASON_LENGTH = 500
 
 export function validateReason(reason: string): string | null {
-  if (reason.length > MAX_REASON_LENGTH) {
+  // Counted in code points to match the relay's rune count. String.length
+  // counts UTF-16 units, so an accented or emoji reason would pass here and
+  // be refused there, after the operator had already signed it.
+  if ([...reason].length > MAX_REASON_LENGTH) {
     return `Reason must be ${MAX_REASON_LENGTH} characters or fewer`
   }
   if (reason !== '' && reason.trim() === '') {

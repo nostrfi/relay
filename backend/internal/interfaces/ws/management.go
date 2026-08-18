@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"relay/internal/domain/moderation"
 )
@@ -153,9 +154,14 @@ func validateIPOrCIDR(value string) error {
 }
 
 // validateReason bounds the optional second parameter.
+//
+// Counted in runes, not bytes: len() would make the limit depend on the
+// encoding of the operator's language, and would disagree with the
+// dashboard's own character count for any non-ASCII reason — rejecting,
+// after the operator had already signed, something the form had accepted.
 func validateReason(reason string) error {
-	if len(reason) > maxReasonLength {
-		return newManagementError("reason must be %d characters or fewer, got %d", maxReasonLength, len(reason))
+	if count := utf8.RuneCountInString(reason); count > maxReasonLength {
+		return newManagementError("reason must be %d characters or fewer, got %d", maxReasonLength, count)
 	}
 	if strings.TrimSpace(reason) == "" && reason != "" {
 		return newManagementError("reason must not be only whitespace")
