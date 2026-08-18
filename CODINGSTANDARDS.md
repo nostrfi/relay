@@ -115,8 +115,18 @@ Authentication and sessions:
   its own per-request NIP-98 signature, checked by the relay against `moderation.admin_pubkey`. Do
   not add a server-issued token that stands in for a signature.
 - **Route middleware is not a security boundary.** `app/middleware/auth.global.ts` only redirects
-  the browser. Every `server/api/*` route that returns relay data or proxies an action must call
-  `requireAdminSession(event)` itself.
+  the browser. Every `server/api/*` route that returns operational state or proxies an action must
+  call `requireAdminSession(event)` itself.
+- **Pages are private by default; publish one deliberately.** The global middleware guards every
+  route unless the page sets `definePageMeta({ public: true })`. Only the landing page does. Adding
+  a feature page therefore protects it automatically — do not invert this, because forgetting the
+  opt-in on a default-public scheme fails open.
+- **Public means the relay already serves it anonymously.** `/api/relay-info` is unguarded only
+  because the relay hands that same NIP-11 document to any anonymous caller; a guard there would
+  protect nothing while making the dashboard's public face a login wall
+  (nostrfi/workspace#46). Anything else needs a session.
+- **Sign-in lives in one place**, `app/components/SignInModal.vue`, opened from the header or by
+  `?signin=1`. Do not add a second sign-in surface — two would drift.
 - **Sign privileged relay calls client-side**, then forward the signed event verbatim. The NIP-98
   `u` tag must name the URL *the relay* observes — `/` with no query, since the relay serves NIP-86
   from the same URI as the WebSocket endpoint — not the dashboard path the browser called.
