@@ -1,5 +1,12 @@
 <script setup lang="ts">
 import type { RelayConfig } from '~~/shared/types/relay-config'
+import type { ConfigRow } from '~~/shared/utils/config-view'
+import {
+  configSections,
+  formatText,
+  hasNoResourceLimits,
+  operatorKeysMatch
+} from '~~/shared/utils/config-view'
 
 useSeoMeta({ title: 'Configuration' })
 
@@ -7,48 +14,39 @@ const { state } = useAdminSession()
 const { fetchConfig } = useRelayConfig()
 const { data: relay } = await useFetch('/api/relay-info')
 
-/** One label/value line. `mono` for protocol data, `tabular` for figures. */
-interface Row {
-  label: string
-  value: string
-  mono?: boolean
-  tabular?: boolean
-}
-
 const config = ref<RelayConfig | null>(null)
 const loading = ref(true)
 const error = ref('')
+const refusedByRelay = ref(false)
 
 onMounted(async () => {
   try {
     config.value = await fetchConfig()
   } catch (cause) {
+    // A 401 here has one likely cause worth naming: the relay authorizes
+    // this read against its own moderation.admin_pubkey, which is set
+    // separately from the dashboard's NUXT_ADMIN_PUBKEY. When they name
+    // different keys the operator can sign in and still be refused, and
+    // this is the only place that says why.
+    refusedByRelay.value = (cause as { statusCode?: number })?.statusCode === 401
     error.value = (cause as Error)?.message || 'The configuration could not be read.'
   } finally {
     loading.value = false
   }
 })
 
-function seconds(value: number | undefined): string {
-  return value === undefined ? '—' : `${value}s`
-}
+const identity = computed<ConfigRow[]>(() => [
+  { label: 'Name', value: formatText(relay.value?.name) },
+  { label: 'Description', value: formatText(relay.value?.description) },
+  { label: 'Contact', value: formatText(relay.value?.contact) },
+  { label: 'Software', value: formatText(relay.value?.software) },
+  { label: 'Version', value: formatText(relay.value?.version), tabular: true },
+  { label: 'Operator pubkey', value: formatText(relay.value?.pubkey), mono: true }
+])
 
-function text(value: string | undefined): string {
-  return value === undefined || value === '' ? '—' : value
-}
+const sections = computed(() => (config.value ? configSections(config.value) : []))
 
-/**
- * Resource limits are disabled at zero, not set to zero: newLimiter returns
- * no limiter below 1, and the connection cap is skipped unless positive. A
- * bare "0" would read as "nothing allowed" when it means the opposite, so
- * say what the relay actually does.
- */
-function limit(value: number | undefined, unit: string): string {
-  if (value === undefined) {
-    return '—'
-  }
-  return value > 0 ? `${value} ${unit}` : 'Unlimited'
-}
+const noResourceLimits = computed(() => hasNoResourceLimits(config.value))
 
 /**
  * The relay's operator key against the one signed into the dashboard. These
@@ -56,86 +54,9 @@ function limit(value: number | undefined, unit: string): string {
  * dashboard's `NUXT_ADMIN_PUBKEY` — and nothing showed you when they had
  * drifted apart.
  */
-const operatorMatch = computed(() => {
-  const relayAdmin = config.value?.moderation.admin_pubkey
-  const signedIn = state.value?.pubkey
-  if (!relayAdmin || !signedIn) {
-    return null
-  }
-  return relayAdmin === signedIn
-})
+const operatorMatch = computed(() => operatorKeysMatch(config.value?.moderation.admin_pubkey, state.value?.pubkey))
 
-/** True when every resource limit is off, which an omitted section causes. */
-const noResourceLimits = computed(() => {
-  const limits = config.value?.resource_limits
-  return !!limits && limits.max_connections <= 0 && limits.messages_per_second <= 0 && limits.events_per_second <= 0
-})
-
-const identity = computed<Row[]>(() => [
-  { label: 'Name', value: text(relay.value?.name) },
-  { label: 'Description', value: text(relay.value?.description) },
-  { label: 'Contact', value: text(relay.value?.contact) },
-  { label: 'Software', value: text(relay.value?.software) },
-  { label: 'Version', value: text(relay.value?.version), tabular: true },
-  { label: 'Operator pubkey', value: text(relay.value?.pubkey), mono: true }
-])
-
-const sections = computed<{ title: string, rows: Row[] }[]>(() => {
-  const c = config.value
-  if (!c) {
-    return []
-  }
-  return [
-    {
-      title: 'Resource limits',
-      rows: [
-        { label: 'Max connections', value: limit(c.resource_limits.max_connections, 'connections'), tabular: true },
-        { label: 'Messages per second', value: limit(c.resource_limits.messages_per_second, 'per second'), tabular: true },
-        { label: 'Events per second', value: limit(c.resource_limits.events_per_second, 'per second'), tabular: true }
-      ]
-    },
-    {
-      title: 'Authentication (NIP-42)',
-      rows: [
-        { label: 'Relay URL binding', value: text(c.auth.relay_url), mono: true },
-        { label: 'Max event age', value: seconds(c.auth.max_event_age_seconds), tabular: true }
-      ]
-    },
-    {
-      title: 'Moderation (NIP-86)',
-      rows: [
-        { label: 'Admin pubkey', value: text(c.moderation.admin_pubkey), mono: true },
-        { label: 'Max event age', value: seconds(c.moderation.max_event_age_seconds), tabular: true }
-      ]
-    },
-    {
-      title: 'WebSocket origins',
-      rows: [
-        { label: 'Mode', value: text(c.websocket.mode) },
-        {
-          label: 'Allowed origins',
-          value: c.websocket.allowed_origins.length > 0 ? c.websocket.allowed_origins.join(', ') : '—',
-          mono: true
-        }
-      ]
-    },
-    {
-      title: 'Retention',
-      rows: [{ label: 'Purge interval', value: seconds(c.retention.purge_interval_seconds), tabular: true }]
-    },
-    {
-      title: 'Listener',
-      rows: [
-        { label: 'Listen address', value: text(c.server.listen_addr), mono: true },
-        { label: 'Shutdown timeout', value: seconds(c.server.shutdown_timeout_seconds), tabular: true }
-      ]
-    },
-    {
-      title: 'Storage',
-      rows: [{ label: 'Database path', value: text(c.storage.db_path), mono: true }]
-    }
-  ]
-})
+const signedInPubkey = computed(() => formatText(state.value?.pubkey))
 </script>
 
 <template>
@@ -151,13 +72,23 @@ const sections = computed<{ title: string, rows: Row[] }[]>(() => {
       </p>
     </header>
 
-    <p
+    <div
       v-if="error"
       class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
       role="alert"
     >
-      {{ error }}
-    </p>
+      <p>{{ refusedByRelay ? 'The relay refused this request.' : error }}</p>
+      <p
+        v-if="refusedByRelay"
+        class="mt-2"
+      >
+        The relay authorizes this read against its own
+        <code class="font-mono">moderation.admin_pubkey</code>, which is configured separately from
+        the dashboard's <code class="font-mono">NUXT_ADMIN_PUBKEY</code>. You signed in as
+        <span class="font-mono">{{ signedInPubkey }}</span>; if that is not the relay's admin key,
+        every privileged relay call will be refused until the two agree.
+      </p>
+    </div>
 
     <UCard class="mb-6">
       <template #header>
