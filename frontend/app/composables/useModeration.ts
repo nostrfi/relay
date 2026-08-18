@@ -4,6 +4,7 @@ import type {
   BlockedIP,
   Nip86Response
 } from '~~/shared/types/moderation'
+import { createRelayRefusalError, refusalDiagnosticsFrom } from '~~/shared/utils/relay-refusal'
 
 /**
  * One function per NIP-86 method the relay supports. Each returns the
@@ -13,14 +14,18 @@ import type {
  */
 export function useModeration() {
   const { sign } = useRelayRequest()
+  const { state } = useAdminSession()
 
   async function call<T>(method: string, params: unknown[]): Promise<Nip86Response<T>> {
-    const signer = await acquireSigner()
-    try {
-      // The relay serves NIP-86 from its root, so that is the path signed
-      // into the u tag — not the dashboard route this request is sent to.
-      const { authorization, body } = await sign(signer, '/', { method, params })
+    // Signing waits its turn — the page loads three lists at once and a
+    // signer approves one thing at a time. The request itself is sent
+    // outside that turn, so the three calls still overlap on the wire.
+    // The relay serves NIP-86 from its root, so that is the path signed
+    // into the u tag — not the dashboard route this request is sent to.
+    const { authorization, body, signingMs, pubkey, signedPath }
+      = await withSigner(state.value?.pubkey, signer => sign(signer, '/', { method, params }))
 
+    try {
       return await $fetch<Nip86Response<T>>('/api/moderation/rpc', {
         method: 'POST',
         body,
@@ -29,9 +34,20 @@ export function useModeration() {
           'Authorization': authorization
         }
       })
-    } finally {
-      // A NIP-46 signer holds a live relay subscription.
-      await signer.close()
+    } catch (cause) {
+      if ((cause as { statusCode?: number })?.statusCode !== 401) {
+        throw cause
+      }
+      // A refused operator check, which the relay will not explain. Method
+      // errors are unaffected: those arrive as a 200 error envelope and
+      // still reach the page verbatim.
+      throw createRelayRefusalError({
+        signingMs,
+        signedInPubkey: state.value?.pubkey,
+        signingPubkey: pubkey,
+        signedPath,
+        ...refusalDiagnosticsFrom(cause)
+      })
     }
   }
 

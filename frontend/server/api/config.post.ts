@@ -1,9 +1,9 @@
 /**
- * Forwards a NIP-86 management call to the relay.
+ * Forwards a signed configuration read to the relay.
  *
- * The browser signs it; this route only proxies. It must not re-serialize
- * the body — NIP-98's payload tag is a hash of the exact bytes, so any
- * reformatting here would make the relay refuse a valid signature.
+ * As with the moderation proxy, the browser signs and this route only
+ * forwards: it must not re-serialize the body, because NIP-98's payload tag
+ * hashes the exact bytes.
  */
 export default defineEventHandler(async (event) => {
   await requireAdminSession(event)
@@ -20,13 +20,10 @@ export default defineEventHandler(async (event) => {
 
   const { relayApiBase } = useRuntimeConfig(event)
 
-  // Plain fetch, not $fetch: the relay answers method-level failures with a
-  // 200 and an {"error"} envelope but auth failures with a 401, and both
-  // bodies matter to the caller. $fetch would throw the 401 body away.
-  const response = await fetch(relayApiBase, {
+  const response = await fetch(`${relayApiBase.replace(/\/$/, '')}/api/config`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/nostr+json+rpc',
+      'Content-Type': 'application/json',
       'Authorization': authorization
     },
     body
@@ -43,11 +40,6 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  // The relay separates the two failure kinds by status: a method-level
-  // problem ("pubkey must be 64 hex characters") is a 200 carrying an error
-  // envelope, while a failed operator check is a 401. Preserving that lets
-  // the caller tell an actionable validation message from a refusal it
-  // cannot interpret — flattening both into a 200 lost the distinction.
   if (!response.ok) {
     throw createError({
       statusCode: response.status,
@@ -58,7 +50,7 @@ export default defineEventHandler(async (event) => {
       // path, malformed header) but never an identity one.
       data: {
         relayReason: (parsed as { reason?: string })?.reason,
-        ...await collectRefusalDiagnostics(relayApiBase, response, '/')
+        ...await collectRefusalDiagnostics(relayApiBase, response, '/api/config')
       }
     })
   }

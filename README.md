@@ -117,6 +117,23 @@ relay_info:
   supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
 ```
 
+### Where the config file is looked for
+
+`config.yaml` is searched for, in order, in:
+
+1. the working directory (this is where the container finds it: `/app`),
+2. the directory holding the relay binary,
+3. `backend/`, so a binary started from the repository root finds it too.
+
+Set **`RELAY_CONFIG_FILE`** to a path to skip the search — for a systemd unit or a packaged
+install whose config lives somewhere else entirely. A file named that way but missing is a
+startup error, rather than a silent fall back to defaults.
+
+The relay logs which file it loaded (`configuration loaded`), and warns when it found none.
+Take that warning seriously: a relay running on defaults has no `relay_info.pubkey`, so no
+`moderation.admin_pubkey`, and it refuses every NIP-86 and configuration-API request — it says
+so in a second warning at startup, and tells the caller as much in its `401`.
+
 ### Server and storage
 
 ```yaml
@@ -125,10 +142,16 @@ server:
   shutdown_timeout_seconds: 5      # graceful-shutdown deadline
 
 storage:
-  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags, relative to backend/
+  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags
 ```
 
-All three settings default to the values shown above when unset. `storage.db_path` is read by `-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
+All three settings default to the values shown above when unset. `storage.db_path` is read by
+`-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
+
+A **relative** `db_path` is relative to the configuration file that set it, so the database sits
+where the file that names it does — `backend/db/relay.db` for `backend/config.yaml`, whichever
+directory the relay was started from, and `/app/db/relay.db` in the container. Give an absolute
+path to put it anywhere else.
 
 ### Health and readiness
 
@@ -231,6 +254,44 @@ operator could believe an address was blocked when it was not.
 - **`banevent`**: excludes that event ID from `REQ` results. The underlying row is not deleted, so `allowevent` reverses it; independent of NIP-09 same-author deletion.
 - **`blockip`**: rejects future WebSocket upgrade attempts from that IP or CIDR with `403`. Uses the request's observed remote address, not a proxy header like `X-Forwarded-For` — behind a reverse proxy this sees the proxy's address, not the real client's.
 - Every management call, successful or not, is logged (`method`, `operator_pubkey`, and outcome) — never event content, private keys, or the raw request body.
+
+### Configuration API (operator only)
+
+`POST /api/config` returns the relay's **effective** operational configuration — what the running
+process is enforcing after code defaults are applied, not a copy of `config.yaml`. It is authorized
+exactly like the NIP-86 management API: an `Authorization: Nostr <base64>` header carrying a signed
+NIP-98 kind-`27235` event whose pubkey matches `moderation.admin_pubkey`. The request body is `{}`;
+it exists only so the NIP-98 `payload` tag has something to hash.
+
+```bash
+# body must be exactly what the payload tag hashes
+curl -X POST https://relay.example.com/api/config \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Nostr $(...)" \
+  -d '{}'
+```
+
+The response carries seven sections — `resource_limits`, `auth`, `moderation`, `websocket`,
+`retention`, `server`, `storage` — and deliberately **omits the NIP-11 identity fields**, which the
+relay already publishes to anyone.
+
+It is an explicit allow-list of fields, not a dump of the configuration struct: anything added to
+the config later stays invisible here until someone exposes it on purpose, so a credential cannot be
+published by accident. A test (`TestConfigSnapshotCoversEveryConfigField`) fails the build when a
+new config field is neither exposed nor recorded as deliberately withheld.
+
+Two values are worth reading carefully:
+
+- **`resource_limits` of `0` means unlimited, not zero.** Omitting the section from `config.yaml`
+  disables the connection cap and rate limiting entirely rather than applying a default — the
+  limiter is only created above zero. The dashboard renders these as "Unlimited" and warns when all
+  three are off.
+- **`websocket.mode` of `development` accepts a WebSocket connection from any Origin.** `production`
+  requires a non-empty `allowed_origins` and refuses to start without one.
+
+Configuration is read at start, so this reflects the running process and can differ from the file on
+disk if it has been edited since. There is no write endpoint: changes are a deployment concern and
+take effect on restart.
 
 ### Admin dashboard moderation
 

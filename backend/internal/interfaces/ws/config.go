@@ -2,6 +2,9 @@ package ws
 
 import (
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 
 	"github.com/spf13/viper"
 )
@@ -103,16 +106,63 @@ type Config struct {
 	Storage        StorageConfig    `mapstructure:"storage"`
 }
 
+// ConfigFileEnv names the configuration file outright, overriding the
+// search below. Set it when the relay runs from a directory that is
+// neither its own nor the repository root — a systemd unit, say, or a
+// packaged install with the config under /etc.
+const ConfigFileEnv = "RELAY_CONFIG_FILE"
+
+// configSearchPaths lists where a config.yaml is looked for, in order.
+//
+// The relay used to look only in the working directory, which is right for
+// the container (WORKDIR /app, config copied beside the binary) and for
+// `go run ./cmd/relay` from backend/ — and wrong for every other way an
+// operator starts it. Started from the repository root, or as a binary
+// built elsewhere, the relay found nothing, said nothing, and came up on
+// defaults: no relay_info.pubkey, so no moderation.admin_pubkey, so every
+// signed operator request refused with a bare "unauthorized"
+// (nostrfi/workspace#38).
+func configSearchPaths() []string {
+	paths := []string{"."}
+
+	// Beside the binary, which is where the container keeps it and where a
+	// packaged install usually does.
+	if exe, err := os.Executable(); err == nil {
+		paths = append(paths, filepath.Dir(exe))
+	}
+
+	// The repository root, one directory above the config: where a relay
+	// built with `go build -o ../relay ./cmd/relay` gets started from.
+	paths = append(paths, "backend")
+
+	return paths
+}
+
 func LoadConfig() (*Config, error) {
-	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
+	if explicit := os.Getenv(ConfigFileEnv); explicit != "" {
+		// An explicitly named file that does not exist is a hard error:
+		// falling back to defaults would ignore what the operator asked for.
+		viper.SetConfigFile(explicit)
+	} else {
+		viper.SetConfigName("config")
+		for _, path := range configSearchPaths() {
+			viper.AddConfigPath(path)
+		}
+	}
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			return nil, err
 		}
+		// Not fatal — the defaults below still make a runnable relay — but
+		// said out loud, because the relay it makes has no operator key and
+		// refuses every privileged call.
+		slog.Warn("no configuration file found; continuing with built-in defaults",
+			"searched", configSearchPaths(), "override_with", ConfigFileEnv)
+	} else {
+		slog.Info("configuration loaded", "file", viper.ConfigFileUsed())
 	}
 
 	var cfg Config
@@ -144,6 +194,14 @@ func LoadConfig() (*Config, error) {
 	if cfg.Moderation.MaxEventAgeSeconds == 0 {
 		cfg.Moderation.MaxEventAgeSeconds = 60
 	}
+	if cfg.Moderation.AdminPubkey == "" {
+		// Every NIP-86 call and the configuration endpoint compare against
+		// this key, so an unset one refuses everyone. Nothing downstream can
+		// tell that apart from a wrong key, so it is named here, once, at
+		// the only point that knows.
+		slog.Warn("no operator pubkey configured; the NIP-86 management API and /api/config will refuse every request",
+			"set", "relay_info.pubkey or moderation.admin_pubkey")
+	}
 
 	if cfg.Retention.PurgeIntervalSeconds == 0 {
 		cfg.Retention.PurgeIntervalSeconds = 3600
@@ -157,6 +215,21 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.Storage.DBPath == "" {
 		cfg.Storage.DBPath = "db/relay.db"
+	}
+	// A relative db_path is relative to the configuration file that set it,
+	// not to whatever directory the relay was started from. The two used to
+	// be the same thing, because the config was only ever found in the
+	// working directory; now that it is found from elsewhere, a relay
+	// started from the repository root would otherwise read backend/
+	// config.yaml and then look for its database beside the repository
+	// root instead of under backend/, which is where the file it just read
+	// says it is — and what README.md has always documented.
+	//
+	// Unchanged for the container, where the config and the db directory
+	// both sit in the working directory, and for an absolute db_path, which
+	// names its own location.
+	if configFile := viper.ConfigFileUsed(); configFile != "" && !filepath.IsAbs(cfg.Storage.DBPath) {
+		cfg.Storage.DBPath = filepath.Join(filepath.Dir(configFile), cfg.Storage.DBPath)
 	}
 
 	return &cfg, nil

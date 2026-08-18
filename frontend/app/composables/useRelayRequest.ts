@@ -14,6 +14,16 @@ import { buildRelayAuthTemplate } from '~~/shared/utils/relay-auth'
 export interface SignedRelayRequest {
   authorization: string
   body: string
+  /**
+   * How long the signer took to return. NIP-98 events expire, so a slow
+   * approval is a refusal the dashboard can name precisely instead of
+   * guessing — see shared/utils/relay-refusal.ts.
+   */
+  signingMs: number
+  /** Who actually signed, which need not be who logged in. */
+  pubkey: string
+  /** The path signed into the `u` tag, for comparison against the relay's. */
+  signedPath: string
 }
 
 export function useRelayRequest() {
@@ -24,11 +34,16 @@ export function useRelayRequest() {
   async function sign(signer: Signer, path: string, payload: unknown): Promise<SignedRelayRequest> {
     const body = JSON.stringify(payload)
     const template = await buildRelayAuthTemplate({ path, origin: window.location.origin, body })
+
+    const startedAt = Date.now()
     const signed = await signer.signEvent(template)
 
     return {
       authorization: `Nostr ${btoa(JSON.stringify(signed))}`,
-      body
+      body,
+      signingMs: Date.now() - startedAt,
+      pubkey: signed.pubkey,
+      signedPath: path
     }
   }
 

@@ -64,7 +64,7 @@ func main() {
 	// 6. Setup Server
 	server := &http.Server{
 		Addr:    cfg.Server.ListenAddr,
-		Handler: ws.NewMux(relayHandler, repo.Ping),
+		Handler: ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(*cfg)),
 	}
 
 	// 6a. Start the background maintenance worker (expired-event purge and

@@ -2,6 +2,7 @@ import type { EventTemplate, VerifiedEvent } from 'nostr-tools/pure'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
 import { bytesToHex, hexToBytes } from 'nostr-tools/utils'
+import { createSerialQueue } from '~~/shared/utils/serial-queue'
 
 /**
  * One signing interface over both supported signers, so feature tickets
@@ -83,25 +84,91 @@ export function storedSignerKind(): Signer['kind'] | null {
 /**
  * Returns a signer for a privileged call made after login. Callers must
  * close it when done: a NIP-46 signer holds a live relay subscription.
+ *
+ * `expectedPubkey` is the key the session was opened with. When given, the
+ * signer is checked against it before any request is signed. Without that
+ * check a signer holding a different key produces a valid signature from
+ * the wrong identity, the relay refuses it, and nothing on the way says so
+ * — the operator sees only a refusal they cannot act on.
  */
-export async function acquireSigner(): Promise<Signer> {
-  const kind = storedSignerKind()
+export async function acquireSigner(expectedPubkey?: string): Promise<Signer> {
+  // A session opened before the signer kind was recorded has none stored.
+  // Falling straight through to the extension would then sign with whatever
+  // key it holds, even for an operator who paired a remote signer.
+  const kind = storedSignerKind() ?? (hasStoredBunker() ? 'nip46' : null)
 
+  let signer: Signer
   if (kind === 'nip46') {
-    const signer = await restoreBunkerSigner()
-    if (!signer) {
+    const restored = await restoreBunkerSigner()
+    if (!restored) {
       throw new Error('Could not reach the remote signer. Check it is running, then sign in again to re-pair.')
     }
-    return signer
+    signer = restored
+  } else if (hasNip07()) {
+    signer = nip07Signer()
+  } else {
+    // The session proves who signed in; it is not a credential the relay
+    // accepts. Every privileged call needs the operator's signer present.
+    throw new Error('No signer available in this browser. Unlock your Nostr extension, or sign in again to re-pair a remote signer.')
   }
 
-  if (hasNip07()) {
-    return nip07Signer()
+  if (expectedPubkey) {
+    // Any failure from here on must release the signer: a restored NIP-46
+    // signer already holds a live relay subscription, and the caller never
+    // received it to close.
+    let actual: string
+    try {
+      actual = await signer.getPublicKey()
+    } catch (cause) {
+      await signer.close()
+      throw cause
+    }
+    if (actual !== expectedPubkey) {
+      await signer.close()
+      throw new Error(
+        `This browser's signer holds ${actual}, but you signed in as ${expectedPubkey}. `
+        + 'The relay refuses anything signed by the wrong key. Switch the signer back to that '
+        + 'account, or sign out and in again with the key the signer holds.'
+      )
+    }
   }
 
-  // The session proves who signed in; it is not a credential the relay
-  // accepts. Every privileged call needs the operator's signer present.
-  throw new Error('No signer available in this browser. Unlock your Nostr extension, or sign in again to re-pair a remote signer.')
+  return signer
+}
+
+/**
+ * The single queue every signer interaction passes through.
+ *
+ * Module scope, not per-composable: two different composables signing at
+ * once is exactly the case that fails, so they must share one queue.
+ */
+const signerQueue = createSerialQueue()
+
+/**
+ * Acquires a signer, runs one signing job with it, and releases it —
+ * waiting first for any other job to finish.
+ *
+ * Privileged calls are issued concurrently on purpose (the moderation page
+ * loads three lists at once), but a signer can only hold one approval open
+ * at a time: a NIP-07 extension rejects the second with "Another approval
+ * request is already pending". Serializing here keeps that a property of
+ * the signer rather than a rule every caller has to remember, and keeps
+ * pages free to issue their requests together.
+ *
+ * The signing job should be only the signing: whatever it returns is
+ * awaited before the next job starts, so sending the signed request belongs
+ * outside it, where the requests can still overlap.
+ */
+export function withSigner<T>(expectedPubkey: string | undefined, work: (signer: Signer) => Promise<T>): Promise<T> {
+  return signerQueue(async () => {
+    const signer = await acquireSigner(expectedPubkey)
+    try {
+      return await work(signer)
+    } finally {
+      // A NIP-46 signer holds a live relay subscription.
+      await signer.close()
+    }
+  })
 }
 
 /** True when this browser has a bunker pairing to reconnect with. */
