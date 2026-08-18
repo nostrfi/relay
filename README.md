@@ -338,6 +338,17 @@ Three behaviours are worth knowing:
   literal characters rather than wildcards. It is the first thing that will hurt on a large
   database; narrow it with a kind, author, or time range.
 
+### Admin dashboard event browser
+
+The dashboard's `/admin/dashboard/events` page is a client of the API above. Filters are built in
+the browser, each query is signed with the operator's key and forwarded verbatim, and the event
+detail view verifies the signature locally over the event exactly as the relay returned it, so it
+reports what it checked rather than asking you to trust storage.
+
+Because every query costs a signature, the page runs on an explicit **Run query** action and pages
+100 at a time rather than filtering as you type — with a NIP-46 remote signer, each keystroke would
+otherwise be an approval round trip.
+
 ### Admin dashboard moderation
 
 The dashboard's `/admin/dashboard/moderation` page is a client of the management API above — it holds no

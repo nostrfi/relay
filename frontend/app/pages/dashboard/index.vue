@@ -23,7 +23,7 @@ const npub = computed(() => {
  * facing an empty page.
  */
 const areas = [
-  { name: 'Event browser', issue: 36, description: 'Search and inspect stored events.', to: null },
+  { name: 'Event browser', issue: 36, description: 'Search and inspect stored events.', to: '/dashboard/events' },
   { name: 'Moderation', issue: 37, description: 'Ban pubkeys, events, and IP ranges via NIP-86.', to: '/dashboard/moderation' },
   { name: 'Configuration', issue: 38, description: 'Review the relay\'s effective settings.', to: '/dashboard/configuration' },
   { name: 'Metrics', issue: 39, description: 'Connection, storage, and throughput observability.', to: null }
