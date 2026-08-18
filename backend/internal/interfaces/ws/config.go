@@ -107,6 +107,8 @@ func LoadConfig() (*Config, error) {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
+	viper.AddConfigPath("./backend")
+	viper.AddConfigPath("backend")
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
