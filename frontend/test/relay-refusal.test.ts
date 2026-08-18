@@ -70,3 +70,23 @@ describe('the log hint', () => {
     expect(describeRelayRefusal({ signingMs: 95_000 }).causes).toEqual([])
   })
 })
+
+describe('createRelayRefusalError', () => {
+  it('carries the diagnosis both pages render', async () => {
+    const { createRelayRefusalError } = await import('../shared/utils/relay-refusal')
+    const error = createRelayRefusalError({ signingMs: 500, signedInPubkey: PUBKEY })
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error.message).toBe(error.refusal.headline)
+    expect(error.refusal.causes.length).toBe(3)
+    expect(error.logHint).toBe(RELAY_REFUSAL_LOG_HINT)
+  })
+
+  it('drops the log hint once the cause is established', async () => {
+    const { createRelayRefusalError } = await import('../shared/utils/relay-refusal')
+    const error = createRelayRefusalError({ signingMs: 95_000 })
+
+    expect(error.message).toContain('95 seconds')
+    expect(error.logHint).toBe('')
+  })
+})

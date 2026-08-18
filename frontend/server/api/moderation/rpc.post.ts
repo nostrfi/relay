@@ -33,12 +33,27 @@ export default defineEventHandler(async (event) => {
   })
 
   const text = await response.text()
+  let parsed: unknown
   try {
-    return JSON.parse(text)
+    parsed = JSON.parse(text)
   } catch {
     throw createError({
       statusCode: 502,
       statusMessage: `Relay returned a non-JSON response (${response.status})`
     })
   }
+
+  // The relay separates the two failure kinds by status: a method-level
+  // problem ("pubkey must be 64 hex characters") is a 200 carrying an error
+  // envelope, while a failed operator check is a 401. Preserving that lets
+  // the caller tell an actionable validation message from a refusal it
+  // cannot interpret — flattening both into a 200 lost the distinction.
+  if (!response.ok) {
+    throw createError({
+      statusCode: response.status,
+      statusMessage: (parsed as { error?: string })?.error ?? 'The relay refused the request'
+    })
+  }
+
+  return parsed
 })

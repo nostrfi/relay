@@ -32,6 +32,12 @@ const busy = ref(false)
 const error = ref('')
 const notice = ref('')
 
+// A relay refusal is not a method error: the relay will not say which check
+// failed, so the page lists what could have caused it rather than picking
+// one. See shared/utils/relay-refusal.ts.
+const refusalCauses = ref<string[]>([])
+const refusalLogHint = ref('')
+
 /** The entry a confirmation prompt is currently about. */
 const pendingRemoval = ref<{ section: Section, value: string } | null>(null)
 const confirmOpen = ref(false)
@@ -178,13 +184,23 @@ async function withBusy(work: () => Promise<void>) {
   busy.value = true
   error.value = ''
   notice.value = ''
+  refusalCauses.value = []
+  refusalLogHint.value = ''
   try {
     await work()
   } catch (cause) {
-    error.value = (cause as Error)?.message || 'The request failed.'
+    const refused = cause as { refusal?: { headline: string, causes: string[] }, logHint?: string }
+    error.value = refused.refusal?.headline || (cause as Error)?.message || 'The request failed.'
+    refusalCauses.value = refused.refusal?.causes ?? []
+    refusalLogHint.value = refused.logHint ?? ''
   } finally {
     busy.value = false
   }
+}
+
+/** Retries whatever failed by reloading every list. */
+async function retry() {
+  await withBusy(loadAll)
 }
 
 async function loadAll() {
@@ -240,13 +256,43 @@ onMounted(async () => {
       </p>
     </header>
 
-    <p
+    <div
       v-if="error"
       class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
       role="alert"
     >
-      {{ error }}
-    </p>
+      <p>{{ error }}</p>
+
+      <ul
+        v-if="refusalCauses.length > 0"
+        class="mt-3 flex list-disc flex-col gap-2 pl-5"
+      >
+        <li
+          v-for="cause in refusalCauses"
+          :key="cause"
+        >
+          {{ cause }}
+        </li>
+      </ul>
+
+      <p
+        v-if="refusalLogHint"
+        class="mt-3"
+      >
+        {{ refusalLogHint }}
+      </p>
+
+      <UButton
+        v-if="refusalCauses.length > 0 || refusalLogHint || error.includes('signature')"
+        class="mt-4"
+        size="xs"
+        variant="subtle"
+        :loading="busy"
+        @click="retry"
+      >
+        Try again
+      </UButton>
+    </div>
     <p
       v-else-if="notice"
       class="mb-6 rounded-(--ui-radius) border border-(--ui-success) px-4 py-3 text-sm text-(--ui-success)"

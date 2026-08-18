@@ -63,3 +63,19 @@ export function describeRelayRefusal(context: RelayRefusalContext = {}): RelayRe
 /** Where the actual reason is recorded. */
 export const RELAY_REFUSAL_LOG_HINT
   = 'The relay logs the real reason: look for "operator request rejected" in its output.'
+
+export interface RelayRefusedError extends Error {
+  refusal: RelayRefusal
+  /** Empty when the cause is established: pointing at the log would then
+   *  read as if we had not just named it. */
+  logHint: string
+}
+
+/** Builds the error both the configuration and moderation pages render. */
+export function createRelayRefusalError(context: RelayRefusalContext = {}): RelayRefusedError {
+  const refusal = describeRelayRefusal(context)
+  const error = new Error(refusal.headline) as RelayRefusedError
+  error.refusal = refusal
+  error.logHint = refusal.causes.length > 0 ? RELAY_REFUSAL_LOG_HINT : ''
+  return error
+}
