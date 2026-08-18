@@ -142,10 +142,16 @@ server:
   shutdown_timeout_seconds: 5      # graceful-shutdown deadline
 
 storage:
-  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags, relative to backend/
+  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags
 ```
 
-All three settings default to the values shown above when unset. `storage.db_path` is read by `-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
+All three settings default to the values shown above when unset. `storage.db_path` is read by
+`-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
+
+A **relative** `db_path` is relative to the configuration file that set it, so the database sits
+where the file that names it does — `backend/db/relay.db` for `backend/config.yaml`, whichever
+directory the relay was started from, and `/app/db/relay.db` in the container. Give an absolute
+path to put it anywhere else.
 
 ### Health and readiness
 

@@ -2638,7 +2638,9 @@ func TestConfigServerStorageDefaults(t *testing.T) {
 	}
 	assert.Equal(t, ":8080", cfg.Server.ListenAddr, "unset listen_addr should default to the historical hardcoded value")
 	assert.Equal(t, 5, cfg.Server.ShutdownTimeoutSeconds, "unset shutdown timeout should default to the historical hardcoded value")
-	assert.Equal(t, "db/relay.db", cfg.Storage.DBPath, "unset db_path should default to the historical hardcoded value")
+	// Still the historical default, resolved against the file that omitted
+	// it rather than against the working directory.
+	assert.Equal(t, filepath.Join(tmpDir, "db", "relay.db"), cfg.Storage.DBPath, "unset db_path should default to db/relay.db beside the config")
 }
 
 func TestConfigServerStorageOverrides(t *testing.T) {
@@ -2671,6 +2673,7 @@ storage:
 	}
 	assert.Equal(t, "127.0.0.1:9090", cfg.Server.ListenAddr)
 	assert.Equal(t, 15, cfg.Server.ShutdownTimeoutSeconds)
+	// An absolute db_path names its own location; nothing is prepended.
 	assert.Equal(t, "/var/lib/relay/custom.db", cfg.Storage.DBPath)
 }
 
@@ -2697,6 +2700,11 @@ func TestConfigFoundFromTheRepositoryRoot(t *testing.T) {
 	// The whole point of finding the file: without it this is empty and the
 	// operator API refuses everyone.
 	assert.Equal(t, operatorPk, cfg.Moderation.AdminPubkey)
+	// And the database the config file describes is the one beside it.
+	// Resolved against the working directory instead, this relay would look
+	// for its database one directory above where its own config says it is,
+	// and fail to open it.
+	assert.Equal(t, filepath.Join(root, "backend", "db", "relay.db"), cfg.Storage.DBPath)
 }
 
 // TestConfigFileEnvOverridesTheSearch covers a deployment whose config sits
@@ -2712,6 +2720,8 @@ func TestConfigFileEnvOverridesTheSearch(t *testing.T) {
 	cfg, err := ws.LoadConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "Named File Relay", cfg.RelayInfo.Name)
+	assert.Equal(t, filepath.Join(filepath.Dir(elsewhere), "db", "relay.db"), cfg.Storage.DBPath,
+		"a config named outside the search paths still keeps its database beside itself")
 }
 
 // TestConfigFileEnvMissingFileFails pins the asymmetry: no file anywhere in

@@ -216,6 +216,21 @@ func LoadConfig() (*Config, error) {
 	if cfg.Storage.DBPath == "" {
 		cfg.Storage.DBPath = "db/relay.db"
 	}
+	// A relative db_path is relative to the configuration file that set it,
+	// not to whatever directory the relay was started from. The two used to
+	// be the same thing, because the config was only ever found in the
+	// working directory; now that it is found from elsewhere, a relay
+	// started from the repository root would otherwise read backend/
+	// config.yaml and then look for its database beside the repository
+	// root instead of under backend/, which is where the file it just read
+	// says it is — and what README.md has always documented.
+	//
+	// Unchanged for the container, where the config and the db directory
+	// both sit in the working directory, and for an absolute db_path, which
+	// names its own location.
+	if configFile := viper.ConfigFileUsed(); configFile != "" && !filepath.IsAbs(cfg.Storage.DBPath) {
+		cfg.Storage.DBPath = filepath.Join(filepath.Dir(configFile), cfg.Storage.DBPath)
+	}
 
 	return &cfg, nil
 }
