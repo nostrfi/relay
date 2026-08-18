@@ -38,6 +38,8 @@ export interface RelayRefusalContext {
   requestedPath?: string
   /** This browser's clock, injectable for testing. */
   browserTimeSeconds?: number
+  /** The relay's own account of what failed, when it is safe to give one. */
+  relayReason?: string
 }
 
 export interface RelayRefusal {
@@ -49,6 +51,15 @@ export interface RelayRefusal {
 
 export function describeRelayRefusal(context: RelayRefusalContext = {}): RelayRefusal {
   const maxAge = context.maxAgeSeconds ?? NIP98_DEFAULT_MAX_AGE_SECONDS
+
+  // The relay's own words, when it gave any. Nothing inferred here can beat
+  // the account of the party that did the rejecting.
+  if (context.relayReason) {
+    return {
+      headline: `The relay rejected the request: ${context.relayReason}`,
+      causes: []
+    }
+  }
   const signingSeconds = context.signingMs === undefined ? undefined : Math.round(context.signingMs / 1000)
 
   // Known for certain: the signature was already expired when it was sent.
@@ -78,6 +89,16 @@ export function describeRelayRefusal(context: RelayRefusalContext = {}): RelayRe
   if (context.signedPath && context.requestedPath && context.signedPath !== context.requestedPath) {
     return {
       headline: `The request was signed for ${context.signedPath} but the relay was asked for ${context.requestedPath}. The relay compares those exactly, so the signature cannot match.`,
+      causes: []
+    }
+  }
+
+  // Known for certain: the request was signed by a different key than the
+  // session was opened with. The relay refuses it, and no relay-side
+  // setting can make it work — the signer is holding the wrong account.
+  if (context.signingPubkey && context.signedInPubkey && context.signingPubkey !== context.signedInPubkey) {
+    return {
+      headline: `This request was signed by ${context.signingPubkey}, but you signed in as ${context.signedInPubkey}. Your signer is holding a different account than the one this session belongs to.`,
       causes: []
     }
   }
@@ -150,6 +171,7 @@ export function refusalDiagnosticsFrom(cause: unknown): Partial<RelayRefusalCont
   return {
     relayTimeSeconds: typeof facts.relayTimeSeconds === 'number' ? facts.relayTimeSeconds : undefined,
     relayPubkey: typeof facts.relayPubkey === 'string' ? facts.relayPubkey : undefined,
-    requestedPath: typeof facts.requestedPath === 'string' ? facts.requestedPath : undefined
+    requestedPath: typeof facts.requestedPath === 'string' ? facts.requestedPath : undefined,
+    relayReason: typeof facts.relayReason === 'string' ? facts.relayReason : undefined
   }
 }

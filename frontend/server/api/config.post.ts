@@ -46,7 +46,12 @@ export default defineEventHandler(async (event) => {
       statusMessage: (parsed as { error?: string })?.error ?? 'The relay refused the request',
       // The relay will not say which check failed. These are the facts that
       // let the browser test the likely causes instead of listing them.
-      data: await collectRefusalDiagnostics(relayApiBase, response, '/api/config')
+      // The relay explains a verification failure (stale signature, bad
+      // path, malformed header) but never an identity one.
+      data: {
+        relayReason: (parsed as { reason?: string })?.reason,
+        ...await collectRefusalDiagnostics(relayApiBase, response, '/api/config')
+      }
     })
   }
 

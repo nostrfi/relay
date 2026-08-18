@@ -207,3 +207,71 @@ describe('refusalDiagnosticsFrom', () => {
     expect(result).toEqual({ relayTimeSeconds: undefined, relayPubkey: undefined, requestedPath: undefined })
   })
 })
+
+describe('a signer holding the wrong account', () => {
+  it('is named outright, because no relay setting can fix it', () => {
+    const refusal = describeRelayRefusal({
+      signingPubkey: 'a'.repeat(64),
+      signedInPubkey: 'b'.repeat(64),
+      browserTimeSeconds: 1_800_000_000
+    })
+    expect(refusal.headline).toContain('a'.repeat(64))
+    expect(refusal.headline).toContain('b'.repeat(64))
+    expect(refusal.headline).toContain('different account')
+    expect(refusal.causes).toEqual([])
+  })
+
+  it('takes precedence over the relay-side key comparison', () => {
+    // Both look wrong, but only one is actionable by the operator here.
+    const refusal = describeRelayRefusal({
+      signingPubkey: 'a'.repeat(64),
+      signedInPubkey: 'b'.repeat(64),
+      relayPubkey: 'c'.repeat(64),
+      browserTimeSeconds: 1_800_000_000
+    })
+    expect(refusal.headline).toContain('different account')
+  })
+
+  it('says nothing when the signer matches the session', () => {
+    const refusal = describeRelayRefusal({
+      signingPubkey: 'a'.repeat(64),
+      signedInPubkey: 'a'.repeat(64),
+      relayPubkey: 'a'.repeat(64),
+      browserTimeSeconds: 1_800_000_000
+    })
+    expect(refusal.causes.length).toBe(3)
+  })
+})
+
+describe('the relay\'s own account of a refusal', () => {
+  it('is preferred over anything inferred here', async () => {
+    const { describeRelayRefusal } = await import('../shared/utils/relay-refusal')
+    // The relay did the rejecting; no local inference can beat it.
+    const refusal = describeRelayRefusal({
+      relayReason: 'event created_at is more than 60 seconds from now',
+      signingPubkey: 'a'.repeat(64),
+      signedInPubkey: 'b'.repeat(64),
+      relayTimeSeconds: 1,
+      browserTimeSeconds: 1_800_000_000
+    })
+    expect(refusal.headline).toContain('event created_at is more than 60 seconds from now')
+    expect(refusal.causes).toEqual([])
+  })
+
+  it('falls through to inference when the relay withheld one', async () => {
+    const { describeRelayRefusal } = await import('../shared/utils/relay-refusal')
+    // An identity failure gives no reason, by design.
+    const refusal = describeRelayRefusal({
+      signingPubkey: 'a'.repeat(64),
+      relayPubkey: 'b'.repeat(64),
+      browserTimeSeconds: 1_800_000_000
+    })
+    expect(refusal.headline).toContain('publishes')
+  })
+
+  it('is carried through the thrown error body', async () => {
+    const { refusalDiagnosticsFrom } = await import('../shared/utils/relay-refusal')
+    expect(refusalDiagnosticsFrom({ data: { data: { relayReason: 'u tag does not match request URL' } } }).relayReason)
+      .toBe('u tag does not match request URL')
+  })
+})

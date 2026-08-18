@@ -83,25 +83,47 @@ export function storedSignerKind(): Signer['kind'] | null {
 /**
  * Returns a signer for a privileged call made after login. Callers must
  * close it when done: a NIP-46 signer holds a live relay subscription.
+ *
+ * `expectedPubkey` is the key the session was opened with. When given, the
+ * signer is checked against it before any request is signed. Without that
+ * check a signer holding a different key produces a valid signature from
+ * the wrong identity, the relay refuses it, and nothing on the way says so
+ * — the operator sees only a refusal they cannot act on.
  */
-export async function acquireSigner(): Promise<Signer> {
-  const kind = storedSignerKind()
+export async function acquireSigner(expectedPubkey?: string): Promise<Signer> {
+  // A session opened before the signer kind was recorded has none stored.
+  // Falling straight through to the extension would then sign with whatever
+  // key it holds, even for an operator who paired a remote signer.
+  const kind = storedSignerKind() ?? (hasStoredBunker() ? 'nip46' : null)
 
+  let signer: Signer
   if (kind === 'nip46') {
-    const signer = await restoreBunkerSigner()
-    if (!signer) {
+    const restored = await restoreBunkerSigner()
+    if (!restored) {
       throw new Error('Could not reach the remote signer. Check it is running, then sign in again to re-pair.')
     }
-    return signer
+    signer = restored
+  } else if (hasNip07()) {
+    signer = nip07Signer()
+  } else {
+    // The session proves who signed in; it is not a credential the relay
+    // accepts. Every privileged call needs the operator's signer present.
+    throw new Error('No signer available in this browser. Unlock your Nostr extension, or sign in again to re-pair a remote signer.')
   }
 
-  if (hasNip07()) {
-    return nip07Signer()
+  if (expectedPubkey) {
+    const actual = await signer.getPublicKey()
+    if (actual !== expectedPubkey) {
+      await signer.close()
+      throw new Error(
+        `This browser's signer holds ${actual}, but you signed in as ${expectedPubkey}. `
+        + 'The relay refuses anything signed by the wrong key. Switch the signer back to that '
+        + 'account, or sign out and in again with the key the signer holds.'
+      )
+    }
   }
 
-  // The session proves who signed in; it is not a credential the relay
-  // accepts. Every privileged call needs the operator's signer present.
-  throw new Error('No signer available in this browser. Unlock your Nostr extension, or sign in again to re-pair a remote signer.')
+  return signer
 }
 
 /** True when this browser has a bunker pairing to reconnect with. */

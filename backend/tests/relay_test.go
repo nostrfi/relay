@@ -2901,12 +2901,19 @@ func TestNegentropyNoPayloadInLogs(t *testing.T) {
 // value ("Nostr <base64>").
 func nip98AuthHeader(t *testing.T, sk, rawURL string, body []byte) string {
 	t.Helper()
+	return nip98AuthHeaderAt(t, sk, rawURL, body, nostr.Now())
+}
+
+// nip98AuthHeaderAt is nip98AuthHeader with an explicit created_at, for
+// exercising the relay's freshness window.
+func nip98AuthHeaderAt(t *testing.T, sk, rawURL string, body []byte, createdAt nostr.Timestamp) string {
+	t.Helper()
 	pk, err := nostr.GetPublicKey(sk)
 	require.NoError(t, err)
 	sum := sha256.Sum256(body)
 	ev := nostr.Event{
 		PubKey:    pk,
-		CreatedAt: nostr.Now(),
+		CreatedAt: createdAt,
 		Kind:      27235,
 		Tags: nostr.Tags{
 			{"u", rawURL},
@@ -3533,4 +3540,65 @@ func collect(t reflect.Type, _ string, into map[string]bool) {
 		}
 		into[field.Name] = true
 	}
+}
+
+// TestOperatorRefusalExplainsVerificationButNotIdentity pins the line
+// between the two failures. Withholding a verification reason costs an
+// operator a debugging session and buys nothing: a stale clock, a proxy
+// rewriting paths and a malformed header are indistinguishable to them, and
+// the relay is the only party that knows. Confirming an identity failure
+// does tell an attacker something, so it stays generic.
+func TestOperatorRefusalExplainsVerificationButNotIdentity(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	cfg := ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	}
+	server := startTestRelayWithAdminAPI(t, cfg)
+
+	post := func(t *testing.T, auth string) map[string]any {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/api/config", bytes.NewReader([]byte("{}")))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		resp, err := server.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+		var out map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+		assert.Equal(t, "unauthorized", out["error"])
+		return out
+	}
+
+	t.Run("a stale signature says so", func(t *testing.T) {
+		stale := nip98AuthHeaderAt(t, operatorSk, server.URL+"/api/config", []byte("{}"), nostr.Now()-3600)
+		assert.Contains(t, post(t, stale)["reason"], "created_at")
+	})
+
+	t.Run("a mismatched u tag says so", func(t *testing.T) {
+		wrongPath := nip98AuthHeader(t, operatorSk, server.URL+"/somewhere-else", []byte("{}"))
+		assert.Contains(t, post(t, wrongPath)["reason"], "u tag")
+	})
+
+	t.Run("a payload hash mismatch says so", func(t *testing.T) {
+		wrongBody := nip98AuthHeader(t, operatorSk, server.URL+"/api/config", []byte(`{"not":"the body sent"}`))
+		assert.Contains(t, post(t, wrongBody)["reason"], "payload")
+	})
+
+	t.Run("a missing header says so", func(t *testing.T) {
+		assert.Contains(t, post(t, "")["reason"], "Authorization")
+	})
+
+	t.Run("a non-operator key does not say so", func(t *testing.T) {
+		// The signature verified; only the identity failed. Confirming that
+		// would tell an attacker their key is not the operator's.
+		other := nip98AuthHeader(t, nostr.GeneratePrivateKey(), server.URL+"/api/config", []byte("{}"))
+		assert.Nil(t, post(t, other)["reason"], "an identity failure must stay generic")
+	})
 }

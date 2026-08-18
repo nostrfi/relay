@@ -132,7 +132,14 @@ func newConfigHandler(cfg Config) http.HandlerFunc {
 		if _, err := authorizeOperator(r, body, cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds); err != nil {
 			logRejectedOperatorRequest("config", err)
 			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+
+			refusal := map[string]string{"error": "unauthorized"}
+			// A verification failure is safe to explain and expensive to
+			// withhold; an identity failure is not. See authorizeOperator.
+			if reason := publicReasonFor(err); reason != "" {
+				refusal["reason"] = reason
+			}
+			json.NewEncoder(w).Encode(refusal)
 			return
 		}
 

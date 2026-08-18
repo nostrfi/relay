@@ -17,7 +17,7 @@ export function useModeration() {
   const { state } = useAdminSession()
 
   async function call<T>(method: string, params: unknown[]): Promise<Nip86Response<T>> {
-    const signer = await acquireSigner()
+    const signer = await acquireSigner(state.value?.pubkey)
     try {
       // The relay serves NIP-86 from its root, so that is the path signed
       // into the u tag — not the dashboard route this request is sent to.

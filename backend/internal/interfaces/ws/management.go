@@ -33,6 +33,10 @@ type nip86Request struct {
 type nip86Response struct {
 	Result any    `json:"result,omitzero"`
 	Error  string `json:"error,omitzero"`
+	// Reason explains a refusal when doing so is safe — a malformed or
+	// stale NIP-98 header, never who the operator is. Additive to NIP-86's
+	// envelope, which defines result and error only.
+	Reason string `json:"reason,omitzero"`
 }
 
 // supportedManagementMethods answers the "supportedmethods" call. Only the
@@ -81,7 +85,14 @@ func (h *RelayHandler) handleManagementRequest(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		logRejectedOperatorRequest("nip86", err)
 		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(nip86Response{Error: "unauthorized"})
+
+		// "unauthorized" stays the error, so existing callers parsing the
+		// NIP-86 envelope are unaffected; the reason rides alongside it.
+		response := nip86Response{Error: "unauthorized"}
+		if reason := publicReasonFor(err); reason != "" {
+			response.Reason = reason
+		}
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 

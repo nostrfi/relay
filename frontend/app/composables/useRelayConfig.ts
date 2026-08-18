@@ -12,7 +12,7 @@ export function useRelayConfig() {
   const { state } = useAdminSession()
 
   async function fetchConfig(): Promise<RelayConfig> {
-    const signer = await acquireSigner()
+    const signer = await acquireSigner(state.value?.pubkey)
     try {
       // The relay serves this at /api/config, which is the path signed into
       // the u tag — not the dashboard route the request is sent to.
