@@ -17,6 +17,7 @@ type EventService interface {
 	SaveEvent(ctx context.Context, ev *event.Event) (bool, error)
 	QueryEvents(ctx context.Context, filter nostr.Filter) ([]*event.Event, error)
 	QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error)
+	QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error)
 }
 
 type eventService struct {
@@ -39,4 +40,8 @@ func (s *eventService) QueryEvents(ctx context.Context, filter nostr.Filter) ([]
 
 func (s *eventService) QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error) {
 	return s.repo.QueryEventsSorted(ctx, filter)
+}
+
+func (s *eventService) QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error) {
+	return s.repo.QueryEventsMatching(ctx, query)
 }

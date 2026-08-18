@@ -20,6 +20,7 @@ import { npubEncode } from 'nostr-tools/nip19'
  */
 const links = [
   { label: 'Overview', icon: 'i-lucide-layout-dashboard', to: '/dashboard' },
+  { label: 'Events', icon: 'i-lucide-list', to: '/dashboard/events' },
   { label: 'Moderation', icon: 'i-lucide-shield-ban', to: '/dashboard/moderation' },
   { label: 'Configuration', icon: 'i-lucide-settings', to: '/dashboard/configuration' }
 ]

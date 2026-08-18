@@ -29,6 +29,10 @@ func (f *fakeEventRepository) QueryEvents(ctx context.Context, filter nostr.Filt
 func (f *fakeEventRepository) QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error) {
 	return nil, nil
 }
+
+func (f *fakeEventRepository) QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error) {
+	return nil, nil
+}
 func (f *fakeEventRepository) PurgeExpired(ctx context.Context) (int64, error) {
 	f.purgeCalls.Add(1)
 	return 0, nil

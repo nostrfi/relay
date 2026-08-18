@@ -288,7 +288,7 @@ func selectEventIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) 
 }
 
 func (r *Repository) QueryEvents(ctx context.Context, filter nostr.Filter) ([]*domainevent.Event, error) {
-	events, err := r.queryEvents(ctx, filter, false)
+	events, err := r.queryEvents(ctx, domainevent.Query{Filter: filter}, false)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +296,15 @@ func (r *Repository) QueryEvents(ctx context.Context, filter nostr.Filter) ([]*d
 }
 
 func (r *Repository) QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*domainevent.Event, error) {
-	events, err := r.queryEvents(ctx, filter, true)
+	events, err := r.queryEvents(ctx, domainevent.Query{Filter: filter}, true)
+	if err != nil {
+		return nil, err
+	}
+	return wrapEvents(events), nil
+}
+
+func (r *Repository) QueryEventsMatching(ctx context.Context, query domainevent.Query) ([]*domainevent.Event, error) {
+	events, err := r.queryEvents(ctx, query, false)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +323,9 @@ func wrapEvents(events []*nostr.Event) []*domainevent.Event {
 	return wrapped
 }
 
-func (r *Repository) queryEvents(ctx context.Context, filter nostr.Filter, sortedForSync bool) ([]*nostr.Event, error) {
+func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, sortedForSync bool) ([]*nostr.Event, error) {
+	filter := query.Filter
+
 	var conditions []string
 	var args []any
 
@@ -361,25 +371,33 @@ func (r *Repository) queryEvents(ctx context.Context, filter nostr.Filter, sorte
 		}
 	}
 
-	query := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json FROM events e"
+	if query.ContentContains != "" {
+		// The only condition here with no index behind it: a scan bounded
+		// by the filter's other conditions and its limit. Operator-only,
+		// and documented as such in README.md.
+		conditions = append(conditions, `e.content ILIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLikePattern(query.ContentContains)+"%")
+	}
+
+	statement := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json FROM events e"
 	now := nostr.Now()
 	conditions = append(conditions, "(e.expiration IS NULL OR e.expiration > ?)")
 	args = append(args, now)
 	conditions = append(conditions, "e.id NOT IN (SELECT event_id FROM banned_events)")
 
 	if len(conditions) > 0 {
-		query += " WHERE " + strings.Join(conditions, " AND ")
+		statement += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	if sortedForSync {
-		query += " ORDER BY e.created_at ASC, e.id ASC"
+		statement += " ORDER BY e.created_at ASC, e.id ASC"
 	} else {
-		query += " ORDER BY e.created_at DESC, e.id ASC"
+		statement += " ORDER BY e.created_at DESC, e.id ASC"
 	}
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		statement += fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := r.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -414,6 +432,16 @@ func (r *Repository) reconstructTags(ctx context.Context, eventID string, tagsJS
 		return r.getLegacyTags(ctx, eventID)
 	}
 	return tags
+}
+
+// escapeLikePattern neutralizes the wildcards in a caller-supplied
+// substring, so a search for "100%" looks for that text rather than for
+// "100" followed by anything. The pairing ESCAPE clause is written out at
+// the call site rather than assumed: a default that differs between engines
+// would fail silently, matching too much instead of erroring.
+func escapeLikePattern(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return replacer.Replace(value)
 }
 
 func placeholders(n int) string {

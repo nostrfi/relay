@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"relay/internal/application"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -28,6 +30,19 @@ type MuxOption func(*http.ServeMux)
 func WithAdminAPI(cfg Config) MuxOption {
 	return func(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/config", newConfigHandler(cfg))
+	}
+}
+
+// WithEventsAPI registers the operator's event browse endpoint
+// (nostrfi/workspace#36). Separate from WithAdminAPI because it needs the
+// event service as well as the configuration, and the configuration
+// endpoint has no business holding a repository.
+//
+// Authenticated as the operator, exactly as WithAdminAPI's routes are, and
+// for the same reason: it is reachable from the public internet.
+func WithEventsAPI(cfg Config, events application.EventService) MuxOption {
+	return func(mux *http.ServeMux) {
+		mux.HandleFunc("POST /api/events/query", newEventsQueryHandler(cfg, events))
 	}
 }
 
