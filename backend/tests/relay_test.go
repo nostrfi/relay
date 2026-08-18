@@ -2674,6 +2674,59 @@ storage:
 	assert.Equal(t, "/var/lib/relay/custom.db", cfg.Storage.DBPath)
 }
 
+// TestConfigFoundFromTheRepositoryRoot covers the way the relay is started
+// that used to find nothing: from one directory above backend/. It then
+// came up on defaults with no operator key and refused every signed
+// operator request, saying only "unauthorized" (nostrfi/workspace#38).
+func TestConfigFoundFromTheRepositoryRoot(t *testing.T) {
+	operatorPk, err := nostr.GetPublicKey(nostr.GeneratePrivateKey())
+	require.NoError(t, err)
+
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "backend"), 0o755))
+	configContent := "relay_info:\n  name: \"Root Start Relay\"\n  pubkey: \"" + operatorPk + "\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "backend", "config.yaml"), []byte(configContent), 0o644))
+
+	viper.Reset()
+	defer viper.Reset()
+	t.Chdir(root)
+
+	cfg, err := ws.LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "Root Start Relay", cfg.RelayInfo.Name)
+	// The whole point of finding the file: without it this is empty and the
+	// operator API refuses everyone.
+	assert.Equal(t, operatorPk, cfg.Moderation.AdminPubkey)
+}
+
+// TestConfigFileEnvOverridesTheSearch covers a deployment whose config sits
+// outside both search paths — a systemd unit, or a packaged install.
+func TestConfigFileEnvOverridesTheSearch(t *testing.T) {
+	elsewhere := filepath.Join(t.TempDir(), "relay.yaml")
+	require.NoError(t, os.WriteFile(elsewhere, []byte("relay_info:\n  name: \"Named File Relay\"\n"), 0o644))
+
+	viper.Reset()
+	defer viper.Reset()
+	t.Setenv(ws.ConfigFileEnv, elsewhere)
+
+	cfg, err := ws.LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "Named File Relay", cfg.RelayInfo.Name)
+}
+
+// TestConfigFileEnvMissingFileFails pins the asymmetry: no file anywhere in
+// the search is a warning and defaults, but a file the operator named and
+// that is not there is an error. Starting on defaults would silently ignore
+// the configuration they asked for.
+func TestConfigFileEnvMissingFileFails(t *testing.T) {
+	viper.Reset()
+	defer viper.Reset()
+	t.Setenv(ws.ConfigFileEnv, filepath.Join(t.TempDir(), "absent.yaml"))
+
+	_, err := ws.LoadConfig()
+	require.Error(t, err)
+}
+
 func TestHealthz(t *testing.T) {
 	mux := ws.NewMux(ws.NewRelayHandler(nil, nil, ws.RelayInfo{}, "test"), func(context.Context) error { return nil })
 	server := httptest.NewServer(mux)
@@ -3601,4 +3654,18 @@ func TestOperatorRefusalExplainsVerificationButNotIdentity(t *testing.T) {
 		other := nip98AuthHeader(t, nostr.GeneratePrivateKey(), server.URL+"/api/config", []byte("{}"))
 		assert.Nil(t, post(t, other)["reason"], "an identity failure must stay generic")
 	})
+}
+
+// TestOperatorRefusalNamesAnUnconfiguredRelay covers the failure the
+// dashboard could not tell from a wrong key: a relay that loaded no config
+// has no operator pubkey, so it refuses a perfectly good signature. There
+// is no identity to leak — there is none configured — and the operator
+// cannot otherwise discover it, so the relay says so (nostrfi/workspace#38).
+func TestOperatorRefusalNamesAnUnconfiguredRelay(t *testing.T) {
+	server := startTestRelayWithAdminAPI(t, ws.Config{Moderation: ws.ModerationConfig{MaxEventAgeSeconds: 60}})
+
+	out, status := callConfigAPI(t, server, nostr.GeneratePrivateKey())
+	require.Equal(t, http.StatusUnauthorized, status)
+	assert.Equal(t, "unauthorized", out["error"])
+	assert.Contains(t, out["reason"], "no operator pubkey configured")
 }

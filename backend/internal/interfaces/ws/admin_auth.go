@@ -28,6 +28,10 @@ import (
 // An identity failure is different: confirming "that signature was valid,
 // but you are not the operator" tells an attacker their key is not the one
 // to use, and confirms when it is. That stays generic.
+//
+// A relay with no operator key at all falls on the safe side of that line:
+// there is no identity to leak, and the operator would otherwise have no
+// way to tell a missing key from a wrong one.
 type operatorAuthFailure struct {
 	// Safe to return to the caller, empty when it is not.
 	PublicReason string
@@ -44,7 +48,15 @@ func authorizeOperator(r *http.Request, body []byte, adminPubkey string, maxEven
 		return "", &operatorAuthFailure{PublicReason: err.Error(), err: wrapped}
 	}
 	if adminPubkey == "" {
-		return "", &operatorAuthFailure{err: fmt.Errorf("no operator pubkey is configured")}
+		// Not an identity failure, and safe to say: there is no operator
+		// identity here to confirm or deny. The relay is misconfigured, and
+		// the caller cannot act on that knowledge — while the operator, who
+		// otherwise sees a bare "unauthorized" indistinguishable from a
+		// wrong key, can act on it immediately (nostrfi/workspace#38).
+		return "", &operatorAuthFailure{
+			PublicReason: "this relay has no operator pubkey configured; set relay_info.pubkey or moderation.admin_pubkey in its config.yaml",
+			err:          fmt.Errorf("no operator pubkey is configured"),
+		}
 	}
 	if pubkey != adminPubkey {
 		return "", &operatorAuthFailure{err: fmt.Errorf("pubkey %s is not the configured operator", pubkey)}

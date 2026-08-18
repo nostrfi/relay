@@ -117,6 +117,23 @@ relay_info:
   supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
 ```
 
+### Where the config file is looked for
+
+`config.yaml` is searched for, in order, in:
+
+1. the working directory (this is where the container finds it: `/app`),
+2. the directory holding the relay binary,
+3. `backend/`, so a binary started from the repository root finds it too.
+
+Set **`RELAY_CONFIG_FILE`** to a path to skip the search — for a systemd unit or a packaged
+install whose config lives somewhere else entirely. A file named that way but missing is a
+startup error, rather than a silent fall back to defaults.
+
+The relay logs which file it loaded (`configuration loaded`), and warns when it found none.
+Take that warning seriously: a relay running on defaults has no `relay_info.pubkey`, so no
+`moderation.admin_pubkey`, and it refuses every NIP-86 and configuration-API request — it says
+so in a second warning at startup, and tells the caller as much in its `401`.
+
 ### Server and storage
 
 ```yaml
