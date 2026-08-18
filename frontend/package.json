@@ -22,6 +22,7 @@
     "ufo": "^1.6.4"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "^1.2.123",
     "@nuxt/eslint": "^1.16.0",
     "@nuxt/test-utils": "^4.1.0",
     "@types/node": "^22.13.1",
