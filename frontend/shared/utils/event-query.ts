@@ -215,3 +215,45 @@ export function contentPreview(content: string, max = 90): string {
 export function formatEventTime(createdAt: number): string {
   return new Date(createdAt * 1000).toLocaleString()
 }
+
+/**
+ * What the results area is doing, so it can say so.
+ *
+ * The page used to track only "has a query ever succeeded", which left the
+ * table blank and silent in three different situations — before the first
+ * query, while one was running, and after one failed — all of which read as
+ * "this relay has no events" (nostrfi/workspace#49). An operator cannot act
+ * on that: "the relay answered nothing" and "the page never asked" need
+ * different fixes.
+ */
+export type QueryPhase = 'idle' | 'running' | 'ready' | 'failed'
+
+export interface ResultsSummary {
+  /** Short status for the results header. */
+  label: string
+  /** What to say when there is no row to show; empty when there are rows. */
+  emptyMessage: string
+}
+
+export function describeResults(phase: QueryPhase, count: number): ResultsSummary {
+  if (phase === 'running') {
+    return { label: 'Running…', emptyMessage: 'Asking the relay…' }
+  }
+  if (phase === 'failed') {
+    return {
+      label: 'Query failed',
+      emptyMessage: 'The last query failed, so nothing here is up to date. The reason is above.'
+    }
+  }
+  if (phase === 'idle') {
+    return { label: 'Not run yet', emptyMessage: 'No query has run yet.' }
+  }
+  if (count === 0) {
+    return {
+      label: '0 events',
+      emptyMessage: 'The relay answered, and no stored event matches this filter. '
+        + 'Expired events and events banned through moderation are never returned.'
+    }
+  }
+  return { label: count === 1 ? '1 event' : `${count} events`, emptyMessage: '' }
+}

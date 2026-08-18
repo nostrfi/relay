@@ -4,6 +4,7 @@ import {
   EVENT_PAGE_SIZE,
   buildEventQuery,
   contentPreview,
+  describeResults,
   emptyEventQueryForm,
   kindLabel,
   mergeEventPage,
@@ -118,5 +119,32 @@ describe('display helpers', () => {
     expect(contentPreview('line one\nline two')).toBe('line one line two')
     expect(contentPreview('x'.repeat(200))).toBe(`${'x'.repeat(90)}…`)
     expect(contentPreview('   ')).toBe('—')
+  })
+})
+
+describe('describeResults', () => {
+  // Before this, all four of these rendered as an empty table with no
+  // message, which reads as "the relay has no events" — the report in
+  // nostrfi/workspace#49 turned out to be a relay answering zero, and the
+  // page gave the operator nothing to tell that from a page that never asked.
+  it('tells a query that has not run from one that returned nothing', () => {
+    expect(describeResults('idle', 0).emptyMessage).toContain('No query has run yet')
+    expect(describeResults('ready', 0).emptyMessage).toContain('The relay answered')
+  })
+
+  it('says a query is in flight rather than showing an empty result', () => {
+    expect(describeResults('running', 0).label).toBe('Running…')
+  })
+
+  it('marks a failed query, so stale rows are not read as current', () => {
+    const failed = describeResults('failed', 12)
+    expect(failed.label).toBe('Query failed')
+    expect(failed.emptyMessage).toContain('reason is above')
+  })
+
+  it('counts what is shown, singular and plural', () => {
+    expect(describeResults('ready', 1).label).toBe('1 event')
+    expect(describeResults('ready', 71).label).toBe('71 events')
+    expect(describeResults('ready', 71).emptyMessage).toBe('')
   })
 })

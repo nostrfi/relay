@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import type { StoredEvent } from '~~/shared/types/events'
+import type { QueryPhase } from '~~/shared/utils/event-query'
 import {
   EVENT_PAGE_SIZE,
   buildEventQuery,
   contentPreview,
+  describeResults,
   emptyEventQueryForm,
   formatEventTime,
   kindLabel,
@@ -26,8 +28,13 @@ const refusalCauses = ref<string[]>([])
 const refusalLogHint = ref('')
 const busy = ref(false)
 
-/** False until a query has actually come back, so "no events" is honest. */
-const ran = ref(false)
+/**
+ * What the results area is doing. Tracked as a phase rather than a "has it
+ * ever succeeded" flag: before the first query, during one, and after a
+ * failed one are three different things, and rendering all three as an empty
+ * table said the relay had no events (nostrfi/workspace#49).
+ */
+const phase = ref<QueryPhase>('idle')
 
 /** The relay's cursor for the next page; null when this is the last. */
 const nextUntil = ref<number | null>(null)
@@ -43,6 +50,7 @@ async function run(append: boolean) {
   }
 
   busy.value = true
+  phase.value = 'running'
   error.value = ''
   refusalCauses.value = []
   refusalLogHint.value = ''
@@ -54,7 +62,7 @@ async function run(append: boolean) {
     events.value = append ? mergeEventPage(events.value, page.events) : page.events
     nextUntil.value = page.next_until ?? null
     appliedLimit.value = page.limit
-    ran.value = true
+    phase.value = 'ready'
   } catch (cause) {
     // useEvents turns a relay refusal into a headline plus the causes that
     // could produce it, rather than asserting one. See relay-refusal.ts.
@@ -62,6 +70,10 @@ async function run(append: boolean) {
     error.value = refused.refusal?.headline || (cause as Error)?.message || 'The events could not be read.'
     refusalCauses.value = refused.refusal?.causes ?? []
     refusalLogHint.value = refused.logHint ?? ''
+    // A failed load leaves whatever was on screen stale, and the results
+    // header has to say so — including when this was the automatic first
+    // query the operator never triggered.
+    phase.value = 'failed'
   } finally {
     busy.value = false
   }
@@ -71,6 +83,8 @@ function reset() {
   form.value = emptyEventQueryForm()
   problems.value = []
 }
+
+const results = computed(() => describeResults(phase.value, events.value.length))
 
 onMounted(() => run(false))
 </script>
@@ -248,10 +262,7 @@ onMounted(() => run(false))
         <template #header>
           <div class="flex items-center justify-between gap-4">
             <span class="text-sm font-semibold uppercase tracking-wide text-(--ui-text-muted)">Results</span>
-            <span
-              v-if="ran"
-              class="nf-tabular text-sm text-(--ui-text-dimmed)"
-            >{{ events.length }} shown</span>
+            <span class="nf-tabular text-sm text-(--ui-text-dimmed)">{{ results.label }}</span>
           </div>
         </template>
 
@@ -312,10 +323,10 @@ onMounted(() => run(false))
         </div>
 
         <p
-          v-if="ran && events.length === 0 && !error"
+          v-if="results.emptyMessage"
           class="py-4 text-sm text-(--ui-text-muted)"
         >
-          No stored event matches this filter.
+          {{ results.emptyMessage }}
         </p>
 
         <template
