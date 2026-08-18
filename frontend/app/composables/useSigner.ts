@@ -2,6 +2,7 @@ import type { EventTemplate, VerifiedEvent } from 'nostr-tools/pure'
 import { generateSecretKey } from 'nostr-tools/pure'
 import { BunkerSigner, parseBunkerInput } from 'nostr-tools/nip46'
 import { bytesToHex, hexToBytes } from 'nostr-tools/utils'
+import { createSerialQueue } from '~~/shared/utils/serial-queue'
 
 /**
  * One signing interface over both supported signers, so feature tickets
@@ -112,7 +113,16 @@ export async function acquireSigner(expectedPubkey?: string): Promise<Signer> {
   }
 
   if (expectedPubkey) {
-    const actual = await signer.getPublicKey()
+    // Any failure from here on must release the signer: a restored NIP-46
+    // signer already holds a live relay subscription, and the caller never
+    // received it to close.
+    let actual: string
+    try {
+      actual = await signer.getPublicKey()
+    } catch (cause) {
+      await signer.close()
+      throw cause
+    }
     if (actual !== expectedPubkey) {
       await signer.close()
       throw new Error(
@@ -124,6 +134,41 @@ export async function acquireSigner(expectedPubkey?: string): Promise<Signer> {
   }
 
   return signer
+}
+
+/**
+ * The single queue every signer interaction passes through.
+ *
+ * Module scope, not per-composable: two different composables signing at
+ * once is exactly the case that fails, so they must share one queue.
+ */
+const signerQueue = createSerialQueue()
+
+/**
+ * Acquires a signer, runs one signing job with it, and releases it —
+ * waiting first for any other job to finish.
+ *
+ * Privileged calls are issued concurrently on purpose (the moderation page
+ * loads three lists at once), but a signer can only hold one approval open
+ * at a time: a NIP-07 extension rejects the second with "Another approval
+ * request is already pending". Serializing here keeps that a property of
+ * the signer rather than a rule every caller has to remember, and keeps
+ * pages free to issue their requests together.
+ *
+ * The signing job should be only the signing: whatever it returns is
+ * awaited before the next job starts, so sending the signed request belongs
+ * outside it, where the requests can still overlap.
+ */
+export function withSigner<T>(expectedPubkey: string | undefined, work: (signer: Signer) => Promise<T>): Promise<T> {
+  return signerQueue(async () => {
+    const signer = await acquireSigner(expectedPubkey)
+    try {
+      return await work(signer)
+    } finally {
+      // A NIP-46 signer holds a live relay subscription.
+      await signer.close()
+    }
+  })
 }
 
 /** True when this browser has a bunker pairing to reconnect with. */

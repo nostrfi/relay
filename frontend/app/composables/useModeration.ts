@@ -17,39 +17,37 @@ export function useModeration() {
   const { state } = useAdminSession()
 
   async function call<T>(method: string, params: unknown[]): Promise<Nip86Response<T>> {
-    const signer = await acquireSigner(state.value?.pubkey)
-    try {
-      // The relay serves NIP-86 from its root, so that is the path signed
-      // into the u tag — not the dashboard route this request is sent to.
-      const { authorization, body, signingMs, pubkey, signedPath } = await sign(signer, '/', { method, params })
+    // Signing waits its turn — the page loads three lists at once and a
+    // signer approves one thing at a time. The request itself is sent
+    // outside that turn, so the three calls still overlap on the wire.
+    // The relay serves NIP-86 from its root, so that is the path signed
+    // into the u tag — not the dashboard route this request is sent to.
+    const { authorization, body, signingMs, pubkey, signedPath }
+      = await withSigner(state.value?.pubkey, signer => sign(signer, '/', { method, params }))
 
-      try {
-        return await $fetch<Nip86Response<T>>('/api/moderation/rpc', {
-          method: 'POST',
-          body,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': authorization
-          }
-        })
-      } catch (cause) {
-        if ((cause as { statusCode?: number })?.statusCode !== 401) {
-          throw cause
+    try {
+      return await $fetch<Nip86Response<T>>('/api/moderation/rpc', {
+        method: 'POST',
+        body,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authorization
         }
-        // A refused operator check, which the relay will not explain. Method
-        // errors are unaffected: those arrive as a 200 error envelope and
-        // still reach the page verbatim.
-        throw createRelayRefusalError({
-          signingMs,
-          signedInPubkey: state.value?.pubkey,
-          signingPubkey: pubkey,
-          signedPath,
-          ...refusalDiagnosticsFrom(cause)
-        })
+      })
+    } catch (cause) {
+      if ((cause as { statusCode?: number })?.statusCode !== 401) {
+        throw cause
       }
-    } finally {
-      // A NIP-46 signer holds a live relay subscription.
-      await signer.close()
+      // A refused operator check, which the relay will not explain. Method
+      // errors are unaffected: those arrive as a 200 error envelope and
+      // still reach the page verbatim.
+      throw createRelayRefusalError({
+        signingMs,
+        signedInPubkey: state.value?.pubkey,
+        signingPubkey: pubkey,
+        signedPath,
+        ...refusalDiagnosticsFrom(cause)
+      })
     }
   }
 

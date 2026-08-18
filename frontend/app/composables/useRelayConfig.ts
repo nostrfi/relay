@@ -12,36 +12,34 @@ export function useRelayConfig() {
   const { state } = useAdminSession()
 
   async function fetchConfig(): Promise<RelayConfig> {
-    const signer = await acquireSigner(state.value?.pubkey)
-    try {
-      // The relay serves this at /api/config, which is the path signed into
-      // the u tag — not the dashboard route the request is sent to.
-      const { authorization, body, signingMs, pubkey, signedPath } = await sign(signer, '/api/config', {})
+    // Signed through the shared signer queue, so this cannot collide with a
+    // signature another part of the dashboard is already asking for.
+    // The relay serves this at /api/config, which is the path signed into
+    // the u tag — not the dashboard route the request is sent to.
+    const { authorization, body, signingMs, pubkey, signedPath }
+      = await withSigner(state.value?.pubkey, signer => sign(signer, '/api/config', {}))
 
-      try {
-        return await $fetch<RelayConfig>('/api/config', {
-          method: 'POST',
-          body,
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': authorization
-          }
-        })
-      } catch (cause) {
-        if ((cause as { statusCode?: number })?.statusCode !== 401) {
-          throw cause
+    try {
+      return await $fetch<RelayConfig>('/api/config', {
+        method: 'POST',
+        body,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': authorization
         }
-        // The relay will not say which check failed, so neither will we.
-        throw createRelayRefusalError({
-          signingMs,
-          signedInPubkey: state.value?.pubkey,
-          signingPubkey: pubkey,
-          signedPath,
-          ...refusalDiagnosticsFrom(cause)
-        })
+      })
+    } catch (cause) {
+      if ((cause as { statusCode?: number })?.statusCode !== 401) {
+        throw cause
       }
-    } finally {
-      await signer.close()
+      // The relay will not say which check failed, so neither will we.
+      throw createRelayRefusalError({
+        signingMs,
+        signedInPubkey: state.value?.pubkey,
+        signingPubkey: pubkey,
+        signedPath,
+        ...refusalDiagnosticsFrom(cause)
+      })
     }
   }
 

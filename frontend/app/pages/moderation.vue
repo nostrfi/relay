@@ -204,9 +204,19 @@ async function retry() {
 }
 
 async function loadAll() {
-  // Each list is a separately signed request; issued together so the
-  // operator signs once per signer prompt rather than three times in series.
-  await Promise.all(sections.map(s => s.load()))
+  // Each list is a separately signed request. They are issued together, but
+  // the signing itself is serialized by the signer queue (useSigner.ts):
+  // an extension asked to approve a second signature while the first is
+  // still on screen answers "Another approval request is already pending".
+  //
+  // allSettled, not all: a rejection from one must not hand the page back —
+  // and with it the retry button — while the others are still waiting their
+  // turn at the signer. Clicking retry then would stack three more.
+  const results = await Promise.allSettled(sections.map(s => s.load()))
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failure) {
+    throw failure.reason
+  }
 }
 
 async function submit(section: Section) {
