@@ -37,6 +37,10 @@ func (f *fakeEventRepository) QueryEventsMatching(ctx context.Context, query eve
 func (f *fakeEventRepository) CountEvents(ctx context.Context) (int64, error) {
 	return 0, nil
 }
+
+func (f *fakeEventRepository) EventStats(ctx context.Context, query event.StatsQuery) (event.Stats, error) {
+	return event.Stats{}, nil
+}
 func (f *fakeEventRepository) PurgeExpired(ctx context.Context) (int64, error) {
 	f.purgeCalls.Add(1)
 	return 0, nil

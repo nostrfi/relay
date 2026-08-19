@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -3946,5 +3947,216 @@ func TestEventsQueryAPILimitAndPaging(t *testing.T) {
 		require.Equal(t, http.StatusOK, status)
 		// The default is 100, clamped here by the relay's max_limit of 5.
 		assert.Equal(t, float64(5), out["limit"])
+	})
+}
+
+// callEventsStatsAPI posts a statistics request, signed by sk when given.
+func callEventsStatsAPI(t *testing.T, server *httptest.Server, sk string, query map[string]any) (map[string]any, int) {
+	t.Helper()
+
+	body, err := json.Marshal(query)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/events/stats", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	if sk != "" {
+		req.Header.Set("Authorization", nip98AuthHeader(t, sk, server.URL+"/api/events/stats", body))
+	}
+
+	resp, err := server.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out, resp.StatusCode
+}
+
+// periodCounts flattens the periods into start->count, for assertions that
+// care which period an event landed in rather than the order they arrived.
+func periodCounts(t *testing.T, out map[string]any) map[int64]int64 {
+	t.Helper()
+	raw, ok := out["periods"].([]any)
+	require.True(t, ok, "response has no periods array: %v", out)
+	counts := map[int64]int64{}
+	for _, item := range raw {
+		period := item.(map[string]any)
+		counts[int64(period["start"].(float64))] = int64(period["count"].(float64))
+	}
+	return counts
+}
+
+// TestEventStatsAPIRequiresTheOperator pins the admission check. The counts
+// describe stored content, so this endpoint is authorized exactly as the
+// browse and configuration endpoints are.
+func TestEventStatsAPIRequiresTheOperator(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+	seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "counted"})
+
+	t.Run("no Authorization header", func(t *testing.T) {
+		out, status := callEventsStatsAPI(t, server, "", map[string]any{})
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Equal(t, "unauthorized", out["error"])
+		assert.Nil(t, out["periods"])
+	})
+
+	t.Run("signed by a non-operator pubkey", func(t *testing.T) {
+		out, status := callEventsStatsAPI(t, server, nostr.GeneratePrivateKey(), map[string]any{})
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Nil(t, out["reason"], "an identity failure must stay generic")
+	})
+
+	t.Run("signed by the operator", func(t *testing.T) {
+		out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, float64(1), out["total"])
+	})
+}
+
+// TestEventStatsAPIBuckets covers the grouping itself: which period an event
+// lands in, and that the periods sum to the total.
+func TestEventStatsAPIBuckets(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	// Three fixed instants in UTC: 2026-03-10 23:30, 2026-03-11 00:30 and
+	// 2026-03-11 01:30. Two calendar days, three hours, one month.
+	base := nostr.Timestamp(time.Date(2026, 3, 10, 23, 30, 0, 0, time.UTC).Unix())
+	for i, at := range []nostr.Timestamp{base, base + 3600, base + 7200} {
+		seedEvent(t, repo, operatorSk, &nostr.Event{
+			CreatedAt: at,
+			Kind:      1,
+			Content:   fmt.Sprintf("bucketed %d", i),
+		})
+	}
+	window := map[string]any{"since": base - 86400, "until": base + 86400}
+
+	t.Run("hours put each event in its own period", func(t *testing.T) {
+		query := map[string]any{"bucket": "hour"}
+		maps.Copy(query, window)
+		out, status := callEventsStatsAPI(t, server, operatorSk, query)
+		require.Equal(t, http.StatusOK, status)
+		assert.Len(t, periodCounts(t, out), 3)
+		assert.Equal(t, float64(3), out["total"])
+	})
+
+	t.Run("days split them across the midnight boundary", func(t *testing.T) {
+		query := map[string]any{"bucket": "day"}
+		maps.Copy(query, window)
+		out, status := callEventsStatsAPI(t, server, operatorSk, query)
+		require.Equal(t, http.StatusOK, status)
+
+		counts := periodCounts(t, out)
+		march10 := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC).Unix()
+		march11 := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC).Unix()
+		assert.Equal(t, int64(1), counts[march10], "the 23:30 event belongs to the 10th")
+		assert.Equal(t, int64(2), counts[march11], "the 00:30 and 01:30 events belong to the 11th")
+	})
+
+	t.Run("an operator-clock offset moves the boundary", func(t *testing.T) {
+		// UTC+2 puts the 23:30 UTC event into the 11th locally, so the day
+		// boundary is the operator's, not the server's.
+		query := map[string]any{"bucket": "day", "utc_offset_minutes": 120}
+		maps.Copy(query, window)
+		out, status := callEventsStatsAPI(t, server, operatorSk, query)
+		require.Equal(t, http.StatusOK, status)
+
+		counts := periodCounts(t, out)
+		march11Local := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC).Unix() - 2*3600
+		assert.Equal(t, int64(3), counts[march11Local], "all three events fall on the 11th at UTC+2")
+		assert.Equal(t, float64(120), out["utc_offset_minutes"], "the response says which clock it used")
+	})
+
+	t.Run("months collapse them into one period", func(t *testing.T) {
+		query := map[string]any{"bucket": "month"}
+		maps.Copy(query, window)
+		out, status := callEventsStatsAPI(t, server, operatorSk, query)
+		require.Equal(t, http.StatusOK, status)
+		assert.Len(t, periodCounts(t, out), 1)
+	})
+
+	t.Run("kinds are broken down and ordered by count", func(t *testing.T) {
+		seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: base + 60, Kind: 7, Content: "+"})
+		query := map[string]any{"bucket": "day"}
+		maps.Copy(query, window)
+		out, status := callEventsStatsAPI(t, server, operatorSk, query)
+		require.Equal(t, http.StatusOK, status)
+
+		kinds := out["kinds"].([]any)
+		require.Len(t, kinds, 2)
+		first := kinds[0].(map[string]any)
+		assert.Equal(t, float64(1), first["kind"], "the commonest kind comes first")
+		assert.Equal(t, float64(3), first["count"])
+	})
+}
+
+// TestEventStatsAPIBoundsAndExclusions covers what the chart must never do:
+// return an unbounded number of periods, or count events a read would not
+// serve.
+func TestEventStatsAPIBoundsAndExclusions(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	now := nostr.Now()
+	seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: now - 60, Kind: 1, Content: "visible"})
+
+	// The ladder is hour → day → week → month, walked until the range fits
+	// in a drawable number of periods.
+	for _, tc := range []struct {
+		name    string
+		days    int64
+		asked   string
+		applied string
+	}{
+		{"a week of hours is drawn as asked", 7, "hour", "hour"},
+		{"a year of hours becomes days", 365, "hour", "day"},
+		{"five years of hours becomes weeks", 5 * 365, "hour", "week"},
+		{"fifty years of days becomes months", 50 * 365, "day", "month"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{
+				"since":  now - nostr.Timestamp(tc.days*86400),
+				"until":  now,
+				"bucket": tc.asked,
+			})
+			require.Equal(t, http.StatusOK, status)
+			assert.Equal(t, tc.applied, out["bucket"], "the response must say which granularity was applied")
+			assert.LessOrEqual(t, len(periodCounts(t, out)), 400, "no request may produce an undrawable chart")
+		})
+	}
+
+	t.Run("an unknown granularity names the ones that exist", func(t *testing.T) {
+		out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{"bucket": "fortnight"})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Contains(t, out["error"], "hour, day, week, month")
+	})
+
+	t.Run("a backwards range is refused", func(t *testing.T) {
+		_, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{"since": now, "until": now - 3600})
+		assert.Equal(t, http.StatusBadRequest, status)
+	})
+
+	t.Run("a banned event is not counted, and stored_total still sees it", func(t *testing.T) {
+		banned := seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: now - 30, Kind: 1, Content: "banned"})
+		require.NoError(t, repo.BanEvent(context.Background(), banned.ID, "test"))
+
+		out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{"since": now - 3600, "until": now})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, float64(1), out["total"], "the banned event must not be counted, as it is not served")
+		assert.Equal(t, float64(2), out["stored_total"], "but it is still on disk, and stored_total says so")
 	})
 }
