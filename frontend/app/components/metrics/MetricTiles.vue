@@ -15,6 +15,8 @@ const props = defineProps<{
   snapshot: MetricsSnapshot | null
   ready: boolean | null
   paused: boolean
+  /** True when the last poll failed, so these figures are stale. */
+  failing: boolean
 }>()
 
 const now = ref(Date.now())
@@ -51,8 +53,21 @@ const age = computed(() => (props.snapshot ? sampleAge(props.snapshot.at, now.va
           <h2 class="font-display text-lg font-semibold">
             Right now
           </h2>
+          <!--
+            Unknown is its own state. A green badge left over from the last
+            successful poll, standing beside an error, is the page asserting
+            something it can no longer check.
+          -->
           <UBadge
-            v-if="ready !== null"
+            v-if="failing || ready === null"
+            color="neutral"
+            variant="subtle"
+            icon="i-lucide-help-circle"
+          >
+            Not reading
+          </UBadge>
+          <UBadge
+            v-else
             :color="ready ? 'success' : 'error'"
             variant="subtle"
             :icon="ready ? 'i-lucide-check' : 'i-lucide-triangle-alert'"
@@ -62,7 +77,10 @@ const age = computed(() => (props.snapshot ? sampleAge(props.snapshot.at, now.va
         </div>
 
         <p class="text-sm text-(--ui-text-dimmed)">
-          <template v-if="paused">
+          <template v-if="failing">
+            The last read failed — these figures are stale.
+          </template>
+          <template v-else-if="paused">
             Paused while this tab is in the background.
           </template>
           <template v-else-if="age">

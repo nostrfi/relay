@@ -6,8 +6,7 @@ import {
   labelledRates,
   meanSeconds,
   quantileFromBuckets,
-  rateBetween,
-  sampleAge
+  rateBetween
 } from '~~/shared/utils/metric-rates'
 
 useSeoMeta({ title: 'Metrics' })
@@ -15,20 +14,7 @@ useSeoMeta({ title: 'Metrics' })
 // Private by default — see app/middleware/auth.global.ts.
 definePageMeta({ layout: 'dashboard' })
 
-const { samples, latest, previous, ready, relay, error, paused, refresh } = useRelayMetrics()
-
-const now = ref(Date.now())
-let ticker: ReturnType<typeof setInterval> | null = null
-onMounted(() => {
-  ticker = setInterval(() => {
-    now.value = Date.now()
-  }, 1000)
-})
-onBeforeUnmount(() => {
-  if (ticker !== null) {
-    clearInterval(ticker)
-  }
-})
+const { samples, latest, previous, ready, error, paused, refresh } = useRelayMetrics()
 
 /**
  * Rates are ranked tables with one sparkline each rather than a multi-series
@@ -94,8 +80,6 @@ const windowLabel = computed(() => {
   const seconds = Math.round((samples.value.at(-1)!.at - samples.value[0]!.at) / 1000)
   return seconds < 90 ? `over the last ${seconds}s` : `over the last ${Math.round(seconds / 60)}m`
 })
-
-const age = computed(() => (latest.value ? sampleAge(latest.value.at, now.value) : null))
 </script>
 
 <template>
@@ -144,6 +128,7 @@ const age = computed(() => (latest.value ? sampleAge(latest.value.at, now.value)
         :snapshot="latest"
         :ready="ready"
         :paused="paused"
+        :failing="error !== ''"
       />
 
       <UCard class="mb-6">
@@ -424,13 +409,6 @@ const age = computed(() => (latest.value ? sampleAge(latest.value.at, now.value)
           </p>
         </template>
       </UCard>
-
-      <p
-        v-if="relay"
-        class="mt-6 text-sm text-(--ui-text-dimmed)"
-      >
-        Read from <span class="font-mono">{{ relay }}/metrics</span>{{ age ? `, sampled ${age}` : '' }}.
-      </p>
     </template>
   </UDashboardPanel>
 </template>

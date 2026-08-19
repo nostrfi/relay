@@ -22,7 +22,7 @@ const { fetchStats } = useEventStats()
 // Live operational figures beside the stored-event charts: what the relay is
 // doing now, against what it holds. The detail — rates, rejections, latency —
 // is its own page (nostrfi/workspace#39).
-const { latest: metrics, ready, paused } = useRelayMetrics()
+const { latest: metrics, ready, paused, error: metricsError } = useRelayMetrics()
 
 const stats = ref<EventStatsResponse | null>(null)
 const phase = ref<QueryPhase>('idle')
@@ -155,6 +155,7 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
         :snapshot="metrics"
         :ready="ready"
         :paused="paused"
+        :failing="metricsError !== ''"
       />
 
       <div

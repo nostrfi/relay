@@ -22,6 +22,11 @@ export interface CounterSample {
   value: number
   /** Unix milliseconds when the sample was taken. */
   at: number
+  /**
+   * The relay process's start time, when known. Two samples from different
+   * processes cannot be subtracted, however the numbers happen to compare.
+   */
+  processStartedAt?: number | null
 }
 
 export interface Rate {
@@ -37,7 +42,15 @@ export function rateBetween(previous: CounterSample | undefined, current: Counte
     // be a claim, not a measurement.
     return { perSecond: null, reset: false }
   }
-  if (current.value < previous.value) {
+  const restarted = previous.processStartedAt != null
+    && current.processStartedAt != null
+    && previous.processStartedAt !== current.processStartedAt
+
+  if (restarted || current.value < previous.value) {
+    // A counter going backwards catches most restarts, but not one where the
+    // new process passed the old value before the next sample — a busy relay
+    // restarting between five-second polls would otherwise report the new
+    // process's whole count as an interval's traffic.
     return { perSecond: null, reset: true }
   }
   const seconds = (current.at - previous.at) / 1000
@@ -58,8 +71,10 @@ export function labelledRates(
       label,
       total,
       rate: rateBetween(
-        previous ? { value: previous[field][label] ?? 0, at: previous.at } : undefined,
-        { value: total, at: current.at }
+        previous
+          ? { value: previous[field][label] ?? 0, at: previous.at, processStartedAt: previous.processStartedAt }
+          : undefined,
+        { value: total, at: current.at, processStartedAt: current.processStartedAt }
       )
     }))
     .sort((a, b) => b.total - a.total)
@@ -131,6 +146,12 @@ export function formatRate(rate: Rate, unit = '/s'): string {
   }
   if (rate.perSecond === 0) {
     return `0${unit}`
+  }
+  if (rate.perSecond < 0.01) {
+    // Rounding this to two places prints 0.00/s, which says "nothing
+    // happened" about traffic that did. One event after a long pause is
+    // exactly the case worth not erasing.
+    return `<0.01${unit}`
   }
   return rate.perSecond < 1 ? `${rate.perSecond.toFixed(2)}${unit}` : `${rate.perSecond.toFixed(1)}${unit}`
 }

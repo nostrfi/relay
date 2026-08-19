@@ -22,6 +22,14 @@ export interface MetricsSnapshot {
   /** When this sample was taken, in unix milliseconds, by the server that took it. */
   at: number
 
+  /**
+   * The relay process's start time, in unix seconds, from the Go process
+   * collector. Carried so a restart can be detected outright: a counter that
+   * merely goes backwards catches most restarts, but not one where the new
+   * process passes the old value before the next sample.
+   */
+  processStartedAt: number | null
+
   connectionsActive: number
   subscriptionsActive: number
   eventsStored: number
@@ -44,6 +52,4 @@ export interface MetricsResponse {
    * second poll the page has to correlate.
    */
   ready: boolean
-  /** Which relay answered, so a surprising number can be traced to a host. */
-  relay: string
 }

@@ -21,20 +21,27 @@ const MAX_SAMPLES = 60
 export function useRelayMetrics() {
   const samples = ref<MetricsSnapshot[]>([])
   const ready = ref<boolean | null>(null)
-  const relay = ref('')
   const error = ref('')
   const polling = ref(false)
   const paused = ref(false)
 
-  let timer: ReturnType<typeof setInterval> | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let inFlight = false
 
   async function sample() {
+    // One at a time. With setInterval, a sample slower than the interval
+    // overlaps the next, and the responses can land out of order — an older
+    // snapshot appended after a newer one reads as a counter going backwards,
+    // which this page reports as a relay restart that never happened.
+    if (inFlight) {
+      return
+    }
+    inFlight = true
     polling.value = true
     try {
       const response = await $fetch<MetricsResponse>('/api/metrics')
       samples.value = [...samples.value, response.snapshot].slice(-MAX_SAMPLES)
       ready.value = response.ready
-      relay.value = response.relay
       error.value = ''
     } catch (cause) {
       // Kept visible rather than swallowed: a poller that fails quietly looks
@@ -42,21 +49,36 @@ export function useRelayMetrics() {
       error.value = (cause as { statusMessage?: string })?.statusMessage
         || (cause as Error)?.message
         || 'The relay metrics could not be read.'
+      // And readiness becomes unknown rather than staying green: the last
+      // "ready" is a statement about a relay this page can no longer reach.
+      ready.value = null
     } finally {
+      inFlight = false
       polling.value = false
     }
   }
 
-  function start() {
+  /** Schedules the next sample only once the current one is done. */
+  function scheduleNext() {
     stop()
-    timer = setInterval(sample, POLL_INTERVAL_MS)
+    timer = setTimeout(async () => {
+      await sample()
+      if (!paused.value) {
+        scheduleNext()
+      }
+    }, POLL_INTERVAL_MS)
   }
 
   function stop() {
     if (timer !== null) {
-      clearInterval(timer)
+      clearTimeout(timer)
       timer = null
     }
+  }
+
+  async function start() {
+    await sample()
+    scheduleNext()
   }
 
   function onVisibilityChange() {
@@ -66,13 +88,18 @@ export function useRelayMetrics() {
       return
     }
     paused.value = false
-    sample()
     start()
   }
 
   onMounted(() => {
-    sample()
-    start()
+    // A tab restored in the background is already hidden here, and no
+    // visibilitychange fires to tell us — polling would run for the whole
+    // time it sat there unwatched.
+    if (document.visibilityState === 'hidden') {
+      paused.value = true
+    } else {
+      start()
+    }
     document.addEventListener('visibilitychange', onVisibilityChange)
   })
 
@@ -84,5 +111,5 @@ export function useRelayMetrics() {
   const latest = computed(() => samples.value.at(-1) ?? null)
   const previous = computed(() => samples.value.at(-2) ?? undefined)
 
-  return { samples, latest, previous, ready, relay, error, polling, paused, refresh: sample }
+  return { samples, latest, previous, ready, error, polling, paused, refresh: sample }
 }

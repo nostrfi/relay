@@ -80,6 +80,19 @@ function parseLabels(source: string): Record<string, string> {
 }
 
 /**
+ * Whether this really is the relay's metrics.
+ *
+ * A misconfigured proxy answering 200 with an HTML page parses to nothing,
+ * and every gauge and counter would then read zero — a scrape failure
+ * rendered as a relay sitting perfectly idle. Requiring a family the relay
+ * always registers, whether or not it has served a single request, makes the
+ * difference visible.
+ */
+export function looksLikeRelayMetrics(lines: MetricLine[]): boolean {
+  return lines.some(line => line.name.startsWith('relay_'))
+}
+
+/**
  * Gathers the parsed lines into the shape the dashboard reads, discarding
  * everything the Go runtime and the process collector add — this page is
  * about the relay, not about its garbage collector.
@@ -87,6 +100,7 @@ function parseLabels(source: string): Record<string, string> {
 export function toSnapshot(lines: MetricLine[], at: number): MetricsSnapshot {
   const snapshot: MetricsSnapshot = {
     at,
+    processStartedAt: null,
     connectionsActive: 0,
     subscriptionsActive: 0,
     eventsStored: 0,
@@ -100,6 +114,9 @@ export function toSnapshot(lines: MetricLine[], at: number): MetricsSnapshot {
 
   for (const line of lines) {
     switch (line.name) {
+      case 'process_start_time_seconds':
+        snapshot.processStartedAt = line.value
+        break
       case 'relay_connections_active':
         snapshot.connectionsActive = line.value
         break

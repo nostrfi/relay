@@ -1,4 +1,4 @@
-import { parsePrometheusText, toSnapshot } from '~~/shared/utils/prometheus'
+import { looksLikeRelayMetrics, parsePrometheusText, toSnapshot } from '~~/shared/utils/prometheus'
 import type { MetricsResponse } from '~~/shared/types/metrics'
 
 /**
@@ -23,6 +23,7 @@ export default defineEventHandler(async (event): Promise<MetricsResponse> => {
   const base = relayApiBase.replace(/\/$/, '')
 
   let text: string
+  let sampledAt: number
   try {
     const response = await fetch(`${base}/metrics`, { signal: AbortSignal.timeout(RELAY_METRICS_TIMEOUT_MS) })
     if (!response.ok) {
@@ -32,6 +33,11 @@ export default defineEventHandler(async (event): Promise<MetricsResponse> => {
       })
     }
     text = await response.text()
+    // The moment the counters were read. Anything that happens after this —
+    // the readiness check below, for one — must not push the timestamp
+    // later: rates divide counter deltas by these times, so a slow /readyz
+    // would shrink an interval that had already elapsed.
+    sampledAt = Date.now()
   } catch (cause) {
     if ((cause as { statusCode?: number })?.statusCode) {
       throw cause
@@ -42,6 +48,16 @@ export default defineEventHandler(async (event): Promise<MetricsResponse> => {
       statusMessage: timedOut
         ? `The relay did not answer within ${RELAY_METRICS_TIMEOUT_MS / 1000} seconds`
         : `The relay could not be reached: ${(cause as Error)?.message ?? 'unknown error'}`
+    })
+  }
+
+  const lines = parsePrometheusText(text)
+  if (!looksLikeRelayMetrics(lines)) {
+    // A proxy answering 200 with an HTML page parses to nothing, and every
+    // gauge would then read zero — a scrape failure shown as an idle relay.
+    throw createError({
+      statusCode: 502,
+      statusMessage: 'The relay\'s metrics endpoint answered with something that is not Prometheus metrics'
     })
   }
 
@@ -57,9 +73,14 @@ export default defineEventHandler(async (event): Promise<MetricsResponse> => {
     ready = false
   }
 
+  // The relay's address is logged, not returned: it is the internal Docker
+  // hostname in a Compose deployment, and AGENTS.md keeps that off the
+  // client. The server log is where a surprising number gets traced to a
+  // host, and it already carries it.
+  console.info(`metrics read: relay=${base}/metrics ready=${ready} series=${lines.length}`)
+
   return {
-    snapshot: toSnapshot(parsePrometheusText(text), Date.now()),
-    ready,
-    relay: base
+    snapshot: toSnapshot(lines, sampledAt),
+    ready
   }
 })

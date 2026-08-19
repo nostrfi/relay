@@ -35,6 +35,26 @@ describe('rateBetween', () => {
     expect(rate).toEqual({ perSecond: null, reset: true })
   })
 
+  // Raised in review of nostrfi/relay#30: a counter going backwards catches
+  // most restarts, but not one where the new process passes the old value
+  // before the next sample — a busy relay restarting between polls would
+  // report the new process's whole count as one interval's traffic.
+  it('detects a restart even when the counter has already passed its old value', () => {
+    const rate = rateBetween(
+      { value: 1, at: 0, processStartedAt: 1_700_000_000 },
+      { value: 2, at: 5_000, processStartedAt: 1_700_000_900 }
+    )
+    expect(rate).toEqual({ perSecond: null, reset: true })
+  })
+
+  it('still rates normally while the process is the same', () => {
+    const rate = rateBetween(
+      { value: 10, at: 0, processStartedAt: 1_700_000_000 },
+      { value: 20, at: 10_000, processStartedAt: 1_700_000_000 }
+    )
+    expect(rate.perSecond).toBe(1)
+  })
+
   it('has no rate for a first sample', () => {
     expect(rateBetween(undefined, { value: 7, at: 1_000 })).toEqual({ perSecond: null, reset: false })
   })
@@ -103,6 +123,14 @@ describe('quantileFromBuckets', () => {
 })
 
 describe('presentation', () => {
+  // Also from that review: one event after a long pause is a rate below
+  // 0.005, and two decimal places print it as 0.00/s — traffic that happened,
+  // shown as traffic that did not.
+  it('keeps a tiny rate distinguishable from none at all', () => {
+    expect(formatRate({ perSecond: 0.004, reset: false })).toBe('<0.01/s')
+    expect(formatRate({ perSecond: 0, reset: false })).toBe('0/s')
+  })
+
   it('names a restart rather than printing a number for it', () => {
     expect(formatRate({ perSecond: null, reset: true })).toBe('restarted')
     expect(formatRate({ perSecond: null, reset: false })).toBe('—')

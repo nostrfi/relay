@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parsePrometheusText, toSnapshot } from '../shared/utils/prometheus'
+import { looksLikeRelayMetrics, parsePrometheusText, toSnapshot } from '../shared/utils/prometheus'
 
 /**
  * A real capture from a running relay after publishing five events and
@@ -31,6 +31,7 @@ relay_query_duration_seconds_count{query="req"} 1
 relay_rejections_total{reason="invalid"} 2
 relay_save_failures_total 0
 relay_subscriptions_active 0
+process_start_time_seconds 1.78715442719e+09
 `
 
 describe('parsePrometheusText', () => {
@@ -47,6 +48,20 @@ describe('parsePrometheusText', () => {
 
   it('survives input that is not a metric line', () => {
     expect(parsePrometheusText('garbage\n\n# comment only\nname_without_value')).toEqual([])
+  })
+})
+
+describe('looksLikeRelayMetrics', () => {
+  // A misconfigured proxy answering 200 with an HTML page parses to nothing,
+  // and every gauge would then read zero: a scrape failure rendered as a
+  // relay sitting perfectly idle (nostrfi/relay#30 review).
+  it('rejects a body that carries none of the relay\'s own series', () => {
+    expect(looksLikeRelayMetrics(parsePrometheusText('<!doctype html><html></html>'))).toBe(false)
+    expect(looksLikeRelayMetrics(parsePrometheusText('go_goroutines 10'))).toBe(false)
+  })
+
+  it('accepts the relay\'s own metrics', () => {
+    expect(looksLikeRelayMetrics(parsePrometheusText(CAPTURE))).toBe(true)
   })
 })
 
@@ -73,6 +88,10 @@ describe('toSnapshot', () => {
     expect(histogram.sum).toBeCloseTo(0.00126374, 8)
     expect(histogram.buckets.at(-1)!.le).toBe(Number.POSITIVE_INFINITY)
     expect(histogram.buckets.map(b => b.le).slice(0, 3)).toEqual([0.005, 0.01, 0.1])
+  })
+
+  it('keeps the process start time, which is how a restart is detected', () => {
+    expect(snapshot.processStartedAt).toBeCloseTo(1787154427.19, 2)
   })
 
   it('ignores everything that is not the relay\'s own instrumentation', () => {
