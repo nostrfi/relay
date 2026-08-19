@@ -23,8 +23,9 @@ export default defineEventHandler(async (event) => {
   }
 
   const { relayApiBase } = useRuntimeConfig(event)
+  const relayUrl = `${relayApiBase.replace(/\/$/, '')}/api/events/query`
 
-  const response = await fetch(`${relayApiBase.replace(/\/$/, '')}/api/events/query`, {
+  const response = await fetch(relayUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -34,6 +35,13 @@ export default defineEventHandler(async (event) => {
   })
 
   const text = await response.text()
+
+  // The middle of a three-process chain — browser, this server, relay — used
+  // to be the only part that left no trace, so "the relay was never called"
+  // could not be told from "the relay answered nothing" (nostrfi/workspace#49).
+  // The relay it forwarded to is the fact that matters: this server is the
+  // only thing that knows which one that is.
+  console.info(`event query proxied: relay=${relayUrl} status=${response.status} bytes=${text.length}`)
   let parsed: unknown
   try {
     parsed = JSON.parse(text)

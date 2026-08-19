@@ -161,6 +161,24 @@ func newEventsQueryHandler(cfg Config, events application.EventService) http.Han
 			response.NextUntil = &oldest
 		}
 
+		// A served query left no trace at all, so "the relay was never
+		// called" and "the relay answered nothing" looked the same from
+		// outside (nostrfi/workspace#49). This is the line that tells them
+		// apart, next to the storage line logged at startup.
+		//
+		// The shape of the filter, never its content: no event content, and
+		// not the search text either — it is the operator's words, and the
+		// count is what diagnoses this.
+		slog.Info("operator event query served",
+			"returned", len(response.Events),
+			"limit", limit,
+			"filtered_by_ids", len(req.IDs),
+			"filtered_by_authors", len(req.Authors),
+			"filtered_by_kinds", len(req.Kinds),
+			"filtered_by_tags", len(req.Tags),
+			"content_search", req.ContentContains != "",
+			"has_time_range", req.Since != nil || req.Until != nil)
+
 		json.NewEncoder(w).Encode(response)
 	}
 }
