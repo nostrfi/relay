@@ -338,6 +338,44 @@ Three behaviours are worth knowing:
   literal characters rather than wildcards. It is the first thing that will hurt on a large
   database; narrow it with a kind, author, or time range.
 
+### Event statistics API (operator only)
+
+`POST /api/events/stats` counts stored events by period and by kind, for the dashboard's overview
+charts. Authorized exactly like the browse and configuration APIs: a NIP-98 kind-`27235` event whose
+pubkey matches `moderation.admin_pubkey`.
+
+```bash
+curl -X POST https://relay.example.com/api/events/stats \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Nostr $(...)" \
+  -d '{"since":1786000000,"until":1786600000,"bucket":"day"}'
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `since` / `until` | `number` | Unix seconds, inclusive. Defaults to the last 7 days |
+| `bucket` | `hour \| day \| week \| month` | Granularity; defaults to `day` |
+| `utc_offset_minutes` | `number` | Shifts period boundaries onto the operator's clock; defaults to UTC |
+
+The response is `{"periods":[{"start":...,"count":...}], "kinds":[{"kind":...,"count":...}], "total":...,
+"stored_total":..., "bucket":..., "since":..., "until":..., "utc_offset_minutes":...}`.
+
+Four behaviours are worth knowing:
+
+- **Only periods that hold events are returned.** A range containing a silent day has no entry for
+  it, so a caller drawing a chart must fill its own gaps — otherwise three bars in a row read as
+  three consecutive days when two quiet ones sit between them. The dashboard does this in
+  `frontend/shared/utils/event-stats.ts`.
+- **The granularity is coarsened, not refused.** A range that would produce more than 400 periods
+  walks up `hour → day → week → month` until it fits, and `bucket` in the response reports what was
+  applied — a year of hours comes back as days.
+- **`stored_total` is every event on disk**, expired and banned included, so an empty chart can say
+  "the relay holds N events, none in this range" rather than leaving an operator to guess which kind
+  of empty it is.
+- **Counts match what the relay would serve.** Expired events and events banned through NIP-86 are
+  excluded, exactly as they are from a `REQ` or a browse query, so the charts and the event browser
+  cannot disagree.
+
 ### Admin dashboard event browser
 
 The dashboard's `/admin/dashboard/events` page is a client of the API above. Filters are built in
