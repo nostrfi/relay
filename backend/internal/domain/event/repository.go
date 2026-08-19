@@ -66,6 +66,10 @@ type Stats struct {
 	Periods []StatsPeriod
 	Kinds   []KindCount
 	Total   int64
+	// OtherKinds is how many events fall in kinds past the breakdown's cap.
+	// Nothing bounds how many distinct kinds a relay holds, so the list is
+	// capped and the rest accounted for here rather than dropped.
+	OtherKinds int64
 }
 
 // Repository is the persistence port for events: implemented by the

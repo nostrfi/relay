@@ -92,7 +92,15 @@ type eventStatsResponse struct {
 	// exists so an empty chart can say "the relay holds N events, none in
 	// this range" rather than leaving an operator to guess which it is
 	// (nostrfi/workspace#49).
-	StoredTotal int64 `json:"stored_total"`
+	//
+	// A pointer, so a failed count is absent rather than zero: reporting
+	// zero would turn a database error into the confident statement "this
+	// relay has no stored events at all", which is the exact failure mode
+	// this field was added to prevent.
+	StoredTotal *int64 `json:"stored_total,omitempty"`
+
+	// OtherKinds is the events in kinds beyond the breakdown's cap.
+	OtherKinds int64 `json:"other_kinds"`
 
 	Bucket           string `json:"bucket"`
 	Since            int64  `json:"since"`
@@ -106,6 +114,14 @@ type eventStatsResponse struct {
 // month of events through the browse endpoint would mean paging the whole
 // table into a browser, which is why the aggregation belongs here
 // (nostrfi/workspace#51).
+//
+// Periods group by the event's own created_at, which is the author's
+// timestamp and not when the relay received it — NIP-01 lets a client
+// publish a backdated event, and this relay accepts them. So these counts
+// describe when events say they were made, not relay throughput: a bulk
+// import of old events lands in old periods, and answering "what arrived
+// today" would need an ingestion timestamp the schema does not record.
+// Everything that renders this is worded accordingly.
 func newEventStatsHandler(cfg Config, events application.EventService) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -162,7 +178,7 @@ func newEventStatsHandler(cfg Config, events application.EventService) http.Hand
 			return
 		}
 
-		bucket = coarsenToFit(bucket, int64(until-since))
+		bucket, since = coarsenToFit(bucket, since, until)
 
 		stats, err := events.EventStats(r.Context(), domainevent.StatsQuery{
 			Since:         since,
@@ -180,6 +196,7 @@ func newEventStatsHandler(cfg Config, events application.EventService) http.Hand
 			Periods:          make([]statsPeriodView, 0, len(stats.Periods)),
 			Kinds:            make([]statsKindView, 0, len(stats.Kinds)),
 			Total:            stats.Total,
+			OtherKinds:       stats.OtherKinds,
 			Bucket:           string(bucket),
 			Since:            int64(since),
 			Until:            int64(until),
@@ -197,7 +214,11 @@ func newEventStatsHandler(cfg Config, events application.EventService) http.Hand
 		// means something different from the same chart against an empty
 		// one, and the page says so either way.
 		if total, err := events.CountEvents(r.Context()); err == nil {
-			response.StoredTotal = total
+			response.StoredTotal = &total
+		} else {
+			// Left absent rather than zero, and logged: the page then says
+			// it does not know, instead of announcing an empty relay.
+			slog.Warn("stored event count unavailable for statistics response", "error", err)
 		}
 
 		slog.Info("operator event statistics served",
@@ -225,21 +246,32 @@ func parseStatsBucket(value string) (domainevent.StatsBucket, error) {
 }
 
 // coarsenToFit walks the granularity up until the range produces a drawable
-// number of periods.
+// number of periods, and clamps the range itself when even the coarsest one
+// will not fit.
 //
 // Coarsened rather than refused, because a refusal makes the caller guess
 // what would have been accepted — and a year of hourly periods is nearly
 // always a range control left on a default, not a considered request. The
-// response reports the granularity applied, so the axis can say so.
-func coarsenToFit(bucket domainevent.StatsBucket, rangeSeconds int64) domainevent.StatsBucket {
+// response reports both the granularity and the range applied, so the axis
+// can say so.
+//
+// The clamp matters because the ladder ends at month: a relay holding
+// decades of imported events would otherwise return thousands of periods
+// while this claimed to cap them at maxStatsPeriods.
+func coarsenToFit(bucket domainevent.StatsBucket, since, until nostr.Timestamp) (domainevent.StatsBucket, nostr.Timestamp) {
 	for {
 		size, known := bucketSeconds[bucket]
-		if !known || size <= 0 || rangeSeconds/size <= maxStatsPeriods {
-			return bucket
+		if !known || size <= 0 {
+			return bucket, since
+		}
+		if int64(until-since)/size <= maxStatsPeriods {
+			return bucket, since
 		}
 		next, coarsenable := coarser[bucket]
 		if !coarsenable {
-			return bucket
+			// The coarsest granularity still overflows, so the range gives
+			// way instead of the bound.
+			return bucket, until - nostr.Timestamp(size*maxStatsPeriods)
 		}
 		bucket = next
 	}

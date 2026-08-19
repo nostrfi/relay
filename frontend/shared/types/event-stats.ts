@@ -32,8 +32,14 @@ export interface EventStatsResponse {
   kinds: KindCount[]
   /** Events in the range: the sum of the periods. */
   total: number
-  /** Every event on disk, so an empty range can say which kind of empty it is. */
-  stored_total: number
+  /**
+   * Every event on disk, so an empty range can say which kind of empty it is.
+   * Absent when the relay could not count — a failure must not arrive as a
+   * confident zero.
+   */
+  stored_total?: number
+  /** Events in kinds beyond the relay's breakdown cap. */
+  other_kinds: number
   /** What the relay actually applied, which may be coarser than asked. */
   bucket: StatsBucket
   since: number

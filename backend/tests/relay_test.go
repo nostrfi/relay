@@ -4100,6 +4100,72 @@ func TestEventStatsAPIBuckets(t *testing.T) {
 	})
 }
 
+// TestEventStatsBucketsIgnoreServerTimezone pins the truncation to UTC plus
+// the operator's offset, and nothing else. Casting the instant to a naive
+// TIMESTAMP made date_trunc use the database session's timezone as well, so
+// the same relay bucketed events differently depending on the machine's TZ —
+// found in review of nostrfi/relay#29.
+func TestEventStatsBucketsIgnoreServerTimezone(t *testing.T) {
+	t.Setenv("TZ", "America/New_York")
+
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	// 00:30 UTC on the 11th: the previous day in New York, the 11th in UTC.
+	at := nostr.Timestamp(time.Date(2026, 3, 11, 0, 30, 0, 0, time.UTC).Unix())
+	seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: at, Kind: 1, Content: "just after midnight UTC"})
+
+	out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{
+		"since": at - 86400, "until": at + 86400, "bucket": "day",
+	})
+	require.Equal(t, http.StatusOK, status)
+
+	march11 := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC).Unix()
+	assert.Equal(t, int64(1), periodCounts(t, out)[march11],
+		"with no operator offset the event belongs to the UTC day, whatever timezone the relay runs in")
+}
+
+// TestEventStatsCapsTheKindBreakdown covers a response whose size a stranger
+// could otherwise grow: nothing validates the kind range on publish, so an
+// unbounded GROUP BY returns one row per kind ever seen.
+func TestEventStatsCapsTheKindBreakdown(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	now := nostr.Now()
+	for kind := range 30 {
+		seedEvent(t, repo, operatorSk, &nostr.Event{
+			CreatedAt: now - nostr.Timestamp(kind),
+			Kind:      40000 + kind,
+			Content:   fmt.Sprintf("kind %d", 40000+kind),
+		})
+	}
+
+	out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{"since": now - 3600, "until": now})
+	require.Equal(t, http.StatusOK, status)
+
+	kinds, ok := out["kinds"].([]any)
+	require.True(t, ok)
+	assert.LessOrEqual(t, len(kinds), 16, "the breakdown must be capped")
+	assert.Equal(t, float64(30), out["total"], "the total still counts every event")
+
+	// Nothing is lost: the capped kinds are accounted for as a remainder.
+	var listed float64
+	for _, item := range kinds {
+		listed += item.(map[string]any)["count"].(float64)
+	}
+	assert.Equal(t, out["total"], listed+out["other_kinds"].(float64),
+		"listed kinds plus the remainder must equal the total")
+}
+
 // TestEventStatsAPIBoundsAndExclusions covers what the chart must never do:
 // return an unbounded number of periods, or count events a read would not
 // serve.
@@ -4126,6 +4192,9 @@ func TestEventStatsAPIBoundsAndExclusions(t *testing.T) {
 		{"a year of hours becomes days", 365, "hour", "day"},
 		{"five years of hours becomes weeks", 5 * 365, "hour", "week"},
 		{"fifty years of days becomes months", 50 * 365, "day", "month"},
+		// Past the ladder's end the range itself gives way, rather than the
+		// bound being quietly abandoned — found in review of nostrfi/relay#29.
+		{"a thousand years of days is still bounded", 1000 * 365, "day", "month"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, status := callEventsStatsAPI(t, server, operatorSk, map[string]any{

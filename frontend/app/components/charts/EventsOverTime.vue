@@ -15,6 +15,10 @@ import { formatCount, periodLabel, periodTooltipLabel } from '~~/shared/utils/ev
 const props = defineProps<{
   points: ChartPoint[]
   bucket: StatsBucket
+  /** The fixed offset the relay bucketed with, so labels match the bars. */
+  offsetSeconds: number
+  /** Names the clock, for the caption and the table. */
+  clockLabel: string
 }>()
 
 const x = (point: ChartPoint, index: number) => index
@@ -36,13 +40,27 @@ const tickValues = computed(() => {
 
 const tickFormat = (index: number) => {
   const point = props.points[Math.round(index)]
-  return point ? periodLabel(point.start, props.bucket) : ''
+  return point ? periodLabel(point.start, props.bucket, props.offsetSeconds) : ''
 }
+
+/**
+ * The same numbers as text.
+ *
+ * The bars carry the values graphically and the tooltip needs a pointer, so
+ * without this the counts are unreachable by keyboard or screen reader — and
+ * the page's single total cannot say which periods were busy and which were
+ * silent. Collapsed by default so it does not compete with the chart, and
+ * present in the DOM either way (nostrfi/relay#29 review).
+ */
+const tableRows = computed(() => props.points.map(point => ({
+  label: periodTooltipLabel(point.start, props.bucket, props.offsetSeconds),
+  count: point.count
+})))
 
 const triggers = {
   [StackedBar.selectors.bar]: (point: ChartPoint) =>
     `<div class="nf-chart-tooltip">
-       <div class="nf-chart-tooltip__label">${periodTooltipLabel(point.start, props.bucket)}</div>
+       <div class="nf-chart-tooltip__label">${periodTooltipLabel(point.start, props.bucket, props.offsetSeconds)}</div>
        <div class="nf-chart-tooltip__value">${formatCount(point.count)} events</div>
      </div>`
 }
@@ -89,6 +107,49 @@ const triggers = {
         />
       </template>
     </ClientOnly>
+
+    <details class="mt-3">
+      <summary class="cursor-pointer text-sm text-(--ui-text-muted)">
+        View as a table ({{ clockLabel }})
+      </summary>
+      <div class="mt-2 max-h-64 overflow-y-auto">
+        <table class="w-full text-left text-sm">
+          <caption class="sr-only">
+            Events per period, in {{ clockLabel }}
+          </caption>
+          <thead class="text-(--ui-text-muted)">
+            <tr>
+              <th
+                scope="col"
+                class="pb-1 pr-4 font-medium"
+              >
+                Period
+              </th>
+              <th
+                scope="col"
+                class="pb-1 font-medium"
+              >
+                Events
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in tableRows"
+              :key="row.label"
+              class="border-t border-(--ui-border)"
+            >
+              <td class="py-1 pr-4">
+                {{ row.label }}
+              </td>
+              <td class="nf-tabular py-1">
+                {{ formatCount(row.count) }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
   </div>
 </template>
 

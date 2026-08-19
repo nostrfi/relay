@@ -5,6 +5,9 @@
  * route forwards the bytes unread, and the relay authorizes. The counts are
  * as privileged as the events they count.
  */
+/** How long the relay gets to answer before the page is told it did not. */
+const RELAY_STATS_TIMEOUT_MS = 10_000
+
 export default defineEventHandler(async (event) => {
   await requireAdminSession(event)
 
@@ -21,14 +24,31 @@ export default defineEventHandler(async (event) => {
   const { relayApiBase } = useRuntimeConfig(event)
   const relayUrl = `${relayApiBase.replace(/\/$/, '')}/api/events/stats`
 
-  const response = await fetch(relayUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': authorization
-    },
-    body
-  })
+  // Bounded: a relay that accepts the connection and then stops responding
+  // would otherwise leave this request pending until the platform's own
+  // network timeout, with the overview stuck busy and its range controls
+  // disabled the whole time. Counting is a small read; ten seconds is
+  // generous for it (AGENTS.md, "Frontend Conventions").
+  let response: Response
+  try {
+    response = await fetch(relayUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authorization
+      },
+      body,
+      signal: AbortSignal.timeout(RELAY_STATS_TIMEOUT_MS)
+    })
+  } catch (cause) {
+    const timedOut = (cause as Error)?.name === 'TimeoutError'
+    throw createError({
+      statusCode: 504,
+      statusMessage: timedOut
+        ? `The relay did not answer within ${RELAY_STATS_TIMEOUT_MS / 1000} seconds`
+        : `The relay could not be reached: ${(cause as Error)?.message ?? 'unknown error'}`
+    })
+  }
 
   const text = await response.text()
   let parsed: unknown

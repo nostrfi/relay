@@ -6,6 +6,7 @@ import {
   RANGE_PRESETS,
   fillPeriods,
   formatCount,
+  offsetLabel,
   rankKinds
 } from '~~/shared/utils/event-stats'
 
@@ -43,14 +44,17 @@ async function load() {
   refusalLogHint.value = ''
 
   const until = Math.floor(Date.now() / 1000)
+  // One fixed offset for the whole range, which the relay echoes back and
+  // every label here is rendered in. It is today's offset: a range crossing a
+  // daylight-saving change is drawn in one consistent clock rather than a
+  // mixture, and the caption names which (nostrfi/relay#29 review).
+  const offsetMinutes = -new Date().getTimezoneOffset()
   try {
     stats.value = await fetchStats({
-      since: until - range.value.seconds,
+      since: range.value.since(until, offsetMinutes * 60),
       until,
       bucket: range.value.bucket,
-      // The operator's clock, so "today" means their today rather than the
-      // server's. The relay reports back which offset it applied.
-      utc_offset_minutes: -new Date().getTimezoneOffset()
+      utc_offset_minutes: offsetMinutes
     })
     phase.value = 'ready'
   } catch (cause) {
@@ -75,10 +79,23 @@ const points = computed(() => {
   if (!current) {
     return []
   }
-  return fillPeriods(current.periods, current.bucket, current.since, current.until)
+  return fillPeriods(
+    current.periods,
+    current.bucket,
+    current.since,
+    current.until,
+    current.utc_offset_minutes * 60
+  )
 })
 
-const kinds = computed(() => rankKinds(stats.value?.kinds ?? []))
+const kinds = computed(() => {
+  const ranked = rankKinds(stats.value?.kinds ?? [])
+  // The relay caps its own breakdown, so anything it left out is added to
+  // whatever this view trims: the remainder still accounts for every event.
+  return { ...ranked, remainder: ranked.remainder + (stats.value?.other_kinds ?? 0) }
+})
+
+const clockLabel = computed(() => offsetLabel((stats.value?.utc_offset_minutes ?? 0) * 60))
 
 const busy = computed(() => phase.value === 'running')
 
@@ -101,6 +118,11 @@ const emptyMessage = computed(() => {
   const current = stats.value
   if (!current || current.total > 0) {
     return ''
+  }
+  if (current.stored_total === undefined) {
+    // The relay could not count what it holds, so this says nothing about it
+    // rather than guessing at zero.
+    return 'No events in this range.'
   }
   return current.stored_total > 0
     ? `No events in this range. The relay holds ${formatCount(current.stored_total)} in total — try a longer range.`
@@ -185,17 +207,17 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 class="font-display text-lg font-semibold">
-                Events received
+                Events by timestamp
               </h2>
               <p class="text-sm text-(--ui-text-muted)">
                 <template v-if="phase === 'ready' && stats">
                   <span class="nf-tabular">{{ formatCount(stats.total) }}</span> in this range,
-                  by {{ appliedBucket }}<template v-if="coarsened">
+                  by {{ appliedBucket }}, {{ clockLabel }}<template v-if="coarsened">
                     — coarsened from {{ range.bucket }} to keep the chart readable
                   </template>.
                 </template>
                 <template v-else>
-                  Stored events over time, as the relay counts them.
+                  Stored events over time, by the timestamp each event carries.
                 </template>
               </p>
             </div>
@@ -219,6 +241,8 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
           v-if="phase === 'ready' && stats && stats.total > 0"
           :points="points"
           :bucket="stats.bucket"
+          :offset-seconds="stats.utc_offset_minutes * 60"
+          :clock-label="clockLabel"
         />
         <p
           v-else

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
+  RANGE_PRESETS,
   fillPeriods,
   formatCount,
+  offsetLabel,
   periodLabel,
   rankKinds
 } from '../shared/utils/event-stats'
@@ -35,6 +37,37 @@ describe('fillPeriods', () => {
       '2026-01-01', '2026-02-01', '2026-03-01', '2026-04-01'
     ])
     expect(points.map(p => p.count)).toEqual([1, 0, 0, 3])
+  })
+
+  // Found in review of nostrfi/relay#29: the relay's month starts are shifted
+  // by the operator's offset, so stepping in UTC produced keys that never
+  // match and every real monthly count rendered as zero.
+  it('steps months in the same clock the relay bucketed in', () => {
+    const offset = 2 * 3600 // UTC+2
+    const march = Date.UTC(2026, 2, 1) / 1000 - offset
+    const april = Date.UTC(2026, 3, 1) / 1000 - offset
+
+    const points = fillPeriods(
+      [{ start: march, count: 5 }, { start: april, count: 9 }],
+      'month',
+      march,
+      april,
+      offset
+    )
+    expect(points.map(p => p.count)).toEqual([5, 9])
+  })
+
+  // Also from that review: starting at the first returned period turned a
+  // seven-day range whose activity is all today into a one-day chart.
+  it('starts at the range boundary, not at the first event', () => {
+    const points = fillPeriods(
+      [{ start: utc('2026-03-16T00:00:00Z'), count: 3 }],
+      'day',
+      utc('2026-03-10T00:00:00Z'),
+      utc('2026-03-16T00:00:00Z')
+    )
+    expect(points).toHaveLength(7)
+    expect(points.map(p => p.count)).toEqual([0, 0, 0, 0, 0, 0, 3])
   })
 
   it('draws an axis of zeroes when the relay returned nothing at all', () => {
@@ -89,11 +122,46 @@ describe('rankKinds', () => {
   })
 })
 
+describe('range presets', () => {
+  it('gives the 12-month preset exactly twelve calendar buckets', () => {
+    // A rolling 365 days crosses thirteen month boundaries unless it starts
+    // on the first of a month, so the control would draw thirteen bars.
+    const preset = RANGE_PRESETS.find(p => p.label === '12 months')!
+    const until = Math.floor(Date.parse('2026-08-19T13:45:00Z') / 1000)
+    const points = fillPeriods([], 'month', preset.since(until, 0), until, 0)
+    expect(points).toHaveLength(12)
+  })
+
+  it('starts the monthly preset on a month boundary in the operator\'s clock', () => {
+    const preset = RANGE_PRESETS.find(p => p.label === '12 months')!
+    const offset = 5.5 * 3600 // UTC+5:30
+    const since = preset.since(Math.floor(Date.parse('2026-08-19T13:45:00Z') / 1000), offset)
+    const local = new Date((since + offset) * 1000)
+    expect(local.getUTCDate()).toBe(1)
+    expect(local.getUTCHours()).toBe(0)
+  })
+})
+
 describe('labels', () => {
   it('shows the precision the granularity calls for', () => {
     const at = utc('2026-03-10T14:00:00Z')
     expect(periodLabel(at, 'month')).toMatch(/2026/)
     expect(periodLabel(at, 'day')).not.toMatch(/:/)
+  })
+
+  // A label rendered in the browser's local calendar while the bars were
+  // bucketed at a fixed offset names the wrong day whenever the two differ,
+  // which is every range crossing a daylight-saving change.
+  it('renders in the clock the bars were bucketed in, not the browser\'s', () => {
+    const midnightAtPlusTwo = Date.UTC(2026, 0, 15) / 1000 - 2 * 3600
+    expect(periodLabel(midnightAtPlusTwo, 'day', 2 * 3600)).toBe('15 Jan')
+    expect(periodLabel(midnightAtPlusTwo, 'hour', 2 * 3600)).toBe('00:00')
+  })
+
+  it('names the clock it used', () => {
+    expect(offsetLabel(0)).toBe('UTC')
+    expect(offsetLabel(2 * 3600)).toBe('UTC+02:00')
+    expect(offsetLabel(-5.5 * 3600)).toBe('UTC−05:30')
   })
 
   it('separates thousands so counts compare down a column', () => {
