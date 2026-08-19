@@ -53,6 +53,20 @@ export default defineNuxtConfig({
 
   compatibilityDate: '2026-08-17',
 
+  vite: {
+    optimizeDeps: {
+      // @unovis/ts imports striptags — a CommonJS package with no ESM build —
+      // as an ES default import. Vite's dev server serves dependencies
+      // unbundled, so the browser gets `module does not provide an export
+      // named 'default'` and the chart module never loads: the page renders
+      // server-side and then breaks on hydration, which is a failure only a
+      // browser sees (nostrfi/workspace#52). Pre-bundling converts it to ESM.
+      // The nested form, because pnpm's strict layout does not hoist
+      // striptags to somewhere a bare specifier could resolve from here.
+      include: ['@unovis/vue', '@unovis/ts', '@unovis/ts > striptags']
+    }
+  },
+
   eslint: {
     config: {
       stylistic: {

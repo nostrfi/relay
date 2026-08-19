@@ -200,7 +200,7 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
               </p>
             </div>
 
-            <UButtonGroup size="xs">
+            <UFieldGroup size="xs">
               <UButton
                 v-for="(preset, index) in RANGE_PRESETS"
                 :key="preset.label"
@@ -211,7 +211,7 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
               >
                 {{ preset.label }}
               </UButton>
-            </UButtonGroup>
+            </UFieldGroup>
           </div>
         </template>
 
