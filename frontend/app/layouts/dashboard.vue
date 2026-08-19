@@ -22,6 +22,7 @@ const links = [
   { label: 'Overview', icon: 'i-lucide-layout-dashboard', to: '/dashboard' },
   { label: 'Events', icon: 'i-lucide-list', to: '/dashboard/events' },
   { label: 'Moderation', icon: 'i-lucide-shield-ban', to: '/dashboard/moderation' },
+  { label: 'Metrics', icon: 'i-lucide-activity', to: '/dashboard/metrics' },
   { label: 'Configuration', icon: 'i-lucide-settings', to: '/dashboard/configuration' }
 ]
 
