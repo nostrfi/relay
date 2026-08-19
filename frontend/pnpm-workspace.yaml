@@ -2,5 +2,11 @@ allowBuilds:
   '@parcel/watcher': false
   '@tailwindcss/oxide': false
   esbuild: false
+  # Unovis pulls maplibre-gl for its map charts. The dashboard is expected to
+  # grow richer chart types — metrics in #39 — which is part of why Unovis is
+  # here at all; this entry restricts none of that. It refuses exactly one
+  # thing: a map renderer executing an install script in this build
+  # (nostrfi/workspace#52).
+  maplibre-gl: false
   unrs-resolver: false
   vue-demi: false

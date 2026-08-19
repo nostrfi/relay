@@ -43,6 +43,7 @@ func WithAdminAPI(cfg Config) MuxOption {
 func WithEventsAPI(cfg Config, events application.EventService) MuxOption {
 	return func(mux *http.ServeMux) {
 		mux.HandleFunc("POST /api/events/query", newEventsQueryHandler(cfg, events))
+		mux.HandleFunc("POST /api/events/stats", newEventStatsHandler(cfg, events))
 	}
 }
 

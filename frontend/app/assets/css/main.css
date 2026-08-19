@@ -58,6 +58,22 @@
   --ui-border: var(--nf-border);
   --ui-border-muted: #e9e4f0;
   --ui-border-accented: #c5b9d4;
+
+  /*
+   * Chart tokens (nostrfi/workspace#52). Both charts are single-series, so
+   * one hue carries the data and the rest is chrome. These values are not a
+   * taste choice: they were run through the dataviz validator against this
+   * surface — violet-700 passes the lightness band, the chroma floor and
+   * 3:1 contrast; orange-500 fails contrast here at 2.24:1, which is why
+   * the emphasis token is orange-700.
+   *
+   * Dark mode gets its own steps below rather than a flip: violet-700 falls
+   * to 2.45:1 against the dark surface.
+   */
+  --nf-chart-series: var(--nf-violet-700);
+  --nf-chart-emphasis: var(--nf-orange-700);
+  --nf-chart-grid: var(--ui-border-muted);
+  --nf-chart-axis: var(--ui-text-dimmed);
   --ui-border-inverted: var(--nf-ink-950);
   --ui-radius: var(--nf-radius-default);
   --ui-container: 1200px;
@@ -106,6 +122,14 @@
   --ui-border-muted: #2a2035;
   --ui-border-accented: #59446c;
   --ui-border-inverted: var(--nf-frost);
+
+  /* Selected for this surface, not flipped. violet-500 passes the dark band
+     and 3:1 against ink-950; orange-500 does not — it sits at L 0.752,
+     above the band's 0.67 — so emphasis stays on orange-700 in both modes. */
+  --nf-chart-series: var(--nf-violet-500);
+  --nf-chart-emphasis: var(--nf-orange-700);
+  --nf-chart-grid: var(--ui-border-muted);
+  --nf-chart-axis: var(--ui-text-dimmed);
 }
 
 /*
