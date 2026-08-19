@@ -413,6 +413,28 @@ so the relay authorizes every call exactly as it would from `nak` or curl.
 Because each call carries its own signature, the page needs the operator's signer present, not just
 a dashboard session. With the signer unavailable the page says so rather than showing an empty list.
 
+### Admin dashboard metrics
+
+The dashboard reads the relay's `/metrics` endpoint through its own server and renders it on
+`/admin/dashboard/metrics`, with a summary strip on the overview. Unlike every other relay call the
+dashboard makes, this one carries **no NIP-98 signature**: the relay serves `/metrics` to any
+caller, the dashboard's server reads it over the internal network, and the operator is authenticated
+by their dashboard session. That is what makes a live view possible — a signed endpoint would cost
+one signer prompt per poll.
+
+Three things to know when reading it:
+
+- **There is no metrics store.** Rates are differences between samples the page itself has taken, so
+  the window starts when the page opens and is gone when it closes. Point Prometheus at the same
+  endpoint for real history.
+- **Sampling pauses when the tab is hidden**, and the page says so, along with the age of the last
+  sample — a poller that has stopped otherwise looks exactly like a quiet relay.
+- **Counters reset when the relay restarts.** A counter going backwards is shown as `restarted`
+  rather than as a rate, and the sparkline breaks rather than drawing a line through the gap.
+
+Query-latency `p50` and `p95` are estimated from the histogram buckets by interpolation, exactly as
+`histogram_quantile` does; the mean shown beside them is exact.
+
 ### Admin dashboard sign-in
 
 `/admin` itself is public: it renders the relay's NIP-11 information, the same document the relay

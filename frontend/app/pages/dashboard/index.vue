@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { npubEncode } from 'nostr-tools/nip19'
 import type { EventStatsResponse, StatsBucket } from '~~/shared/types/event-stats'
 import type { QueryPhase } from '~~/shared/utils/event-query'
 import {
@@ -18,14 +17,12 @@ useSeoMeta({ title: 'Overview' })
 // is the shell it renders in; no page under /dashboard opts out of the guard.
 definePageMeta({ layout: 'dashboard' })
 
-const { state } = useAdminSession()
-const { data: relay } = await useFetch('/api/relay-info')
 const { fetchStats } = useEventStats()
 
-const npub = computed(() => {
-  const pubkey = state.value?.pubkey
-  return pubkey ? npubEncode(pubkey) : null
-})
+// Live operational figures beside the stored-event charts: what the relay is
+// doing now, against what it holds. The detail — rates, rejections, latency —
+// is its own page (nostrfi/workspace#39).
+const { latest: metrics, ready, paused } = useRelayMetrics()
 
 const stats = ref<EventStatsResponse | null>(null)
 const phase = ref<QueryPhase>('idle')
@@ -154,7 +151,13 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
     </template>
 
     <template #body>
-     <div
+      <MetricsMetricTiles
+        :snapshot="metrics"
+        :ready="ready"
+        :paused="paused"
+      />
+
+      <div
         v-if="error"
         class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
         role="alert"
