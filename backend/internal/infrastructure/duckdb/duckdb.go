@@ -39,6 +39,21 @@ func NewRepository(path string) (*Repository, error) {
 	return &Repository{db: db}, nil
 }
 
+// CountEvents returns how many events the database holds, expired and banned
+// ones included: this is what is on disk, not what a query would serve.
+//
+// Used at startup so the relay says which database it opened and what is in
+// it. An operator whose dashboard shows nothing needs to tell "the relay has
+// no such events" apart from "the relay is reading a different file than the
+// one I filled" — and nothing said which (nostrfi/workspace#49).
+func (r *Repository) CountEvents(ctx context.Context) (int64, error) {
+	var count int64
+	if err := r.db.QueryRowContext(ctx, "SELECT count(*) FROM events").Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // SaveEvent unwraps ev to the raw *nostr.Event the transactional save logic
 // below operates on. That logic runs entirely inside one transaction: every
 // branch that deletes or replaces an event also removes that event's tag
