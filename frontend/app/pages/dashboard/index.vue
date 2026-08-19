@@ -154,18 +154,7 @@ const coarsened = computed(() => appliedBucket.value !== null && appliedBucket.v
     </template>
 
     <template #body>
-      <!--
-        Identity as one line rather than a card of NIP-11 fields: the
-        configuration page shows them in full, and repeating them here was
-        most of what made this page worth replacing (nostrfi/workspace#50).
-      -->
-      <p class="mb-6 text-sm text-(--ui-text-muted)">
-        <span class="font-medium text-(--ui-text)">{{ relay?.name || 'Nostrfi Relay' }}</span>
-        <span v-if="relay?.version"> · <span class="nf-tabular">{{ relay.version }}</span></span>
-        <span v-if="npub"> · signed in as <span class="font-mono">{{ npub.slice(0, 12) }}…</span></span>
-      </p>
-
-      <div
+     <div
         v-if="error"
         class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
         role="alert"
