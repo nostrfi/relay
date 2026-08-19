@@ -18,6 +18,7 @@ type EventService interface {
 	QueryEvents(ctx context.Context, filter nostr.Filter) ([]*event.Event, error)
 	QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error)
 	QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error)
+	CountEvents(ctx context.Context) (int64, error)
 }
 
 type eventService struct {
@@ -44,4 +45,8 @@ func (s *eventService) QueryEventsSorted(ctx context.Context, filter nostr.Filte
 
 func (s *eventService) QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error) {
 	return s.repo.QueryEventsMatching(ctx, query)
+}
+
+func (s *eventService) CountEvents(ctx context.Context) (int64, error) {
+	return s.repo.CountEvents(ctx)
 }

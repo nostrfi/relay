@@ -32,6 +32,10 @@ type Repository interface {
 	// QueryEventsMatching is QueryEvents with Query's extra dimension, in
 	// the same newest-first order.
 	QueryEventsMatching(ctx context.Context, query Query) ([]*Event, error)
+	// CountEvents is how many events are stored, including ones no query
+	// would serve. It answers "is this the database I filled", which a
+	// filtered count cannot.
+	CountEvents(ctx context.Context) (int64, error)
 	PurgeExpired(ctx context.Context) (int64, error)
 	Checkpoint(ctx context.Context) error
 	Ping(ctx context.Context) error

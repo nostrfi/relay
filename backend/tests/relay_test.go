@@ -3854,6 +3854,40 @@ func TestEventsQueryAPIFilters(t *testing.T) {
 	})
 }
 
+// TestEventsQueryAPIEmptyAnswerNamesTheDatabase covers the case a bug report
+// could not diagnose (nostrfi/workspace#49): an empty answer that might mean
+// "nothing matched" or "this is not the database you filled". The response
+// itself stays the same either way — the relay's log is where the difference
+// is recorded, so the two calls below differ only in what they leave behind.
+func TestEventsQueryAPIEmptyAnswerNamesTheDatabase(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	cfg := ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	}
+
+	t.Run("an empty database answers with no events", func(t *testing.T) {
+		server, _ := startTestRelayWithOperatorAPIs(t, cfg)
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"kinds": []int{1}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Empty(t, eventIDs(t, out))
+	})
+
+	t.Run("a populated database answers the same way when nothing matches", func(t *testing.T) {
+		server, repo := startTestRelayWithOperatorAPIs(t, cfg)
+		seedEvent(t, repo, operatorSk, &nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "stored"})
+
+		matched, status := callEventsAPI(t, server, operatorSk, map[string]any{"kinds": []int{1}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Len(t, eventIDs(t, matched), 1, "a kind-1 query must find the stored kind-1 event")
+
+		unmatched, status := callEventsAPI(t, server, operatorSk, map[string]any{"kinds": []int{30023}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Empty(t, eventIDs(t, unmatched))
+	})
+}
+
 // TestEventsQueryAPILimitAndPaging covers the two bounds the acceptance
 // criteria ask for: no unbounded scan reaches the UI, and paging terminates.
 func TestEventsQueryAPILimitAndPaging(t *testing.T) {
