@@ -101,13 +101,6 @@ const windowLabel = computed(() => {
     </template>
 
     <template #body>
-      <p class="mb-6 max-w-3xl text-(--ui-text-muted)">
-        Live from the relay's Prometheus endpoint, sampled every 5 seconds while this tab is
-        visible. There is no metrics store behind this: rates are differences between the samples
-        this page has taken, so the window starts when the page opens and is gone when it closes.
-        For real history, point Prometheus at the same endpoint.
-      </p>
-
       <div
         v-if="error"
         class="mb-6 rounded-(--ui-radius) border border-(--ui-error) px-4 py-3 text-sm text-(--ui-error)"
