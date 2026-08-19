@@ -2,5 +2,10 @@ allowBuilds:
   '@parcel/watcher': false
   '@tailwindcss/oxide': false
   esbuild: false
+  # Unovis pulls maplibre-gl for chart types this dashboard does not use.
+  # Its install script is refused rather than approved: a mapping library's
+  # postinstall has no business running in an operator dashboard's build
+  # (nostrfi/workspace#52).
+  maplibre-gl: false
   unrs-resolver: false
   vue-demi: false

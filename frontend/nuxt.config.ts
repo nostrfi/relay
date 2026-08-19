@@ -38,6 +38,11 @@ export default defineNuxtConfig({
     adminPubkey: process.env.NUXT_ADMIN_PUBKEY || ''
   },
 
+  // Unovis ships untranspiled ESM that Nitro will not consume as-is.
+  build: {
+    transpile: ['@unovis/vue', '@unovis/ts']
+  },
+
   // The private pages moved under /dashboard when they gained the shared
   // dashboard shell (nostrfi/workspace#47). Bookmarks of the old paths still
   // land rather than 404.
