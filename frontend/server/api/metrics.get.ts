@@ -5,10 +5,12 @@ import type { MetricsResponse } from '~~/shared/types/metrics'
  * Reads the relay's Prometheus metrics for the dashboard.
  *
  * Unlike every other relay call here, this carries no NIP-98 signature — and
- * that is what makes a live view possible at all. The relay serves /metrics
- * to anyone, this server reaches it over the internal network, and the
- * operator is already authenticated by session. A signed endpoint would cost
- * one signer prompt per poll (nostrfi/workspace#39).
+ * that is what makes a live view possible at all. What stands in for one is
+ * the address: /metrics is served on its own listener, bound to loopback by
+ * default and never published by the deployment, so reaching it at all means
+ * being inside the network (nostrfi/workspace#53). This server is; the
+ * operator driving it is authenticated by session. A signed endpoint would
+ * cost one signer prompt per poll (nostrfi/workspace#39).
  *
  * The text is parsed here rather than in the browser: the page then receives
  * the handful of numbers it draws instead of a few kilobytes of exposition
@@ -19,13 +21,16 @@ const RELAY_METRICS_TIMEOUT_MS = 5_000
 export default defineEventHandler(async (event): Promise<MetricsResponse> => {
   await requireAdminSession(event)
 
-  const { relayApiBase } = useRuntimeConfig(event)
+  const { relayApiBase, relayMetricsBase } = useRuntimeConfig(event)
   const base = relayApiBase.replace(/\/$/, '')
+  // Metrics and readiness live on different listeners now, so they are read
+  // from different bases: the relay's own port still answers /readyz.
+  const metricsBase = relayMetricsBase.replace(/\/$/, '')
 
   let text: string
   let sampledAt: number
   try {
-    const response = await fetch(`${base}/metrics`, { signal: AbortSignal.timeout(RELAY_METRICS_TIMEOUT_MS) })
+    const response = await fetch(`${metricsBase}/metrics`, { signal: AbortSignal.timeout(RELAY_METRICS_TIMEOUT_MS) })
     if (!response.ok) {
       throw createError({
         statusCode: 502,
@@ -77,7 +82,7 @@ export default defineEventHandler(async (event): Promise<MetricsResponse> => {
   // hostname in a Compose deployment, and AGENTS.md keeps that off the
   // client. The server log is where a surprising number gets traced to a
   // host, and it already carries it.
-  console.info(`metrics read: relay=${base}/metrics ready=${ready} series=${lines.length}`)
+  console.info(`metrics read: relay=${metricsBase}/metrics ready=${ready} series=${lines.length}`)
 
   return {
     snapshot: toSnapshot(lines, sampledAt),

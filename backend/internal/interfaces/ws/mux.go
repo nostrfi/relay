@@ -47,20 +47,45 @@ func WithEventsAPI(cfg Config, events application.EventService) MuxOption {
 	}
 }
 
-// NewMux routes /healthz, /readyz, and /metrics alongside relayHandler,
-// which continues to handle every other path (NIP-11, WebSocket upgrades)
-// exactly as before. Kept in this package rather than assembled inline in
-// cmd/relay/main.go so tests/relay_test.go — which cannot import a main
-// package — can exercise the exact routing used in production.
+// NewMux routes /healthz and /readyz alongside relayHandler, which continues
+// to handle every other path (NIP-11, WebSocket upgrades) exactly as before.
+// Kept in this package rather than assembled inline in cmd/relay/main.go so
+// tests/relay_test.go — which cannot import a main package — can exercise
+// the exact routing used in production.
+//
+// /metrics is deliberately absent: it lives on the separate listener built
+// by NewMetricsMux (nostrfi/workspace#53). Liveness and readiness stay here
+// because they disclose nothing an operator would mind a stranger knowing,
+// and a load balancer has to reach them on the port it already routes to.
 func NewMux(relayHandler http.Handler, ping func(context.Context) error, opts ...MuxOption) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
 	mux.HandleFunc("/readyz", readyz(ping))
-	mux.Handle("/metrics", promhttp.Handler())
 	mux.Handle("/", relayHandler)
 	for _, opt := range opts {
 		opt(mux)
 	}
+	return mux
+}
+
+// NewMetricsMux serves /metrics, and only /metrics, for the listener bound
+// to Config.Server.MetricsListenAddr. Nothing else is registered on it: the
+// point of the second listener is that reaching it is already a statement
+// about where the caller sits on the network, so anything reachable there
+// should be worth that.
+//
+// It serves the default registry, Go runtime and process collectors
+// included. Those were the most disclosing part of the old public endpoint —
+// go_info names the exact build — and they are worth keeping now that
+// reading them means being inside the deployment: the dashboard's uptime
+// comes from process_start_time_seconds.
+//
+// Kept beside NewMux for the same reason NewMux is here at all: the tests
+// cannot import cmd/relay, and metrics assertions should exercise the
+// routing production actually uses.
+func NewMetricsMux() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
 	return mux
 }
 

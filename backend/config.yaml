@@ -42,6 +42,12 @@ retention:
 
 server:
   listen_addr: ":8080"
+  # /metrics is served here and nowhere else. Loopback by default: the
+  # exposition describes this host, and the public listener above is not the
+  # place for it. A scraper elsewhere on the network needs this changed and
+  # the port reached deliberately — docker-compose.yml sets it via
+  # RELAY_METRICS_LISTEN_ADDR without publishing the port.
+  metrics_listen_addr: "127.0.0.1:2112"
   shutdown_timeout_seconds: 5
 
 storage:

@@ -65,6 +65,7 @@ type RetentionView struct {
 
 type ServerView struct {
 	ListenAddr             string `json:"listen_addr"`
+	MetricsListenAddr      string `json:"metrics_listen_addr"`
 	ShutdownTimeoutSeconds int    `json:"shutdown_timeout_seconds"`
 }
 
@@ -104,6 +105,7 @@ func NewConfigSnapshot(cfg Config) ConfigSnapshot {
 		},
 		Server: ServerView{
 			ListenAddr:             cfg.Server.ListenAddr,
+			MetricsListenAddr:      cfg.Server.MetricsListenAddr,
 			ShutdownTimeoutSeconds: cfg.Server.ShutdownTimeoutSeconds,
 		},
 		Storage: StorageView{

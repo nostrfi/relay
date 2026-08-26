@@ -95,6 +95,10 @@ export function configSections(config: RelayConfig): ConfigSection[] {
       title: 'Listener',
       rows: [
         { label: 'Listen address', value: formatText(config.server.listen_addr), mono: true },
+        // Where a scrape has to come from. Shown because the answer to "why
+        // is Prometheus getting connection refused" is usually this line
+        // saying loopback (nostrfi/workspace#53).
+        { label: 'Metrics address', value: formatText(config.server.metrics_listen_addr), mono: true },
         { label: 'Shutdown timeout', value: formatSeconds(config.server.shutdown_timeout_seconds), tabular: true }
       ]
     },

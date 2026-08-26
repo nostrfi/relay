@@ -25,6 +25,13 @@ localhost {
 
 	# Everything else (WebSocket upgrades, NIP-11, NIP-86 management,
 	# health/readiness) stays on the relay, unchanged.
+	#
+	# /metrics is not among them and needs no rule here: the relay serves it
+	# on a separate listener that this block never proxies to
+	# (nostrfi/workspace#53). A `handle /metrics` returning 404 would be
+	# belt-and-braces today and a trap later, silently swallowing the scrapes
+	# of an operator who deliberately moved the endpoint back onto :8080
+	# behind an authenticating proxy.
 	handle {
 		reverse_proxy relay:8080
 	}

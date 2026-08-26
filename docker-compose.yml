@@ -9,6 +9,9 @@ services:
     image: ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}
     container_name: nostrfi-relay
     restart: unless-stopped
+    # 8080 only. The metrics listener (2112, below) is deliberately absent:
+    # it is reachable from the Compose network — the dashboard and any
+    # scraper you attach to it — and from nowhere else.
     ports:
       - "8080:8080"
     volumes:
@@ -18,6 +21,12 @@ services:
       - ./backend/config.yaml:/app/config.yaml:ro
     environment:
       - LOG_LEVEL=info
+      # config.yaml binds /metrics to loopback, which inside a container
+      # means this container alone — and the dashboard is a different one.
+      # Bound to the container's network instead, still unpublished, so
+      # "internal" is enforced by the missing port mapping above rather than
+      # by the bind address (nostrfi/workspace#53).
+      - RELAY_METRICS_LISTEN_ADDR=:2112
     healthcheck:
       test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/readyz"]
       interval: 15s
@@ -41,6 +50,9 @@ services:
     # network access for local debugging.
     environment:
       - NUXT_RELAY_API_BASE=http://relay:8080
+      # The metrics listener is a second address, so the dashboard is told
+      # both. Same host, different port; the browser sees neither.
+      - NUXT_RELAY_METRICS_BASE=http://relay:2112
       # Seals the admin session cookie. Required — the dashboard refuses to
       # open a session without it, rather than falling back to a known
       # secret. Generate one per deployment: `openssl rand -base64 48`.

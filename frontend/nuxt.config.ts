@@ -25,6 +25,14 @@ export default defineNuxtConfig({
     // proxies relay calls through server/api/* routes.
     relayApiBase: process.env.NUXT_RELAY_API_BASE || 'http://localhost:8080',
 
+    // Server-only: where the relay serves /metrics, which is a different
+    // listener from the one above and deliberately not reachable from the
+    // public internet (nostrfi/workspace#53). Separate from relayApiBase
+    // because the two are different addresses, and the default matches the
+    // relay's own default so `pnpm dev` against a local relay needs no
+    // configuration.
+    relayMetricsBase: process.env.NUXT_RELAY_METRICS_BASE || 'http://localhost:2112',
+
     // Server-only: seals the admin session cookie. There is deliberately no
     // fallback value — server/utils/session.ts fails closed when this is
     // unset or too short, rather than sealing sessions with a known secret.

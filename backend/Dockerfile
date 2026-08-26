@@ -40,5 +40,8 @@ COPY config.yaml /app/config.yaml
 RUN mkdir -p /app/db
 
 EXPOSE 8080
+# The metrics listener. Documentation only — EXPOSE publishes nothing, and
+# docker-compose.yml deliberately leaves this port off the host.
+EXPOSE 2112
 
 ENTRYPOINT ["/app/relay"]
