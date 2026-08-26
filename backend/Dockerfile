@@ -40,8 +40,10 @@ COPY config.yaml /app/config.yaml
 RUN mkdir -p /app/db
 
 EXPOSE 8080
-# The metrics listener. Documentation only — EXPOSE publishes nothing, and
-# docker-compose.yml deliberately leaves this port off the host.
-EXPOSE 2112
+# The metrics listener (2112) is deliberately NOT exposed. `docker run -P`
+# publishes every exposed port to a random host port, which would put the
+# unauthenticated metrics endpoint on the host — the exact accident
+# nostrfi/workspace#53 closed. Containers on the same network reach it
+# without this, which is how docker-compose.yml and the dashboard use it.
 
 ENTRYPOINT ["/app/relay"]
