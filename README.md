@@ -175,8 +175,11 @@ The endpoint serves the default registry, so the Go runtime and process collecto
 relay's own series: `go_info` (the exact Go build), `go_goroutines`, `process_open_fds`,
 `process_resident_memory_bytes`, `process_start_time_seconds`, and the rest. Those, together with
 the relay's traffic shape and connection count, are why the endpoint is not public
-(nostrfi/workspace#53) — and they are worth keeping for whoever can reach it: the dashboard's
-uptime is `process_start_time_seconds`.
+(nostrfi/workspace#53) — and they are worth keeping for whoever can reach it. One is load-bearing:
+the dashboard reads `process_start_time_seconds` to notice the relay restarted between two samples
+and mark the affected counters `restarted`, rather than dividing across the gap and reporting a new
+process's whole count as one interval's traffic. It is a start timestamp, not an elapsed time — a
+Prometheus panel wanting uptime needs `time() - process_start_time_seconds`.
 
 The relay's own metrics:
 

@@ -77,8 +77,10 @@ func NewMux(relayHandler http.Handler, ping func(context.Context) error, opts ..
 // It serves the default registry, Go runtime and process collectors
 // included. Those were the most disclosing part of the old public endpoint —
 // go_info names the exact build — and they are worth keeping now that
-// reading them means being inside the deployment: the dashboard's uptime
-// comes from process_start_time_seconds.
+// reading them means being inside the deployment. One is load-bearing: the
+// dashboard reads process_start_time_seconds to tell a restart from a rate,
+// so that a counter reset is shown as one instead of being divided across
+// the gap.
 //
 // Kept beside NewMux for the same reason NewMux is here at all: the tests
 // cannot import cmd/relay, and metrics assertions should exercise the
