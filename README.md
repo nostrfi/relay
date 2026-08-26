@@ -138,14 +138,19 @@ so in a second warning at startup, and tells the caller as much in its `401`.
 
 ```yaml
 server:
-  listen_addr: ":8080"             # HTTP/WebSocket listener address
-  shutdown_timeout_seconds: 5      # graceful-shutdown deadline
+  listen_addr: ":8080"                     # HTTP/WebSocket listener address
+  metrics_listen_addr: "127.0.0.1:2112"    # separate /metrics listener — see "Metrics"
+  shutdown_timeout_seconds: 5              # graceful-shutdown deadline
 
 storage:
-  db_path: "db/relay.db"           # shared by normal startup and the -backup/-restore flags
+  db_path: "db/relay.db"                   # shared by normal startup and the -backup/-restore flags
 ```
 
-All three settings default to the values shown above when unset. `storage.db_path` is read by
+All four settings default to the values shown above when unset. `metrics_listen_addr` may also be
+set with the `RELAY_METRICS_LISTEN_ADDR` environment variable, which overrides the file — that is
+how `docker-compose.yml` gives the container a non-loopback bind without shipping it a second
+config. It must differ from `listen_addr`; the relay refuses to start if the two name the same
+address, rather than leaving the two listeners to race for the port. `storage.db_path` is read by
 `-backup`/`-restore` too, not just normal startup — see "Backup and restore" below.
 
 A **relative** `db_path` is relative to the configuration file that set it, so the database sits
@@ -160,7 +165,23 @@ path to put it anywhere else.
 
 ### Metrics
 
-`/metrics` exposes Prometheus-format metrics (`github.com/prometheus/client_golang`):
+`/metrics` exposes Prometheus-format metrics (`github.com/prometheus/client_golang`) on **its own
+listener** — `server.metrics_listen_addr`, `127.0.0.1:2112` by default — and not on the public
+`listen_addr`. Reaching it is therefore a statement about where the caller sits: loopback, or
+whatever internal address the deployment binds. Nothing is published to the host by
+`docker-compose.yml`.
+
+The endpoint serves the default registry, so the Go runtime and process collectors come with the
+relay's own series: `go_info` (the exact Go build), `go_goroutines`, `process_open_fds`,
+`process_resident_memory_bytes`, `process_start_time_seconds`, and the rest. Those, together with
+the relay's traffic shape and connection count, are why the endpoint is not public
+(nostrfi/workspace#53) — and they are worth keeping for whoever can reach it. One is load-bearing:
+the dashboard reads `process_start_time_seconds` to notice the relay restarted between two samples
+and mark the affected counters `restarted`, rather than dividing across the gap and reporting a new
+process's whole count as one interval's traffic. It is a start timestamp, not an elapsed time — a
+Prometheus panel wanting uptime needs `time() - process_start_time_seconds`.
+
+The relay's own metrics:
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
@@ -417,10 +438,16 @@ a dashboard session. With the signer unavailable the page says so rather than sh
 
 The dashboard reads the relay's `/metrics` endpoint through its own server and renders it on
 `/admin/dashboard/metrics`, with a summary strip on the overview. Unlike every other relay call the
-dashboard makes, this one carries **no NIP-98 signature**: the relay serves `/metrics` to any
-caller, the dashboard's server reads it over the internal network, and the operator is authenticated
-by their dashboard session. That is what makes a live view possible — a signed endpoint would cost
-one signer prompt per poll.
+dashboard makes, this one carries **no NIP-98 signature**: what stands in for one is the address.
+`/metrics` is served on the relay's separate metrics listener, which the deployment does not
+publish, so the dashboard's server can read it over the internal network and nobody outside can —
+and the operator driving it is authenticated by their dashboard session. That is what makes a live
+view possible; a signed endpoint would cost one signer prompt per poll.
+
+The dashboard is told where that listener is with `NUXT_RELAY_METRICS_BASE` (default
+`http://localhost:2112`, matching the relay's own default). `docker-compose.yml` sets it to
+`http://relay:2112`. Point it at whatever `server.metrics_listen_addr` names; the relay's API base
+(`NUXT_RELAY_API_BASE`) is still where `/readyz` is read from, and stays on `:8080`.
 
 Three things to know when reading it:
 
@@ -528,6 +555,28 @@ curl https://localhost:8443/admin                                  # admin dashb
 ```
 
 The bundled `Caddyfile` uses `tls internal` (Caddy issues itself a locally-trusted certificate) so this works out of the box with no domain or DNS setup — exactly what's exercised above. For an internet-facing deployment: replace `localhost` in the `Caddyfile` with your real domain and delete the `tls internal` line; Caddy then obtains and renews a real Let's Encrypt certificate automatically via ACME, no other configuration changes needed. Port `8443` is used above because this was verified in a rootless-container environment that can't bind privileged host ports without extra host configuration — on a host that can, map `443:443` (and `80:80` for the ACME HTTP challenge) instead.
+
+### Scraping metrics
+
+`/metrics` is not on the public port and is not published to the host (see "Metrics"). A scraper
+reaches it by being somewhere the listener is bound:
+
+- **Compose.** The relay binds `:2112` inside the container (`RELAY_METRICS_LISTEN_ADDR` in
+  `docker-compose.yml`) and the port is left out of `ports:`, so it is reachable from the Compose
+  network and nowhere else. Attach Prometheus to that network and scrape `relay:2112`; the
+  dashboard already reads it the same way. Adding `- "127.0.0.1:2112:2112"` to `ports:` exposes it
+  to the host only, which is enough for a Prometheus running there — do that deliberately, and
+  never bind it to `0.0.0.0`.
+- **A binary on a host.** The default `127.0.0.1:2112` is already right for a node-local
+  Prometheus. For a scraper elsewhere, bind the relay's metrics listener to an interface that
+  scraper can reach and firewall it — the endpoint has no authentication, and its
+  contents describe the host.
+
+```sh
+docker compose up -d
+docker compose exec relay wget -qO- http://127.0.0.1:2112/metrics   # inside the deployment: served
+curl -s localhost:8080/metrics                                      # from outside: not served
+```
 
 ### Rollback
 

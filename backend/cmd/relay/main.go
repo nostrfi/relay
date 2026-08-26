@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -73,6 +74,15 @@ func main() {
 		Handler: ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(*cfg), ws.WithEventsAPI(*cfg, eventService)),
 	}
 
+	// The metrics listener is a second server rather than another route on
+	// the first, because the address is the access control: /metrics is
+	// readable by whoever can reach cfg.Server.MetricsListenAddr, which
+	// defaults to loopback (nostrfi/workspace#53).
+	metricsServer := &http.Server{
+		Addr:    cfg.Server.MetricsListenAddr,
+		Handler: ws.NewMetricsMux(),
+	}
+
 	// 6a. Start the background maintenance worker (expired-event purge and
 	// checkpoint), stopped alongside the server on shutdown.
 	maintenanceCtx, stopMaintenance := context.WithCancel(context.Background())
@@ -91,6 +101,18 @@ func main() {
 		}
 	}()
 
+	// Fatal on failure, like the listener above: a relay that came up
+	// without its metrics listener looks healthy and answers every scrape
+	// with a connection refused, which is a misconfiguration best found at
+	// startup rather than from a gap in a graph.
+	go func() {
+		slog.Info("Starting metrics listener", "metrics_listen_addr", cfg.Server.MetricsListenAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("failed to start metrics listener", "error", err, "metrics_listen_addr", cfg.Server.MetricsListenAddr)
+			os.Exit(1)
+		}
+	}()
+
 	// 7. Wait for termination signal
 	<-done
 	slog.Info("Shutting down relay...")
@@ -103,6 +125,12 @@ func main() {
 
 	if err := server.Shutdown(ctx); err != nil {
 		slog.Error("Server forced to shutdown", "error", err)
+	}
+
+	// Same deadline as the relay's: the two share the context, and metrics
+	// has nothing to drain.
+	if err := metricsServer.Shutdown(ctx); err != nil {
+		slog.Error("Metrics listener forced to shutdown", "error", err)
 	}
 
 	if err := repo.Close(); err != nil {

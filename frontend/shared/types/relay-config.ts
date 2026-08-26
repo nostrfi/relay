@@ -31,6 +31,7 @@ export interface RelayConfig {
   }
   server: {
     listen_addr: string
+    metrics_listen_addr: string
     shutdown_timeout_seconds: number
   }
   storage: {

@@ -2680,6 +2680,128 @@ storage:
 	assert.Equal(t, "/var/lib/relay/custom.db", cfg.Storage.DBPath)
 }
 
+// TestConfigMetricsListenAddrDefaults covers the upgrade path that matters:
+// a relay whose configuration says nothing about metrics must stop serving
+// them publicly, not serve them somewhere else publicly
+// (nostrfi/workspace#53).
+func TestConfigMetricsListenAddrDefaults(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("relay_info:\n  name: \"Metrics Defaults Relay\"\n"), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	cfg, err := ws.LoadConfig()
+	if err != nil {
+		t.Fatalf("expected config to load: %v", err)
+	}
+	assert.Equal(t, "127.0.0.1:2112", cfg.Server.MetricsListenAddr, "unset metrics_listen_addr should default to loopback")
+	assert.NotEqual(t, cfg.Server.ListenAddr, cfg.Server.MetricsListenAddr, "the metrics listener must never default onto the public listener")
+}
+
+func TestConfigMetricsListenAddrFromFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+server:
+  listen_addr: ":8080"
+  metrics_listen_addr: "10.0.0.4:9464"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	cfg, err := ws.LoadConfig()
+	if err != nil {
+		t.Fatalf("expected config to load: %v", err)
+	}
+	assert.Equal(t, "10.0.0.4:9464", cfg.Server.MetricsListenAddr)
+}
+
+// TestConfigMetricsListenAddrFromEnv covers what docker-compose.yml relies
+// on: the container needs a non-loopback bind, and overriding one field by
+// environment is less machinery than handing it a second config file.
+func TestConfigMetricsListenAddrFromEnv(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+server:
+  metrics_listen_addr: "127.0.0.1:2112"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	t.Setenv(ws.MetricsListenAddrEnv, ":2112")
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	cfg, err := ws.LoadConfig()
+	if err != nil {
+		t.Fatalf("expected config to load: %v", err)
+	}
+	assert.Equal(t, ":2112", cfg.Server.MetricsListenAddr, "the environment should override the configuration file")
+}
+
+// TestConfigMetricsListenAddrCollisionRejected keeps the two listeners from
+// racing for one port, where the loser's "address already in use" would say
+// nothing about which setting was wrong.
+func TestConfigMetricsListenAddrCollisionRejected(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configContent := `
+server:
+  listen_addr: ":8080"
+  metrics_listen_addr: ":8080"
+`
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	viper.Reset()
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(tmpDir)
+
+	_, err = ws.LoadConfig()
+	require.Error(t, err, "metrics_listen_addr equal to listen_addr should be refused at load")
+	assert.Contains(t, err.Error(), "metrics_listen_addr")
+	assert.Contains(t, err.Error(), "listen_addr")
+}
+
 // TestConfigFoundFromTheRepositoryRoot covers the way the relay is started
 // that used to find nothing: from one directory above backend/. It then
 // came up on defaults with no operator key and refused every signed
@@ -2805,7 +2927,8 @@ func TestReadyzWithRealRepositoryClosed(t *testing.T) {
 
 // startTestMuxServer starts a full server (repository, RelayHandler, and the
 // production NewMux routing) so metrics tests exercise the exact same
-// wiring used by cmd/relay/main.go, including /metrics.
+// wiring used by cmd/relay/main.go. /metrics is not on it — see
+// startTestMetricsServer.
 func startTestMuxServer(t *testing.T) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
@@ -2830,6 +2953,16 @@ func startTestMuxServer(t *testing.T) (*httptest.Server, *duckdb.Repository, fun
 	return server, repo, cleanup
 }
 
+// startTestMetricsServer starts the production metrics listener's routing,
+// which is a separate server from the relay's and shares nothing with it but
+// the process-wide default registry (nostrfi/workspace#53).
+func startTestMetricsServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(ws.NewMetricsMux())
+	t.Cleanup(server.Close)
+	return server
+}
+
 func scrapeMetrics(t *testing.T, server *httptest.Server) string {
 	t.Helper()
 	resp, err := http.Get(server.URL + "/metrics")
@@ -2850,6 +2983,7 @@ func scrapeMetrics(t *testing.T, server *httptest.Server) string {
 func TestMetricsExposition(t *testing.T) {
 	server, _, cleanup := startTestMuxServer(t)
 	defer cleanup()
+	metricsServer := startTestMetricsServer(t)
 
 	// Exercise a representative set of flows so every metric family has
 	// something to report, then confirm each is present in the scrape.
@@ -2878,7 +3012,7 @@ func TestMetricsExposition(t *testing.T) {
 	c.Close()
 	time.Sleep(20 * time.Millisecond) // let the disconnect defer run before scraping
 
-	body := scrapeMetrics(t, server)
+	body := scrapeMetrics(t, metricsServer)
 	for _, name := range []string{
 		"relay_connections_active",
 		"relay_messages_total",
@@ -2890,6 +3024,48 @@ func TestMetricsExposition(t *testing.T) {
 	} {
 		assert.Contains(t, body, name, "expected metric %q to appear in /metrics output", name)
 	}
+}
+
+// TestMetricsNotOnThePublicListener is the point of nostrfi/workspace#53:
+// /metrics used to be registered on the public mux, so anyone who could
+// reach the relay could read its traffic shape, its connection count, and —
+// from the default registry's process collectors — the exact Go build it was
+// running. It now answers only on the metrics listener.
+//
+// The public path is not a 404: it falls through to the relay handler, which
+// answers a plain browser GET with its "this is a WebSocket endpoint"
+// pointer. That is fine, and asserting on the absence of the series rather
+// than on a status code is what actually describes the fix.
+func TestMetricsNotOnThePublicListener(t *testing.T) {
+	server, _, cleanup := startTestMuxServer(t)
+	defer cleanup()
+	metricsServer := startTestMetricsServer(t)
+
+	// Give the registry something to disclose, so an empty scrape cannot
+	// pass this test by accident.
+	c := connectTestRelay(t, server)
+	ev := signedEvent(t, 1, "hi", nil)
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	c.WriteMessage(websocket.TextMessage, msg)
+	c.readOK(t)
+	c.Close()
+
+	resp, err := http.Get(server.URL + "/metrics")
+	require.NoError(t, err, "GET /metrics on the public listener")
+	defer resp.Body.Close()
+	public, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "read the public listener's /metrics body")
+
+	assert.NotContains(t, string(public), "relay_messages_total",
+		"the public listener must not serve the relay's own metrics")
+	assert.NotContains(t, string(public), "go_info",
+		"the public listener must not serve the Go build version the default registry carries")
+
+	// And the same series are still served, on the listener that now owns
+	// them: this moved the endpoint, it did not remove it.
+	private := scrapeMetrics(t, metricsServer)
+	assert.Contains(t, private, "relay_messages_total")
+	assert.Contains(t, private, "go_info")
 }
 
 func TestMetricsConnectionsActiveDelta(t *testing.T) {

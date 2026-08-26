@@ -17,7 +17,7 @@ const configured: RelayConfig = {
   moderation: { admin_pubkey: 'a'.repeat(64), max_event_age_seconds: 60 },
   websocket: { mode: 'production', allowed_origins: ['https://relay.example.com'] },
   retention: { purge_interval_seconds: 3600 },
-  server: { listen_addr: ':8080', shutdown_timeout_seconds: 5 },
+  server: { listen_addr: ':8080', metrics_listen_addr: '127.0.0.1:2112', shutdown_timeout_seconds: 5 },
   storage: { db_path: 'db/relay.db' }
 }
 
@@ -101,6 +101,9 @@ describe('configSections', () => {
     expect(rowsOf(configured, 'Resource limits')['Max connections']).toBe('1000 connections')
     expect(rowsOf(configured, 'WebSocket origins')['Allowed origins']).toBe('https://relay.example.com')
     expect(rowsOf(configured, 'Listener')['Listen address']).toBe(':8080')
+    // The metrics listener is a separate address, and an operator whose
+    // scrape is refused needs to see which one it is (nostrfi/workspace#53).
+    expect(rowsOf(configured, 'Listener')['Metrics address']).toBe('127.0.0.1:2112')
     expect(rowsOf(configured, 'Storage')['Database path']).toBe('db/relay.db')
   })
 

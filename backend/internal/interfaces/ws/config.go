@@ -84,8 +84,18 @@ type RetentionConfig struct {
 }
 
 // ServerConfig controls the HTTP/WebSocket listener and shutdown behavior.
+//
+// MetricsListenAddr is a second listener, and /metrics is served there and
+// nowhere else. It used to sit on the public mux, which meant anyone who
+// could reach the relay could read its traffic volume and shape, its
+// rejection profile, how many clients were connected, how long it had been
+// up, how much memory it held, and — via the default registry's Go and
+// process collectors — the exact Go version it was built with
+// (nostrfi/workspace#53). It defaults to loopback, which is the point: a
+// deployment whose scraper lives elsewhere says so explicitly.
 type ServerConfig struct {
 	ListenAddr             string `mapstructure:"listen_addr"`
+	MetricsListenAddr      string `mapstructure:"metrics_listen_addr"`
 	ShutdownTimeoutSeconds int    `mapstructure:"shutdown_timeout_seconds"`
 }
 
@@ -111,6 +121,21 @@ type Config struct {
 // neither its own nor the repository root — a systemd unit, say, or a
 // packaged install with the config under /etc.
 const ConfigFileEnv = "RELAY_CONFIG_FILE"
+
+// MetricsListenAddrEnv overrides server.metrics_listen_addr. The container
+// needs a non-loopback metrics bind, and overriding one field by environment
+// is less machinery than shipping it a second configuration file.
+const MetricsListenAddrEnv = "RELAY_METRICS_LISTEN_ADDR"
+
+// defaultMetricsListenAddr keeps the metrics listener on loopback unless the
+// operator says otherwise, so a relay upgraded with no configuration change
+// stops serving metrics publicly rather than serving them on a new port.
+//
+// 2112 is client_golang's own documentation port. The obvious alternative,
+// 9090, is Prometheus's, and 9091 is the Pushgateway's — a default that
+// collides with the thing scraping it is a poor default, and this
+// repository already uses 9090 as its example of a relay moved off :8080.
+const defaultMetricsListenAddr = "127.0.0.1:2112"
 
 // configSearchPaths lists where a config.yaml is looked for, in order.
 //
@@ -151,6 +176,14 @@ func LoadConfig() (*Config, error) {
 		}
 	}
 	viper.AutomaticEnv()
+	// AutomaticEnv does not reach a nested key through Unmarshal, so the one
+	// setting a container has to override without mounting its own
+	// configuration file is bound explicitly. docker-compose.yml uses it:
+	// loopback is container-local, and the dashboard is a different
+	// container.
+	if err := viper.BindEnv("server.metrics_listen_addr", MetricsListenAddrEnv); err != nil {
+		return nil, err
+	}
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
@@ -209,6 +242,17 @@ func LoadConfig() (*Config, error) {
 
 	if cfg.Server.ListenAddr == "" {
 		cfg.Server.ListenAddr = ":8080"
+	}
+	if cfg.Server.MetricsListenAddr == "" {
+		cfg.Server.MetricsListenAddr = defaultMetricsListenAddr
+	}
+	// Caught here rather than at bind time: the two listeners would race for
+	// the port and the loser's "address already in use" says nothing about
+	// which setting was wrong. Only the literal collision is detected —
+	// ":8080" and "0.0.0.0:8080" name the same socket and still fail at bind
+	// — but that is the one an operator writes by hand.
+	if cfg.Server.MetricsListenAddr == cfg.Server.ListenAddr {
+		return nil, fmt.Errorf("config: server.metrics_listen_addr (%q) must differ from server.listen_addr (%q); /metrics is served on its own listener so it is not reachable from the public one", cfg.Server.MetricsListenAddr, cfg.Server.ListenAddr)
 	}
 	if cfg.Server.ShutdownTimeoutSeconds == 0 {
 		cfg.Server.ShutdownTimeoutSeconds = 5
