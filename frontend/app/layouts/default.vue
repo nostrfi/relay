@@ -44,6 +44,14 @@ watch(() => route.query.signin, (value) => {
         <span class="nf-wordmark font-display">Relay Admin</span>
 
         <div class="nf-identity">
+          <!--
+            Leftmost in the identity cluster so it sits in the same place
+            signed in and signed out. Binary light/dark: the dark palette
+            already exists in main.css, this is the only thing that was
+            missing (nostrfi/relay#31).
+          -->
+          <UColorModeButton size="xs" />
+
           <template v-if="npub">
             <NuxtLink
               to="/dashboard"

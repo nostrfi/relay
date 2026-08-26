@@ -83,16 +83,32 @@ async function signOut() {
           class="nf-npub font-mono truncate"
           :title="npub.full"
         >{{ npub.short }}</span>
-        <UButton
-          icon="i-lucide-log-out"
-          size="xs"
-          variant="ghost"
-          color="neutral"
-          :label="collapsed ? undefined : 'Sign out'"
-          :square="collapsed"
-          class="ms-auto"
-          @click="signOut"
-        />
+
+        <!--
+          The theme control lives here rather than in a header, because the
+          private shell has none — each page renders its own UDashboardNavbar.
+          One placement in the sidebar covers all five pages; repeating it in
+          every navbar's #right would drift.
+
+          Collapsed, the sidebar leaves about 32px between the footer's
+          padding, which two side-by-side buttons do not fit into, so the
+          pair stacks.
+        -->
+        <div
+          class="nf-sidebar-actions"
+          :class="{ 'nf-sidebar-actions--stacked': collapsed }"
+        >
+          <UColorModeButton size="xs" />
+          <UButton
+            icon="i-lucide-log-out"
+            size="xs"
+            variant="ghost"
+            color="neutral"
+            :label="collapsed ? undefined : 'Sign out'"
+            :square="collapsed"
+            @click="signOut"
+          />
+        </div>
       </template>
     </UDashboardSidebar>
 
@@ -117,5 +133,17 @@ async function signOut() {
 .nf-npub {
   font-size: 13px;
   color: var(--ui-text-muted);
+}
+
+.nf-sidebar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--nf-space-1);
+  margin-inline-start: auto;
+}
+
+.nf-sidebar-actions--stacked {
+  flex-direction: column;
+  margin-inline: auto;
 }
 </style>

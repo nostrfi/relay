@@ -472,6 +472,13 @@ The login flow itself:
 Sessions last 8 hours. Signing out clears the cookie and any stored bunker pairing, and returns to
 the public page. Login and challenge requests are rate-limited per client address.
 
+### Admin dashboard theme
+
+The dashboard renders in light or dark. It follows the operating system's preference by default;
+the sun/moon button pins a choice instead — in the public page's header, and in the sidebar footer
+beside **Sign out** on the signed-in pages. The choice is stored in the browser's local storage, so
+it is per browser rather than per operator, and is not part of the session.
+
 ## Database
 
 The relay uses **DuckDB** for high-performance event storage and querying. The database file is located at `backend/db/relay.db`.
