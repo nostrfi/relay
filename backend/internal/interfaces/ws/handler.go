@@ -25,13 +25,6 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// connMessageBuffer is the per-connection queue between the read pump and
-// the message worker. Small on purpose: it exists to decouple the reader
-// from the handler, not to absorb bursts — once it fills, the pump blocks
-// on the send, which is the same backpressure a slow handler exerted when
-// dispatch ran inline in the read loop.
-const connMessageBuffer = 32
-
 type RelayHandler struct {
 	eventService      application.EventService
 	moderationService application.ModerationService
@@ -251,23 +244,27 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// single-writer assumptions handleMessage inherits from the old shape:
 	// challenge/authPubkey and subscription bookkeeping are only ever
 	// touched from one goroutine at a time.
-	messages := make(chan []byte, connMessageBuffer)
+	queue := newMessageQueue()
 	workerDone := make(chan struct{})
 	go func() {
 		defer close(workerDone)
-		for message := range messages {
+		for {
+			message, ok := queue.pop()
+			if !ok {
+				return
+			}
 			h.handleMessage(client, message)
 		}
 	}()
 
 	defer func() {
 		// Order matters: cancel first so an in-flight handler's repository
-		// work is aborted rather than drained; then close the channel so
+		// work is aborted rather than drained; then close the queue so
 		// the worker exits after finishing (cheaply, post-cancel) whatever
 		// is buffered; then wait for it, so no handler can touch conn or
 		// the counters after they're torn down.
 		client.cancel()
-		close(messages)
+		queue.close()
 		<-workerDone
 		h.clients.Delete(client)
 		h.connCount.Add(-1)
@@ -279,11 +276,14 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		conn.Close()
 	}()
 
-	// The read pump: ReadMessage fails promptly on disconnect because the
-	// pump is always back at the socket while the worker handles messages,
-	// which is what makes cancel-on-disconnect timely. A full buffer blocks
-	// the pump — the same backpressure a slow handler applied when dispatch
-	// was inline.
+	// The read pump. It must never block anywhere but ReadMessage: the
+	// pump is the only goroutine that can observe a disconnect, so a pump
+	// stuck on a full hand-off would leave cancellation unreachable right
+	// when a slow query makes it matter — the failure mode this design
+	// exists to remove. push is therefore non-blocking; a client that
+	// overruns the queue's byte budget while its worker is busy is
+	// disconnected (the teardown above cancels whatever its worker is
+	// doing), not silently dropped a message or waited on.
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -293,7 +293,10 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			h.sendNotice(client, prefixRateLimited+": message rate exceeded")
 			continue
 		}
-		messages <- message
+		if !queue.push(message) {
+			h.sendNotice(client, prefixRateLimited+": message queue overflow")
+			break
+		}
 	}
 }
 

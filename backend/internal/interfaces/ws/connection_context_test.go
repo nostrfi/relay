@@ -249,6 +249,53 @@ func TestDisconnectDoesNotCancelBanCheck(t *testing.T) {
 	}
 }
 
+// TestQueueOverflowDisconnectsAndCancels pins the pump's never-block
+// contract: with the worker stuck in a slow query, a client flooding the
+// connection must not wedge the pump behind a full queue — where a
+// disconnect would go unobserved and cancellation would be unreachable.
+// Instead, overrunning the queue's byte budget tears the connection down,
+// which cancels the in-flight query, with no client-side disconnect
+// involved at all.
+func TestQueueOverflowDisconnectsAndCancels(t *testing.T) {
+	queryStarted := make(chan struct{}, 1)
+	queryCancelled := make(chan error, 1)
+	events := &stubEventService{
+		queryEvents: func(ctx context.Context, _ nostr.Filter) ([]*event.Event, error) {
+			queryStarted <- struct{}{}
+			<-ctx.Done()
+			queryCancelled <- ctx.Err()
+			return nil, ctx.Err()
+		},
+	}
+
+	conn := dialStubRelay(t, events)
+	defer conn.Close()
+	require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`["REQ","sub1",{"kinds":[1]}]`)))
+
+	select {
+	case <-queryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("QueryEvents was never called")
+	}
+
+	// Flood past the byte budget while the worker is stuck. Writes may
+	// start failing once the relay drops the connection — that is the
+	// expected outcome, not a test failure.
+	filler := strings.Repeat("x", 8<<10)
+	for i := 0; i < 2*connQueueMaxBytes/len(filler); i++ {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(filler)); err != nil {
+			break
+		}
+	}
+
+	select {
+	case err := <-queryCancelled:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("queue overflow did not tear down the connection and cancel the query")
+	}
+}
+
 // TestMessagesHandledInOrder pins the single-worker guarantee: the pump
 // hands messages to one worker, so back-to-back messages from a client are
 // handled strictly in arrival order. The slow save would lose the race

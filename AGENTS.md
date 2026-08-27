@@ -129,9 +129,12 @@ Manual smoke tests are documented in `README.md` (`curl` for NIP-11, `wscat` for
 
 Each WebSocket connection runs exactly two goroutines (`interfaces/ws/handler.go`): a **read
 pump** that owns `conn.ReadMessage` and rate limiting, and a single **worker** that runs
-`handleMessage` in arrival order off a small buffered channel. Keep it that way: the one-worker
-shape is what guarantees message ordering and lets per-client state (`challenge`, `authPubkey`,
-subscription bookkeeping) be written without extra synchronization. Every connection carries a
+`handleMessage` in arrival order off a byte-bounded queue (`interfaces/ws/queue.go`). Keep it
+that way: the one-worker shape is what guarantees message ordering and lets per-client state
+(`challenge`, `authPubkey`, subscription bookkeeping) be written without extra synchronization,
+and the pump must never block anywhere but `ReadMessage` — it is the only goroutine that can
+observe a disconnect, so a client that overruns the queue's byte budget is disconnected rather
+than waited on. Every connection carries a
 context (`Client.ctx`) cancelled by the pump the moment the socket drops — pass it to repository
 calls made on the connection's behalf so a disconnect aborts queries; the one deliberate
 exception is the EVENT acceptance path (`handleEvent`'s ban check and save), which uses
