@@ -13,6 +13,13 @@ import "sync"
 // stops observing disconnects — it disconnects the client instead.
 const connQueueMaxBytes = 256 << 10
 
+// connQueueItemOverhead charges every queued message for the bookkeeping
+// heap it occupies regardless of payload — its slice header in items plus
+// allocator rounding — so zero-length frames cannot ride a zero payload
+// charge to unbounded slot growth: 256 KiB / 64 B caps even an
+// empty-frame flood at ~4096 queued items.
+const connQueueItemOverhead = 64
+
 // messageQueue is the hand-off between a connection's read pump and its
 // worker: unbounded in slots, bounded in bytes, and non-blocking for the
 // producer, because the pump has to stay parked at ReadMessage for
@@ -44,11 +51,12 @@ func (q *messageQueue) push(msg []byte) bool {
 	if q.closed {
 		return true // teardown is already underway; the message is moot
 	}
-	if q.bytes > 0 && q.bytes+len(msg) > connQueueMaxBytes {
+	cost := len(msg) + connQueueItemOverhead
+	if q.bytes > 0 && q.bytes+cost > connQueueMaxBytes {
 		return false
 	}
 	q.items = append(q.items, msg)
-	q.bytes += len(msg)
+	q.bytes += cost
 	q.cond.Signal()
 	return true
 }
@@ -67,7 +75,7 @@ func (q *messageQueue) pop() ([]byte, bool) {
 	msg := q.items[0]
 	q.items[0] = nil
 	q.items = q.items[1:]
-	q.bytes -= len(msg)
+	q.bytes -= len(msg) + connQueueItemOverhead
 	if len(q.items) == 0 {
 		q.items = nil // release the drained backing array
 	}

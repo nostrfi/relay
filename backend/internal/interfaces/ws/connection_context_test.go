@@ -296,6 +296,46 @@ func TestQueueOverflowDisconnectsAndCancels(t *testing.T) {
 	}
 }
 
+// TestEmptyFrameFloodStillOverflows pins the per-item overhead charge:
+// zero-length frames add no payload bytes, so without a per-item cost the
+// byte budget would never arm against them and the queue's slot count
+// would grow without bound while the worker is busy.
+func TestEmptyFrameFloodStillOverflows(t *testing.T) {
+	queryStarted := make(chan struct{}, 1)
+	queryCancelled := make(chan error, 1)
+	events := &stubEventService{
+		queryEvents: func(ctx context.Context, _ nostr.Filter) ([]*event.Event, error) {
+			queryStarted <- struct{}{}
+			<-ctx.Done()
+			queryCancelled <- ctx.Err()
+			return nil, ctx.Err()
+		},
+	}
+
+	conn := dialStubRelay(t, events)
+	defer conn.Close()
+	require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`["REQ","sub1",{"kinds":[1]}]`)))
+
+	select {
+	case <-queryStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("QueryEvents was never called")
+	}
+
+	for i := 0; i < 2*connQueueMaxBytes/connQueueItemOverhead; i++ {
+		if err := conn.WriteMessage(websocket.TextMessage, nil); err != nil {
+			break
+		}
+	}
+
+	select {
+	case err := <-queryCancelled:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("empty-frame flood did not overflow the queue")
+	}
+}
+
 // TestMessagesHandledInOrder pins the single-worker guarantee: the pump
 // hands messages to one worker, so back-to-back messages from a client are
 // handled strictly in arrival order. The slow save would lose the race

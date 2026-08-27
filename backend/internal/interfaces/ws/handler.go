@@ -294,7 +294,15 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			continue
 		}
 		if !queue.push(message) {
-			h.sendNotice(client, prefixRateLimited+": message queue overflow")
+			// The notice is courtesy, so it is best-effort and off the
+			// pump: write serializes on c.mu behind a possibly stalled
+			// worker write and spends a write deadline of its own, and
+			// teardown — which cancels the worker's in-flight work — must
+			// not wait on either. Writing concurrently with the deferred
+			// conn.Close is safe: write holds c.mu against other writers,
+			// and gorilla's Close may run concurrently with write methods;
+			// at worst the notice is dropped with a logged warning.
+			go h.sendNotice(client, prefixRateLimited+": message queue overflow")
 			break
 		}
 	}
