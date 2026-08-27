@@ -13,7 +13,19 @@ import (
 )
 
 func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
-	banned, err := h.moderationService.IsPubkeyBanned(context.Background(), ev.PubKey)
+	// WithoutCancel, deliberately, and for the whole acceptance path — the
+	// ban check that gates the save as much as the save itself: clients
+	// publish fire-and-forget (write the EVENT, hang up, never read the
+	// OK), and an author's disconnect must not lose an event the relay has
+	// already read in full. Both calls are cheap (a point lookup and one
+	// transactional, deduplicated write), so running them to completion
+	// costs nothing; disconnect-aborts stay for the expensive read paths
+	// (REQ, NEG-OPEN). Derived from c.ctx rather than a bare Background so
+	// the provenance stays visible and flipping the decision is a one-word
+	// change.
+	ctx := context.WithoutCancel(c.ctx)
+
+	banned, err := h.moderationService.IsPubkeyBanned(ctx, ev.PubKey)
 	if err != nil {
 		slog.Error("moderation check failed", "error", err)
 		h.sendOK(c, ev.ID, false, prefixError+": failed to process event")
@@ -83,7 +95,7 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 		}
 	}
 
-	success, err := h.eventService.SaveEvent(context.Background(), wrapped)
+	success, err := h.eventService.SaveEvent(ctx, wrapped)
 	if err != nil {
 		slog.Error("save event failed", "event_id", ev.ID, "error", err)
 		metrics.SaveFailuresTotal.Inc()

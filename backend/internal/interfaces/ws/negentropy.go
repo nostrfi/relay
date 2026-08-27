@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -20,9 +21,15 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 	}
 
 	start := time.Now()
-	events, err := h.eventService.QueryEventsSorted(context.Background(), filter)
+	events, err := h.eventService.QueryEventsSorted(c.ctx, filter)
 	metrics.QueryDuration.WithLabelValues("negentropy").Observe(time.Since(start).Seconds())
 	if err != nil {
+		// As in handleReq: a disconnect mid-query is the connection ending,
+		// not an error worth logging, and there is nobody left to send the
+		// NEG-ERR to.
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		slog.Error("negentropy query failed", "sub_id", subID, "error", err)
 		h.sendNegErr(c, subID, prefixError+": could not build reconciliation set")
 		return

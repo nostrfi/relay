@@ -5,6 +5,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,13 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 	"golang.org/x/time/rate"
 )
+
+// connMessageBuffer is the per-connection queue between the read pump and
+// the message worker. Small on purpose: it exists to decouple the reader
+// from the handler, not to absorb bursts — once it fills, the pump blocks
+// on the send, which is the same backpressure a slow handler exerted when
+// dispatch ran inline in the read loop.
+const connMessageBuffer = 32
 
 type RelayHandler struct {
 	eventService      application.EventService
@@ -218,11 +226,14 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		conn.SetReadLimit(int64(h.relayInfo.Limitation.MaxMessageLength))
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	client := &Client{
 		handler:      h,
 		conn:         conn,
 		msgLimiter:   newLimiter(h.resourceLimits.MessagesPerSecond),
 		eventLimiter: newLimiter(h.resourceLimits.EventsPerSecond),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 	h.clients.Store(client, true)
 
@@ -230,7 +241,34 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	client.challenge = fmt.Sprintf("%x", nostr.GeneratePrivateKey()[:16])
 	h.sendAuth(client, client.challenge)
 
+	// One worker per connection runs handleMessage in arrival order, off
+	// the read loop. With dispatch inline in the read loop (the previous
+	// shape), the connection's context could only ever be cancelled after
+	// the in-flight handler returned — exactly too late to interrupt it.
+	// Splitting reader from handler is what lets a disconnect observed by
+	// the reader abort work the handler is still doing. A single worker
+	// (not a goroutine per message) preserves the ordering and
+	// single-writer assumptions handleMessage inherits from the old shape:
+	// challenge/authPubkey and subscription bookkeeping are only ever
+	// touched from one goroutine at a time.
+	messages := make(chan []byte, connMessageBuffer)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for message := range messages {
+			h.handleMessage(client, message)
+		}
+	}()
+
 	defer func() {
+		// Order matters: cancel first so an in-flight handler's repository
+		// work is aborted rather than drained; then close the channel so
+		// the worker exits after finishing (cheaply, post-cancel) whatever
+		// is buffered; then wait for it, so no handler can touch conn or
+		// the counters after they're torn down.
+		client.cancel()
+		close(messages)
+		<-workerDone
 		h.clients.Delete(client)
 		h.connCount.Add(-1)
 		metrics.ConnectionsActive.Dec()
@@ -241,6 +279,11 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		conn.Close()
 	}()
 
+	// The read pump: ReadMessage fails promptly on disconnect because the
+	// pump is always back at the socket while the worker handles messages,
+	// which is what makes cancel-on-disconnect timely. A full buffer blocks
+	// the pump — the same backpressure a slow handler applied when dispatch
+	// was inline.
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -250,7 +293,7 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			h.sendNotice(client, prefixRateLimited+": message rate exceeded")
 			continue
 		}
-		h.handleMessage(client, message)
+		messages <- message
 	}
 }
 
