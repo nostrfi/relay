@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"relay/internal/application"
 	"relay/pkg/metrics"
@@ -258,11 +259,11 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}()
 
 	defer func() {
-		// Order matters: cancel first so an in-flight handler's repository
-		// work is aborted rather than drained; then close the queue so
-		// the worker exits after finishing (cheaply, post-cancel) whatever
-		// is buffered; then wait for it, so no handler can touch conn or
-		// the counters after they're torn down.
+		// Order matters: cancel first so the in-flight handler's repository
+		// work is aborted; then close the queue, which discards anything
+		// still buffered, so the worker exits right after its current
+		// message; then wait for it, so no handler can touch conn or the
+		// counters after they're torn down.
 		client.cancel()
 		queue.close()
 		<-workerDone
@@ -284,13 +285,23 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// overruns the queue's byte budget while its worker is busy is
 	// disconnected (the teardown above cancels whatever its worker is
 	// doing), not silently dropped a message or waited on.
+	var lastRateNotice time.Time
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
 		if client.msgLimiter != nil && !client.msgLimiter.Allow() {
-			h.sendNotice(client, prefixRateLimited+": message rate exceeded")
+			// Off the pump, like the overflow notice below and for the
+			// same reason — and throttled to one per second, because this
+			// branch fires per flooded frame and a goroutine each would
+			// trade the blocked pump for a goroutine flood. The client
+			// still learns it is over the limit; it does not get a
+			// per-frame echo.
+			if time.Since(lastRateNotice) >= time.Second {
+				lastRateNotice = time.Now()
+				go h.sendNotice(client, prefixRateLimited+": message rate exceeded")
+			}
 			continue
 		}
 		if !queue.push(message) {

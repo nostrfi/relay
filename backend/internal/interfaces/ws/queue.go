@@ -61,8 +61,8 @@ func (q *messageQueue) push(msg []byte) bool {
 	return true
 }
 
-// pop blocks until a message is available or the queue is closed and
-// drained, reporting false only in the latter case.
+// pop blocks until a message is available or the queue is closed,
+// reporting false only in the latter case.
 func (q *messageQueue) pop() ([]byte, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -82,11 +82,18 @@ func (q *messageQueue) pop() ([]byte, bool) {
 	return msg, true
 }
 
-// close wakes the consumer; pop drains whatever is queued, then reports
-// exhaustion.
+// close wakes the consumer and discards whatever is still queued.
+// Teardown is the only caller, and by then the client is gone or being
+// dropped: draining a dead connection's backlog — up to thousands of
+// frames, some of them EVENTs whose acceptance path deliberately ignores
+// cancellation — would hold the connection slot and conn.Close hostage
+// to work the client queued on purpose. The message the worker already
+// holds finishes; the rest never run.
 func (q *messageQueue) close() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.closed = true
+	q.items = nil
+	q.bytes = 0
 	q.cond.Broadcast()
 }

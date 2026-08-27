@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -334,6 +335,51 @@ func TestEmptyFrameFloodStillOverflows(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("empty-frame flood did not overflow the queue")
 	}
+}
+
+// TestTeardownDiscardsQueuedMessages pins queue.close's discard
+// semantics: once a connection is being torn down, only the worker's
+// in-flight message finishes — the buffered backlog never runs. Draining
+// it would hold the connection slot hostage to attacker-queued work,
+// EVENTs especially, whose acceptance path deliberately ignores
+// cancellation.
+func TestTeardownDiscardsQueuedMessages(t *testing.T) {
+	var saveCalls atomic.Int32
+	firstSaveStarted := make(chan struct{}, 1)
+	releaseFirstSave := make(chan struct{})
+	events := &stubEventService{
+		saveEvent: func(context.Context, *event.Event) (bool, error) {
+			if saveCalls.Add(1) == 1 {
+				firstSaveStarted <- struct{}{}
+				<-releaseFirstSave
+			}
+			return true, nil
+		},
+	}
+
+	conn := dialStubRelay(t, events)
+	for i := 0; i < 3; i++ {
+		ev := signTestEvent(t)
+		payload, err := ev.MarshalJSON()
+		require.NoError(t, err)
+		require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(`["EVENT",`+string(payload)+`]`)))
+	}
+
+	select {
+	case <-firstSaveStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SaveEvent was never called")
+	}
+
+	// The worker is inside save #1; events #2 and #3 sit in the queue.
+	// Disconnect, let teardown reach queue.close, then release the save.
+	require.NoError(t, conn.Close())
+	time.Sleep(200 * time.Millisecond)
+	close(releaseFirstSave)
+	time.Sleep(200 * time.Millisecond)
+
+	assert.Equal(t, int32(1), saveCalls.Load(),
+		"teardown must discard the queued backlog, not drain it through the worker")
 }
 
 // TestMessagesHandledInOrder pins the single-worker guarantee: the pump
