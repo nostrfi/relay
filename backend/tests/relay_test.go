@@ -1477,6 +1477,31 @@ func TestNip50(t *testing.T) {
 			"the no-config fallback must advertise the NIPs the handler actually implements")
 	})
 
+	t.Run("a refused replacement does not leak the subscription count", func(t *testing.T) {
+		// sendClosed removes the subscription it refuses. Removing without
+		// decrementing left the gauge permanently high, and disconnect
+		// cleanup only counts what is still in the map, so nothing later
+		// repaired it — the dashboard kept reporting a subscription that
+		// had been closed.
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		before := testutil.ToFloat64(metrics.SubscriptionsActive)
+
+		searchREQ(t, c, "sub_replace", nostr.Filter{Search: "orange", Kinds: []int{1}})
+		collectUntilEOSE(t, c, "sub_replace")
+		assert.Equal(t, before+1, testutil.ToFloat64(metrics.SubscriptionsActive),
+			"opening a subscription counts it")
+
+		// Same subscription id, now with a term the relay refuses.
+		searchREQ(t, c, "sub_replace", nostr.Filter{Search: "ab"})
+		c.readClosed(t)
+		assert.Equal(t, before, testutil.ToFloat64(metrics.SubscriptionsActive),
+			"refusing a replacement must uncount the subscription it removed")
+	})
+
 	t.Run("matches non-ASCII content", func(t *testing.T) {
 		server, _, cleanup := startTestRelay(t)
 		defer cleanup()

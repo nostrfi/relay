@@ -83,9 +83,20 @@ func (h *RelayHandler) sendEOSE(c *Client, subID string) {
 
 // sendClosed sends a NIP-01 CLOSED message and drops the subscription, used
 // when a REQ is rejected instead of served.
+// sendClosed refuses a subscription and tells the client why.
+//
+// LoadAndDelete rather than Delete, so a refusal that replaces a live
+// subscription decrements the counters that creating it incremented — the
+// same pairing the CLOSE handler uses. Deleting without decrementing left
+// the count permanently high: disconnect cleanup only counts subscriptions
+// still in the map, so nothing later repaired it, and the dashboard went on
+// reporting a subscription that had been closed.
 func (h *RelayHandler) sendClosed(c *Client, subID string, reason string) {
 	recordRejection(reason)
-	c.subscriptions.Delete(subID)
+	if _, existed := c.subscriptions.LoadAndDelete(subID); existed {
+		h.subCount.Add(-1)
+		metrics.SubscriptionsActive.Dec()
+	}
 	msg, _ := json.Marshal([]any{"CLOSED", subID, reason})
 	h.write(c, msg)
 }

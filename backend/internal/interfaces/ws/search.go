@@ -80,7 +80,11 @@ func prepareSearchFilters(filters []nostr.Filter, limitation *RelayLimitation) (
 		if utf8.RuneCountInString(term) < minContentSearchRunes {
 			return fmt.Sprintf("%s: search query must be at least %d characters", prefixInvalid, minContentSearchRunes), false
 		}
-		filters[i].Search = term
+		// Stored folded, so the live-subscription matcher can compare
+		// without folding the term on every event. The query layer is
+		// unaffected: ILIKE is case-insensitive and its ORDER BY lowers
+		// both sides anyway.
+		filters[i].Search = strings.ToLower(term)
 
 		// LimitZero distinguishes an explicit "limit":0 — a client asking
 		// for no stored events at all, handled in handleReq — from an

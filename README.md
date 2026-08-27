@@ -159,7 +159,7 @@ The relay can be configured via `backend/config.yaml`. You can customize the rel
 relay_info:
   name: "My Custom Relay"
   description: "A specialized Nostr relay."
-  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77]
+  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 50, 70, 71, 77, 86, 98]
 ```
 
 ### Where the config file is looked for
