@@ -3,7 +3,7 @@ relay_info:
   description: "A custom Nostr relay configured via YAML."
   pubkey: "ec642f38bfef46ab7bcdb5aea1dcdc98ca20cbb4cec7fa1066cafbb5a8b07008"
   contact: "admin@example.com"
-  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77, 86, 98]
+  supported_nips: [1, 2, 9, 11, 17, 22, 28, 40, 42, 50, 70, 71, 77, 86, 98]
   software: "https://github.com/nostrfi/relay"
   limitation:
     max_message_length: 65536

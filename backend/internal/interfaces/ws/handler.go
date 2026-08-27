@@ -317,6 +317,10 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 				}
 			}
 		}
+		if reason, ok := prepareSearchFilters(filters, limitation); !ok {
+			h.sendClosed(c, subID, reason)
+			return
+		}
 		if !subExisted {
 			h.subCount.Add(1)
 			metrics.SubscriptionsActive.Inc()

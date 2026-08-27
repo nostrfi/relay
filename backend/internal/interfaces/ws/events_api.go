@@ -28,19 +28,21 @@ const (
 	// no max_limit of its own, matching the value config.yaml ships.
 	fallbackMaxEventQueryLimit = 500
 
-	// minContentSearchRunes is the shortest content substring accepted.
-	// The condition behind it is an unindexed scan, and a one-character
-	// search is a full table read that returns nothing useful anyway.
+	// minContentSearchRunes is the shortest content substring accepted,
+	// by this endpoint and by NIP-50 search (see search.go). The condition
+	// behind both is an unindexed scan, and a one-character search is a
+	// full table read that returns nothing useful anyway.
 	minContentSearchRunes = 3
 )
 
 // eventQueryRequest is the browse API's filter: NIP-01's dimensions, plus
 // the content substring NIP-01 does not model.
 //
-// Deliberately not nostr.Filter itself. That type carries Search (NIP-50,
-// which this relay does not implement) and the LimitZero subtlety, and it
-// would tie the dashboard's request shape to a protocol type that changes
-// for protocol reasons.
+// Deliberately not nostr.Filter itself. That type carries Search — this
+// relay's NIP-50 search, which is ordered by relevance and open to any
+// client, where this endpoint is the operator's and ordered by recency —
+// and the LimitZero subtlety, and it would tie the dashboard's request
+// shape to a protocol type that changes for protocol reasons.
 type eventQueryRequest struct {
 	IDs     []string            `json:"ids"`
 	Authors []string            `json:"authors"`

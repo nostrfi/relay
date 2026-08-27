@@ -18,6 +18,7 @@ This is a two-part monorepo:
 - **NIP-28**: Public Chat
 - **NIP-40**: Expiration Timestamp
 - **NIP-42**: Authentication
+- **NIP-50**: Search Capability
 - **NIP-70**: Protected Events
 - **NIP-71**: Video Events
 - **NIP-77**: Negentropy Syncing
@@ -93,6 +94,49 @@ Initiate a sync using the `NEG-OPEN` message:
 ```json
 ["NEG-OPEN", "sync_id", {"authors": ["<pubkey>"]}, "<hex_encoded_negentropy_msg>"]
 ```
+
+#### NIP-50: Search
+
+```json
+["REQ", "search_sub", {"kinds": [1], "search": "orange juice", "limit": 20}]
+```
+
+`search` matches **case-insensitively anywhere in the event's `content`**, and narrows the rest of
+the filter rather than replacing it — `kinds`, `authors`, tags, `since`/`until` all still apply.
+
+**This is substring matching, not ranked full-text search.** The term is matched literally, so
+`"best nostr apps"` finds that exact phrase and will not find "best apps for nostr". DuckDB's `fts`
+extension would give real ranking, and was not taken: it is not statically linked into the DuckDB
+build this relay uses, so it needs an `INSTALL` from `extensions.duckdb.org` — a first-boot network
+dependency the relay otherwise does not have, or an extension baked into the image and pinned to an
+exact DuckDB version and platform, which still leaves anyone running `go build` without it. Its
+index is also a static structure rather than one maintained per write, so a relay taking continuous
+writes would have to rebuild it on a schedule.
+
+**Order.** NIP-50 asks for results "in descending order by quality of search result... not by the
+usual `.created_at`", with `limit` applied after that sort. Quality here is, in order:
+
+1. **Earliest occurrence** of the term in the content (`strpos`), then
+2. **Shortest content**, then
+3. **Newest** `created_at`, then event id, so the order is total and stable.
+
+A term in the opening words of a short note is more likely to be its subject than the same term
+buried in a four-thousand-character wall. That is the whole of the signal — it is not relevance
+scoring, and the NIP permits an implementation to define quality for itself.
+
+**Extensions are parsed and ignored.** The relay supports none of NIP-50's `key:value` extensions
+(`include:`, `domain:`, `language:`, `sentiment:`, `nsfw:`); those tokens are removed from the query
+and the rest is searched for. Only those five keys are treated as extensions — `https://example.com`
+and `18:30` are searched for as written, rather than being silently deleted from your query.
+
+**Limits.** A search term must be at least 3 characters after extensions are removed; shorter, or a
+query that was nothing but extensions, is refused with `CLOSED` and an `invalid:` reason rather than
+answered with a misleading empty result. A search filter that specifies no `limit` is given the
+relay's advertised `max_limit` (500 as shipped), since unlike every other `REQ` a search cannot be
+answered from an index.
+
+**Live subscriptions keep searching.** An open `REQ` carrying `search` applies the term to new
+events too, so it streams only matches — it does not stop filtering at `EOSE`.
 
 #### NIP-17: Private Direct Messages
 The relay protects message metadata by only serving Kind 1059 Gift Wrap events to the recipient (tagged `p`) or the sender.

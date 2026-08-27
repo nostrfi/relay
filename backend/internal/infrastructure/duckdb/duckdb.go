@@ -394,6 +394,26 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, s
 		args = append(args, "%"+escapeLikePattern(query.ContentContains)+"%")
 	}
 
+	// NIP-50. Same unindexed scan as the operator's content search above,
+	// and the same escaping, but a different caller and — below — a
+	// different order. The term arrives already stripped of the NIP's
+	// key:value extensions; this layer matches what it is given.
+	//
+	// Not applied to a sync read. NEG-OPEN hands its filter straight from
+	// the wire to QueryEventsSorted (interfaces/ws/negentropy.go), so a
+	// search term would arrive there unparsed and unbounded — none of the
+	// REQ path's guardrails having run. NIP-77 defines no search semantics
+	// anyway, and quietly narrowing a reconciliation by a substring would
+	// leave two peers disagreeing about what the other holds.
+	searchTerm := ""
+	if !sortedForSync {
+		searchTerm = query.Filter.Search
+	}
+	if searchTerm != "" {
+		conditions = append(conditions, `e.content ILIKE ? ESCAPE '\'`)
+		args = append(args, "%"+escapeLikePattern(searchTerm)+"%")
+	}
+
 	statement := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json FROM events e"
 	now := nostr.Now()
 	conditions = append(conditions, "(e.expiration IS NULL OR e.expiration > ?)")
@@ -403,9 +423,28 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, s
 	if len(conditions) > 0 {
 		statement += " WHERE " + strings.Join(conditions, " AND ")
 	}
-	if sortedForSync {
+	switch {
+	case sortedForSync:
+		// Negentropy reconciliation compares ordered vectors, so this
+		// ordering is a wire requirement. Search is excluded from this
+		// path entirely (above), so the two never contend.
 		statement += " ORDER BY e.created_at ASC, e.id ASC"
-	} else {
+	case searchTerm != "":
+		// NIP-50: "Results SHOULD be returned in descending order by
+		// quality of search result... not by the usual .created_at", and
+		// the limit applies after that sort — which it does, since the
+		// LIMIT below is applied to this ordering.
+		//
+		// Quality here is deliberately modest, because an ILIKE scan
+		// produces no relevance score to sort by: the earliest occurrence
+		// first, then the shortest content, then the newest. A term in the
+		// opening words of a short note is more likely to be its subject
+		// than the same term buried in a four-thousand-character wall.
+		// README.md states this in full; it is not BM25 and does not
+		// pretend to be.
+		statement += " ORDER BY strpos(lower(e.content), lower(?)) ASC, length(e.content) ASC, e.created_at DESC, e.id ASC"
+		args = append(args, searchTerm)
+	default:
 		statement += " ORDER BY e.created_at DESC, e.id ASC"
 	}
 	if filter.Limit > 0 {
