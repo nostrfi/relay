@@ -250,11 +250,15 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	go func() {
 		defer close(workerDone)
 		for {
-			message, ok := queue.pop()
+			item, ok := queue.pop()
 			if !ok {
 				return
 			}
-			h.handleMessage(client, message)
+			if item.notice != "" {
+				h.sendNotice(client, item.notice)
+				continue
+			}
+			h.handleMessage(client, item.msg)
 		}
 	}()
 
@@ -292,28 +296,31 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			break
 		}
 		if client.msgLimiter != nil && !client.msgLimiter.Allow() {
-			// Off the pump, like the overflow notice below and for the
-			// same reason — and throttled to one per second, because this
-			// branch fires per flooded frame and a goroutine each would
-			// trade the blocked pump for a goroutine flood. The client
-			// still learns it is over the limit; it does not get a
-			// per-frame echo.
+			// The notice rides the queue so the worker writes it in
+			// order: the pump must never touch the write path (it can
+			// stall on c.mu behind a slow worker write for a full write
+			// deadline), and a goroutine per notice would let a stalled
+			// peer accumulate one blocked goroutine per second for the
+			// flood's duration. Throttled because this branch fires per
+			// flooded frame: the client learns it is over the limit, it
+			// does not get a per-frame echo.
 			if time.Since(lastRateNotice) >= time.Second {
 				lastRateNotice = time.Now()
-				go h.sendNotice(client, prefixRateLimited+": message rate exceeded")
+				queue.pushNotice(prefixRateLimited + ": message rate exceeded")
 			}
 			continue
 		}
 		if !queue.push(message) {
-			// The notice is courtesy, so it is best-effort and off the
-			// pump: write serializes on c.mu behind a possibly stalled
-			// worker write and spends a write deadline of its own, and
-			// teardown — which cancels the worker's in-flight work — must
-			// not wait on either. Writing concurrently with the deferred
-			// conn.Close is safe: write holds c.mu against other writers,
-			// and gorilla's Close may run concurrently with write methods;
-			// at worst the notice is dropped with a logged warning.
-			go h.sendNotice(client, prefixRateLimited+": message queue overflow")
+			// A close frame with the reason, then teardown. WriteControl
+			// is the one write gorilla allows concurrently with the
+			// worker's writes, and its deadline bounds the pump's only
+			// non-ReadMessage wait to this one moment on this already-dead
+			// connection; a NOTICE can't be used here because the queue it
+			// would ride is the thing that just overflowed.
+			deadline := time.Now().Add(500 * time.Millisecond)
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, prefixRateLimited+": message queue overflow"),
+				deadline)
 			break
 		}
 	}

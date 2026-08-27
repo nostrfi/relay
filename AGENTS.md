@@ -134,7 +134,9 @@ that way: the one-worker shape is what guarantees message ordering and lets per-
 (`challenge`, `authPubkey`, subscription bookkeeping) be written without extra synchronization,
 and the pump must never block anywhere but `ReadMessage` — it is the only goroutine that can
 observe a disconnect, so a client that overruns the queue's byte budget is disconnected rather
-than waited on. Every connection carries a
+than waited on. The pump also never writes data frames: notices it wants sent ride the queue
+for the worker to write in order (a bounded close control frame at overflow is the one
+exception gorilla permits concurrently). Every connection carries a
 context (`Client.ctx`) cancelled by the pump the moment the socket drops — pass it to repository
 calls made on the connection's behalf so a disconnect aborts queries; the one deliberate
 exception is the EVENT acceptance path (`handleEvent`'s ban check and save), which uses
