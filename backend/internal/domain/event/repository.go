@@ -10,12 +10,15 @@ import (
 // substring of the event content.
 //
 // It exists so the operator event browser (nostrfi/workspace#36) can offer
-// that search without it leaking into the protocol. Putting it in
-// nostr.Filter's Search field would have been shorter and wrong: that field
-// is NIP-50, the relay does not implement NIP-50, and the same filter type
-// is built from whatever a REQ subscriber sends — so any client could then
-// have used it, and the relay would be quietly answering a NIP it does not
-// advertise.
+// that search without it leaking into the protocol. The relay now does
+// implement NIP-50 (nostrfi/workspace#48), and that lives on
+// nostr.Filter.Search where it belongs — but the two are not the same
+// question and must not be collapsed. ContentContains is the operator's,
+// reached only through an authenticated API, and returns newest-first
+// because that is what browsing wants. Search is anyone's, and NIP-50
+// requires it ordered by relevance instead. Putting the operator's
+// dimension on the protocol field would hand every client a query the
+// operator's contract never promised them.
 type Query struct {
 	Filter nostr.Filter
 	// ContentContains matches case-insensitively anywhere in the content.

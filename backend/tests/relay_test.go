@@ -1206,6 +1206,329 @@ func TestNip09(t *testing.T) {
 	}
 }
 
+// collectUntilEOSE reads a subscription's stored results, returning their
+// contents in the order the relay sent them — which for a search is the
+// order under test, so it must not be sorted here.
+func collectUntilEOSE(t *testing.T, c *testClient, subID string) []string {
+	t.Helper()
+	var contents []string
+	for {
+		_, raw, err := c.ReadMessage()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			t.Fatalf("unmarshal message: %v", err)
+		}
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		switch msgType {
+		case "EVENT":
+			var gotSub string
+			json.Unmarshal(arr[1], &gotSub)
+			if gotSub != subID {
+				continue
+			}
+			var ev nostr.Event
+			if err := json.Unmarshal(arr[2], &ev); err != nil {
+				t.Fatalf("unmarshal event: %v", err)
+			}
+			contents = append(contents, ev.Content)
+		case "EOSE":
+			return contents
+		case "CLOSED":
+			t.Fatalf("subscription closed before EOSE: %s", raw)
+		}
+	}
+}
+
+// publishEvent publishes one signed event and waits for its OK.
+func publishEvent(t *testing.T, c *testClient, ev nostr.Event) {
+	t.Helper()
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("write EVENT: %v", err)
+	}
+	c.readOK(t)
+}
+
+// searchREQ opens a subscription carrying a NIP-50 search term.
+func searchREQ(t *testing.T, c *testClient, subID string, filter nostr.Filter) {
+	t.Helper()
+	req, _ := json.Marshal([]any{"REQ", subID, filter})
+	if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write REQ: %v", err)
+	}
+}
+
+// TestNip50 covers the search filter: what it matches, the order it comes
+// back in, that it narrows rather than replaces the rest of the filter,
+// that the NIP's extensions are ignored rather than searched for, and that
+// a live subscription keeps applying the term after EOSE.
+func TestNip50(t *testing.T) {
+	t.Run("returns only matching events", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		publishEvent(t, c, signedEvent(t, 1, "oranges are a citrus fruit", nil))
+		publishEvent(t, c, signedEvent(t, 1, "lemons are also citrus", nil))
+
+		searchREQ(t, c, "sub_basic", nostr.Filter{Search: "orange"})
+		got := collectUntilEOSE(t, c, "sub_basic")
+		assert.Equal(t, []string{"oranges are a citrus fruit"}, got,
+			"only events whose content contains the term may be returned")
+	})
+
+	t.Run("orders by position, then length, then recency", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		now := nostr.Now()
+		// Same term, arranged so each ordering key decides exactly one
+		// pair: position separates the last from the rest, length
+		// separates the two at position 1, and created_at separates the
+		// two that tie on both.
+		earlyShort := signedEvent(t, 1, "orange aaa", nil)
+		earlyShort.CreatedAt = now - 100
+		earlyShortNewer := signedEvent(t, 1, "orange bbb", nil)
+		earlyShortNewer.CreatedAt = now - 50
+		earlyLong := signedEvent(t, 1, "orange but this note runs on considerably longer", nil)
+		earlyLong.CreatedAt = now - 10
+		late := signedEvent(t, 1, "a note that mentions orange only near its end", nil)
+		late.CreatedAt = now
+
+		for _, ev := range []nostr.Event{earlyShort, earlyShortNewer, earlyLong, late} {
+			resigned := ev
+			resigned.Sign(testSearchKey)
+			publishEvent(t, c, resigned)
+		}
+
+		searchREQ(t, c, "sub_order", nostr.Filter{Search: "orange"})
+		got := collectUntilEOSE(t, c, "sub_order")
+		assert.Equal(t, []string{
+			"orange bbb",
+			"orange aaa",
+			"orange but this note runs on considerably longer",
+			"a note that mentions orange only near its end",
+		}, got, "documented order: earliest occurrence, then shortest content, then newest")
+	})
+
+	t.Run("narrows rather than replaces the rest of the filter", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		otherKey := nostr.GeneratePrivateKey()
+		otherPub, _ := nostr.GetPublicKey(otherKey)
+		mine := signedEventWithKey(t, testSearchKey, 1, "orange kind one mine", nil)
+		theirs := signedEventWithKey(t, otherKey, 1, "orange kind one theirs", nil)
+		wrongKind := signedEventWithKey(t, testSearchKey, 7, "orange kind seven mine", nil)
+		publishEvent(t, c, mine)
+		publishEvent(t, c, theirs)
+		publishEvent(t, c, wrongKind)
+
+		searchREQ(t, c, "sub_kind", nostr.Filter{Search: "orange", Kinds: []int{1}})
+		assert.ElementsMatch(t, []string{"orange kind one mine", "orange kind one theirs"},
+			collectUntilEOSE(t, c, "sub_kind"), "kinds must narrow the search, not be ignored")
+
+		searchREQ(t, c, "sub_author", nostr.Filter{Search: "orange", Authors: []string{otherPub}})
+		assert.Equal(t, []string{"orange kind one theirs"},
+			collectUntilEOSE(t, c, "sub_author"), "authors must narrow the search")
+
+		future := nostr.Now() + 3600
+		searchREQ(t, c, "sub_time", nostr.Filter{Search: "orange", Since: &future})
+		assert.Empty(t, collectUntilEOSE(t, c, "sub_time"), "since/until must narrow the search")
+	})
+
+	t.Run("ignores the extensions it does not support", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		publishEvent(t, c, signedEvent(t, 1, "oranges are a citrus fruit", nil))
+
+		for _, extension := range []string{
+			"include:spam",
+			"domain:example.com",
+			"language:en",
+			"sentiment:positive",
+			"nsfw:false",
+		} {
+			subID := "sub_ext_" + extension
+			searchREQ(t, c, subID, nostr.Filter{Search: "orange " + extension})
+			assert.Equal(t, []string{"oranges are a citrus fruit"}, collectUntilEOSE(t, c, subID),
+				"%q must be ignored, leaving the rest of the query to match", extension)
+		}
+	})
+
+	t.Run("keeps applying the term to live events", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		subscriber := connectTestRelay(t, server)
+		defer subscriber.Close()
+		publisher := connectTestRelay(t, server)
+		defer publisher.Close()
+
+		searchREQ(t, subscriber, "sub_live", nostr.Filter{Search: "orange", Kinds: []int{1}})
+		assert.Empty(t, collectUntilEOSE(t, subscriber, "sub_live"), "nothing stored yet")
+
+		// The regression this closes: go-nostr's Filter.Matches ignores
+		// Search, so before this change the non-matching event below
+		// arrived on this subscription.
+		publishEvent(t, publisher, signedEvent(t, 1, "lemons, which are not the subject", nil))
+		publishEvent(t, publisher, signedEvent(t, 1, "orange, which is", nil))
+
+		_, raw, err := subscriber.ReadMessage()
+		if err != nil {
+			t.Fatalf("read live event: %v", err)
+		}
+		var arr []json.RawMessage
+		json.Unmarshal(raw, &arr)
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		require.Equal(t, "EVENT", msgType, "expected a live EVENT, got %s", raw)
+		var ev nostr.Event
+		json.Unmarshal(arr[2], &ev)
+		assert.Equal(t, "orange, which is", ev.Content,
+			"the first live event delivered must be the matching one; the non-matching event must never arrive")
+	})
+
+	t.Run("refuses a term it will not run", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+
+		short := connectTestRelay(t, server)
+		defer short.Close()
+		searchREQ(t, short, "sub_short", nostr.Filter{Search: "ab"})
+		closed := short.readClosed(t)
+		assert.Contains(t, closed[2], "at least", "a too-short term must say so rather than scanning")
+
+		onlyExtensions := connectTestRelay(t, server)
+		defer onlyExtensions.Close()
+		searchREQ(t, onlyExtensions, "sub_ext_only", nostr.Filter{Search: "domain:example.com"})
+		closedExt := onlyExtensions.readClosed(t)
+		assert.Contains(t, closedExt[2], "no searchable text",
+			"a query that is entirely extensions leaves nothing to search for, and saying so beats an empty result")
+	})
+
+	t.Run("an explicit limit of zero returns no stored events", func(t *testing.T) {
+		// The hole this closes: queryEvents emits no SQL LIMIT unless the
+		// limit is positive, so before this a search asking for zero
+		// stored events was answered with every matching row — the exact
+		// unbounded scan the default limit exists to prevent.
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		subscriber := connectTestRelay(t, server)
+		defer subscriber.Close()
+		publisher := connectTestRelay(t, server)
+		defer publisher.Close()
+
+		publishEvent(t, publisher, signedEvent(t, 1, "orange, stored before the subscription", nil))
+
+		req, _ := json.Marshal([]any{"REQ", "sub_zero", map[string]any{
+			"search": "orange", "kinds": []int{1}, "limit": 0,
+		}})
+		require.NoError(t, subscriber.WriteMessage(websocket.TextMessage, req))
+		assert.Empty(t, collectUntilEOSE(t, subscriber, "sub_zero"),
+			"limit:0 asks for no stored events, and must not be answered with all of them")
+
+		// Still a live subscription: zero stored events is not zero events.
+		publishEvent(t, publisher, signedEvent(t, 1, "orange, published live", nil))
+		_, raw, err := subscriber.ReadMessage()
+		require.NoError(t, err)
+		var arr []json.RawMessage
+		json.Unmarshal(raw, &arr)
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		require.Equal(t, "EVENT", msgType, "expected a live EVENT, got %s", raw)
+		var ev nostr.Event
+		json.Unmarshal(arr[2], &ev)
+		assert.Equal(t, "orange, published live", ev.Content)
+	})
+
+	t.Run("advertises NIP-50 even with no configuration file", func(t *testing.T) {
+		// A relay started without config.yaml runs on the hardcoded
+		// fallback in NewRelayHandlerFull. Advertising search only in the
+		// shipped YAML would leave that supported startup mode
+		// implementing the NIP while telling discovery-based clients it
+		// does not.
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+
+		req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+		require.NoError(t, err)
+		req.Header.Set("Accept", "application/nostr+json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		var info struct {
+			SupportedNips []int `json:"supported_nips"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&info))
+		assert.Contains(t, info.SupportedNips, 50,
+			"the no-config fallback must advertise the NIPs the handler actually implements")
+	})
+
+	t.Run("a refused replacement does not leak the subscription count", func(t *testing.T) {
+		// sendClosed removes the subscription it refuses. Removing without
+		// decrementing left the gauge permanently high, and disconnect
+		// cleanup only counts what is still in the map, so nothing later
+		// repaired it — the dashboard kept reporting a subscription that
+		// had been closed.
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		before := testutil.ToFloat64(metrics.SubscriptionsActive)
+
+		searchREQ(t, c, "sub_replace", nostr.Filter{Search: "orange", Kinds: []int{1}})
+		collectUntilEOSE(t, c, "sub_replace")
+		assert.Equal(t, before+1, testutil.ToFloat64(metrics.SubscriptionsActive),
+			"opening a subscription counts it")
+
+		// Same subscription id, now with a term the relay refuses.
+		searchREQ(t, c, "sub_replace", nostr.Filter{Search: "ab"})
+		c.readClosed(t)
+		assert.Equal(t, before, testutil.ToFloat64(metrics.SubscriptionsActive),
+			"refusing a replacement must uncount the subscription it removed")
+	})
+
+	t.Run("matches non-ASCII content", func(t *testing.T) {
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		c := connectTestRelay(t, server)
+		defer c.Close()
+
+		publishEvent(t, c, signedEvent(t, 1, "trinkt Orangensaft am Frühstück", nil))
+
+		searchREQ(t, c, "sub_exact", nostr.Filter{Search: "Frühstück"})
+		assert.Equal(t, []string{"trinkt Orangensaft am Frühstück"}, collectUntilEOSE(t, c, "sub_exact"),
+			"a non-ASCII term must match content containing it")
+
+		// Case folding beyond ASCII is DuckDB's business, not something to
+		// assert from memory. This records what it actually does, so a
+		// change in the engine shows up here rather than in a user report.
+		searchREQ(t, c, "sub_folded", nostr.Filter{Search: "frühstück"})
+		folded := collectUntilEOSE(t, c, "sub_folded")
+		t.Logf("non-ASCII case folding: lowercase term matched %d event(s)", len(folded))
+		assert.Equal(t, []string{"trinkt Orangensaft am Frühstück"}, folded,
+			"ILIKE folds case beyond ASCII; if this ever fails the README's claim needs revisiting")
+	})
+}
+
+// testSearchKey is one key for the search tests, so author filtering is
+// about the filter rather than about which helper signed what.
+var testSearchKey = nostr.GeneratePrivateKey()
+
 func TestNip40(t *testing.T) {
 	server, _, cleanup := startTestRelay(t)
 	defer cleanup()

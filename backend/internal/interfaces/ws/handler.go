@@ -61,7 +61,7 @@ func NewRelayHandlerFull(events application.EventService, moderationSvc applicat
 		info.Description = "A minimal Nostr relay written in Go."
 	}
 	if len(info.SupportedNips) == 0 {
-		info.SupportedNips = []int{1, 2, 9, 11, 17, 22, 28, 40, 42, 70, 71, 77, 86, 98}
+		info.SupportedNips = []int{1, 2, 9, 11, 17, 22, 28, 40, 42, 50, 70, 71, 77, 86, 98}
 	}
 	if info.Software == "" {
 		info.Software = "https://github.com/nostrfi/relay"
@@ -316,6 +316,10 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 					filters[i].Limit = limitation.MaxLimit
 				}
 			}
+		}
+		if reason, ok := prepareSearchFilters(filters, limitation); !ok {
+			h.sendClosed(c, subID, reason)
+			return
 		}
 		if !subExisted {
 			h.subCount.Add(1)
