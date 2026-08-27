@@ -93,17 +93,27 @@ func NewRelayHandlerFull(events application.EventService, moderationSvc applicat
 	return h
 }
 
-// checkOrigin enforces the configured WebSocket origin policy. Development
-// mode preserves the historical permissive behavior; production mode is
-// fail-closed and is validated at config load to always have a non-empty
-// allow-list.
+// checkOrigin enforces production mode's origin allow-list on browser
+// connections, and only on browser connections.
+//
+// A request with no Origin header is admitted. Only browsers send Origin;
+// wscat, CLI and mobile Nostr clients, and relay-to-relay sync do not, and
+// refusing them made production mode unusable by anything but a web page —
+// on a relay whose operating model is public reusable infrastructure. It
+// also bought nothing: a non-browser attacker sets whatever Origin it
+// likes, so the absent-header refusal only ever excluded honest clients.
+// This deliberately reverses the "missing" half of workspace #4's
+// missing/malformed/unlisted rule; re-decided under nostrfi/workspace#45.
+//
+// An Origin that is present but malformed or unlisted is still refused:
+// that is the browser case, the one an allow-list can actually bind.
 func (h *RelayHandler) checkOrigin(r *http.Request) bool {
 	if h.websocket.Mode != websocketModeProduction {
 		return true
 	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
-		return false
+		return true
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.Host == "" {

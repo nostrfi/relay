@@ -34,7 +34,13 @@ moderation:
   max_event_age_seconds: 60 # NIP-98 auth events older or further in the future than this are rejected
 
 websocket:
-  mode: "development" # "development" allows any Origin; set "production" for internet-facing deployment
+  # "development" accepts a browser connection from any Origin — the right
+  # mode for a relay meant to serve arbitrary web clients (the public
+  # reusable model; re-decided under nostrfi/workspace#45). The relay warns
+  # at startup when this mode binds a non-loopback interface, so the choice
+  # is visible. "production" restricts browsers to allowed_origins.
+  # Non-browser clients send no Origin and are admitted in both modes.
+  mode: "development"
   allowed_origins: [] # required (non-empty) when mode is "production"
 
 retention:

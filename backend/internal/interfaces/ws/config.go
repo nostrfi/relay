@@ -3,6 +3,7 @@ package ws
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -67,11 +68,35 @@ const (
 	websocketModeProduction  = "production"
 )
 
-// WebsocketConfig controls which HTTP Origins may open a WebSocket
-// connection. Mode "production" is fail-closed: it requires a non-empty
-// AllowedOrigins list. Mode "development" (the default) preserves the
-// historical permissive behavior and must not be used for an
-// internet-facing deployment.
+// isLoopbackListenAddr reports whether addr binds only the loopback
+// interface. An empty host (":8080") binds every interface and is therefore
+// not loopback; "localhost" is trusted as loopback without a resolver
+// lookup, since an operator who has pointed it elsewhere has bigger
+// problems than a missing warning.
+func isLoopbackListenAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// WebsocketConfig controls which browser Origins may open a WebSocket
+// connection. Mode "development" (the default) accepts any Origin — the
+// right shape for a public reusable relay, whose purpose is to accept
+// arbitrary web clients, and re-accepted as such under
+// nostrfi/workspace#45 with a startup warning when it binds a non-loopback
+// interface. Mode "production" restricts browser connections to a
+// non-empty AllowedOrigins list, fail-closed at config load; connections
+// without an Origin header (every non-browser client) are admitted in
+// both modes, since an allow-list can only bind clients that send one.
 type WebsocketConfig struct {
 	Mode           string   `mapstructure:"mode"`
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
@@ -161,6 +186,24 @@ func configSearchPaths() []string {
 	paths = append(paths, "backend")
 
 	return paths
+}
+
+// WarnOnPermissivePublicListener says, once, when development mode is about
+// to accept any browser Origin on a non-loopback interface — the loud half
+// of nostrfi/workspace#45's re-decision. Loopback binds stay quiet: local
+// development is what the mode is for.
+//
+// A method called by cmd/relay after the -backup/-restore dispatch rather
+// than a side effect of LoadConfig, because LoadConfig cannot tell a relay
+// run from a backup run — and a warning about a listener that will never be
+// bound is a false alarm during routine administration (caught in review on
+// nostrfi/relay#35).
+func (cfg *Config) WarnOnPermissivePublicListener() {
+	if cfg.Websocket.Mode == websocketModeDevelopment && !isLoopbackListenAddr(cfg.Server.ListenAddr) {
+		slog.Warn("websocket.mode is \"development\" on a non-loopback listener; every browser Origin will be accepted",
+			"listen_addr", cfg.Server.ListenAddr,
+			"to_restrict_origins", "set websocket.mode: \"production\" with websocket.allowed_origins")
+	}
 }
 
 func LoadConfig() (*Config, error) {

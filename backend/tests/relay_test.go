@@ -34,6 +34,7 @@ import (
 	"github.com/gorilla/websocket"
 	negentropy "github.com/illuzen/go-negentropy"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip13"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -2196,9 +2197,15 @@ func TestResourceLimitsProofOfWork(t *testing.T) {
 	c := connectTestRelay(t, server)
 	defer c.Close()
 
-	// An ordinary, unmined event essentially never satisfies an 8-bit
-	// difficulty requirement.
+	// An ordinary, unmined event fails an 8-bit difficulty requirement —
+	// except once in 256, when the random id happens to start with a zero
+	// byte, the relay rightly accepts it, and this test used to fail with
+	// `"" does not contain "pow: ..."`. Re-sign until the id genuinely
+	// lacks the difficulty, so the rejection asserted on must happen.
 	ev := signedEvent(t, 1, "no pow here", nil)
+	for i := 0; nip13.Difficulty(ev.ID) >= limitation.MinPowDifficulty; i++ {
+		ev = signedEvent(t, 1, fmt.Sprintf("no pow here %d", i), nil)
+	}
 	msg, _ := json.Marshal([]any{"EVENT", ev})
 	c.WriteMessage(websocket.TextMessage, msg)
 
@@ -2815,6 +2822,12 @@ func TestWebsocketOriginPolicy(t *testing.T) {
 		dialWithOrigin(t, server, "https://anything.example", true)
 	})
 
+	t.Run("development mode allows an absent origin", func(t *testing.T) {
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{Mode: "development"})
+		defer cleanup()
+		dialWithOrigin(t, server, "", true)
+	})
+
 	t.Run("production mode allows a configured origin", func(t *testing.T) {
 		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
 		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
@@ -2829,11 +2842,17 @@ func TestWebsocketOriginPolicy(t *testing.T) {
 		dialWithOrigin(t, server, "https://denied.example", false)
 	})
 
-	t.Run("production mode denies an absent origin", func(t *testing.T) {
+	// Reversed under nostrfi/workspace#45: this subtest used to assert the
+	// absent-Origin dial was refused. Only browsers send Origin, so the old
+	// behaviour excluded every CLI client, wscat, and relay-to-relay sync
+	// from production mode while stopping no attacker — a non-browser
+	// client forges any Origin it likes. The allow-list still binds the
+	// case it can bind: an Origin that is present.
+	t.Run("production mode allows an absent origin", func(t *testing.T) {
 		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
 		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
 		defer cleanup()
-		dialWithOrigin(t, server, "", false)
+		dialWithOrigin(t, server, "", true)
 	})
 
 	t.Run("production mode denies a malformed origin", func(t *testing.T) {
@@ -2882,6 +2901,91 @@ func TestNip42NoChallengeOrPayloadInLogs(t *testing.T) {
 	assert.NotContains(t, logged, challenge2, "AUTH challenge must never be logged")
 	assert.NotContains(t, logged, authEv.Sig, "AUTH event payload must never be logged")
 	assert.NotContains(t, logged, badAuthEv.Sig, "AUTH event payload must never be logged")
+}
+
+// TestConfigDevelopmentModeWarnsOnPublicBind pins nostrfi/workspace#45's
+// decision: the permissive default stands, and what it bought in exchange
+// is that it cannot reach a public interface silently. Loopback binds stay
+// quiet — local development is the mode's purpose, and a warning that fires
+// on every dev loop is a warning nobody reads.
+func TestConfigDevelopmentModeWarnsOnPublicBind(t *testing.T) {
+	loadWithListenAddr := func(t *testing.T, websocketBlock, listenAddr string) string {
+		t.Helper()
+		tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		t.Cleanup(func() { os.RemoveAll(tmpDir) })
+		configContent := websocketBlock + "\nserver:\n  listen_addr: \"" + listenAddr + "\"\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(configContent), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		var buf bytes.Buffer
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(prevLogger)
+
+		viper.Reset()
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(tmpDir)
+		cfg, err := ws.LoadConfig()
+		if err != nil {
+			t.Fatalf("expected config to load: %v", err)
+		}
+		// The warning is a separate call, made by cmd/relay only when a
+		// server will actually start — LoadConfig alone cannot tell a relay
+		// run from a -backup/-restore run, and warning during a backup
+		// would be a false alarm (review on nostrfi/relay#35).
+		cfg.WarnOnPermissivePublicListener()
+		return buf.String()
+	}
+
+	const warned = "every browser Origin will be accepted"
+	devBlock := "relay_info:\n  name: \"Warn Test Relay\""
+	prodBlock := "websocket:\n  mode: \"production\"\n  allowed_origins: [\"https://relay.example.com\"]"
+
+	t.Run("development mode on a public bind warns", func(t *testing.T) {
+		assert.Contains(t, loadWithListenAddr(t, devBlock, ":8080"), warned)
+	})
+	t.Run("an explicit public interface warns too", func(t *testing.T) {
+		assert.Contains(t, loadWithListenAddr(t, devBlock, "0.0.0.0:8080"), warned)
+	})
+	t.Run("a loopback bind stays quiet", func(t *testing.T) {
+		assert.NotContains(t, loadWithListenAddr(t, devBlock, "127.0.0.1:8080"), warned)
+	})
+	t.Run("localhost counts as loopback", func(t *testing.T) {
+		assert.NotContains(t, loadWithListenAddr(t, devBlock, "localhost:8080"), warned)
+	})
+	t.Run("production mode on a public bind does not warn", func(t *testing.T) {
+		assert.NotContains(t, loadWithListenAddr(t, prodBlock, ":8080"), warned)
+	})
+
+	t.Run("LoadConfig alone does not warn", func(t *testing.T) {
+		// A -backup/-restore run loads the config and exits without ever
+		// binding the listener; the warning belongs to the run that will.
+		tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		t.Cleanup(func() { os.RemoveAll(tmpDir) })
+		if err := os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(devBlock+"\nserver:\n  listen_addr: \":8080\"\n"), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+		var buf bytes.Buffer
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(prevLogger)
+		viper.Reset()
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(tmpDir)
+		if _, err := ws.LoadConfig(); err != nil {
+			t.Fatalf("expected config to load: %v", err)
+		}
+		assert.NotContains(t, buf.String(), warned)
+	})
 }
 
 func TestConfigWebsocketProductionRequiresOrigins(t *testing.T) {
