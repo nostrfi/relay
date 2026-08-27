@@ -83,9 +83,12 @@ func prepareSearchFilters(filters []nostr.Filter, limitation *RelayLimitation) (
 		filters[i].Search = term
 
 		// LimitZero distinguishes an explicit "limit":0 — a client asking
-		// for no stored events at all — from an omitted limit. Only the
-		// latter gets a default.
-		if filters[i].Limit == 0 && !filters[i].LimitZero {
+		// for no stored events at all, handled in handleReq — from an
+		// omitted one. Anything else non-positive is a limit the query
+		// layer would ignore, emitting no SQL LIMIT at all and returning
+		// the whole matching set: for the one query no index can answer,
+		// that is the unbounded scan this default exists to prevent.
+		if filters[i].Limit <= 0 && !filters[i].LimitZero {
 			filters[i].Limit = fallbackSearchLimit
 			if limitation != nil && limitation.MaxLimit > 0 {
 				filters[i].Limit = limitation.MaxLimit

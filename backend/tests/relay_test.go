@@ -1418,6 +1418,65 @@ func TestNip50(t *testing.T) {
 			"a query that is entirely extensions leaves nothing to search for, and saying so beats an empty result")
 	})
 
+	t.Run("an explicit limit of zero returns no stored events", func(t *testing.T) {
+		// The hole this closes: queryEvents emits no SQL LIMIT unless the
+		// limit is positive, so before this a search asking for zero
+		// stored events was answered with every matching row — the exact
+		// unbounded scan the default limit exists to prevent.
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+		subscriber := connectTestRelay(t, server)
+		defer subscriber.Close()
+		publisher := connectTestRelay(t, server)
+		defer publisher.Close()
+
+		publishEvent(t, publisher, signedEvent(t, 1, "orange, stored before the subscription", nil))
+
+		req, _ := json.Marshal([]any{"REQ", "sub_zero", map[string]any{
+			"search": "orange", "kinds": []int{1}, "limit": 0,
+		}})
+		require.NoError(t, subscriber.WriteMessage(websocket.TextMessage, req))
+		assert.Empty(t, collectUntilEOSE(t, subscriber, "sub_zero"),
+			"limit:0 asks for no stored events, and must not be answered with all of them")
+
+		// Still a live subscription: zero stored events is not zero events.
+		publishEvent(t, publisher, signedEvent(t, 1, "orange, published live", nil))
+		_, raw, err := subscriber.ReadMessage()
+		require.NoError(t, err)
+		var arr []json.RawMessage
+		json.Unmarshal(raw, &arr)
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		require.Equal(t, "EVENT", msgType, "expected a live EVENT, got %s", raw)
+		var ev nostr.Event
+		json.Unmarshal(arr[2], &ev)
+		assert.Equal(t, "orange, published live", ev.Content)
+	})
+
+	t.Run("advertises NIP-50 even with no configuration file", func(t *testing.T) {
+		// A relay started without config.yaml runs on the hardcoded
+		// fallback in NewRelayHandlerFull. Advertising search only in the
+		// shipped YAML would leave that supported startup mode
+		// implementing the NIP while telling discovery-based clients it
+		// does not.
+		server, _, cleanup := startTestRelay(t)
+		defer cleanup()
+
+		req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+		require.NoError(t, err)
+		req.Header.Set("Accept", "application/nostr+json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		var info struct {
+			SupportedNips []int `json:"supported_nips"`
+		}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&info))
+		assert.Contains(t, info.SupportedNips, 50,
+			"the no-config fallback must advertise the NIPs the handler actually implements")
+	})
+
 	t.Run("matches non-ASCII content", func(t *testing.T) {
 		server, _, cleanup := startTestRelay(t)
 		defer cleanup()

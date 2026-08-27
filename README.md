@@ -131,9 +131,10 @@ and `18:30` are searched for as written, rather than being silently deleted from
 
 **Limits.** A search term must be at least 3 characters after extensions are removed; shorter, or a
 query that was nothing but extensions, is refused with `CLOSED` and an `invalid:` reason rather than
-answered with a misleading empty result. A search filter that specifies no `limit` is given the
-relay's advertised `max_limit` (500 as shipped), since unlike every other `REQ` a search cannot be
-answered from an index.
+answered with a misleading empty result. A search filter that specifies no `limit` — or a
+non-positive one other than an explicit `0` — is given the relay's advertised `max_limit` (500 as
+shipped), since unlike every other `REQ` a search cannot be answered from an index. An explicit
+`"limit": 0` means what NIP-01 says it means: no stored events, live updates only.
 
 **Live subscriptions keep searching.** An open `REQ` carrying `search` applies the term to new
 events too, so it streams only matches — it does not stop filtering at `EOSE`.

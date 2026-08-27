@@ -3,7 +3,9 @@ package ws
 import (
 	"testing"
 
+	"github.com/nbd-wtf/go-nostr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestParseSearchTerm covers where NIP-50's ambiguity lives: which tokens
@@ -39,4 +41,61 @@ func TestParseSearchTerm(t *testing.T) {
 			assert.Equal(t, tt.want, parseSearchTerm(tt.raw))
 		})
 	}
+}
+
+// TestPrepareSearchFiltersLimits covers the guardrail that stops a search —
+// the one query no index can answer — from running unbounded. queryEvents
+// emits no SQL LIMIT unless the filter's limit is positive, so every
+// non-positive value has to be normalized here or the whole matching set
+// comes back.
+func TestPrepareSearchFiltersLimits(t *testing.T) {
+	limitation := &RelayLimitation{MaxLimit: 500}
+
+	tests := []struct {
+		name      string
+		filter    nostr.Filter
+		wantLimit int
+	}{
+		{"absent limit takes the default", nostr.Filter{Search: "orange"}, 500},
+		{"negative limit takes the default", nostr.Filter{Search: "orange", Limit: -5}, 500},
+		{"a positive limit is left alone", nostr.Filter{Search: "orange", Limit: 10}, 10},
+		{
+			// Not defaulted: handleReq answers this one with no stored
+			// events at all, which is what the client asked for.
+			"an explicit zero is left alone",
+			nostr.Filter{Search: "orange", LimitZero: true},
+			0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filters := []nostr.Filter{tt.filter}
+			reason, ok := prepareSearchFilters(filters, limitation)
+			require.True(t, ok, "expected the filter to be accepted, got %q", reason)
+			assert.Equal(t, tt.wantLimit, filters[0].Limit)
+		})
+	}
+
+	t.Run("a relay advertising no max_limit still bounds search", func(t *testing.T) {
+		filters := []nostr.Filter{{Search: "orange"}}
+		_, ok := prepareSearchFilters(filters, nil)
+		require.True(t, ok)
+		assert.Equal(t, fallbackSearchLimit, filters[0].Limit)
+	})
+
+	t.Run("a filter carrying no search is untouched", func(t *testing.T) {
+		filters := []nostr.Filter{{Kinds: []int{1}}}
+		_, ok := prepareSearchFilters(filters, limitation)
+		require.True(t, ok)
+		assert.Equal(t, 0, filters[0].Limit, "only search filters get a default limit")
+	})
+
+	t.Run("refusals", func(t *testing.T) {
+		_, ok := prepareSearchFilters([]nostr.Filter{{Search: "ab"}}, limitation)
+		assert.False(t, ok, "a term below the minimum is refused")
+
+		_, ok = prepareSearchFilters([]nostr.Filter{{Search: "domain:example.com"}}, limitation)
+		assert.False(t, ok, "a query that is nothing but extensions is refused")
+	})
 }

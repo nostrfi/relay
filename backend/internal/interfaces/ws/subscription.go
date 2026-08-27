@@ -26,6 +26,15 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 
 	seenIDs := make(map[string]bool)
 	for _, f := range filters {
+		// NIP-01: limit is the maximum number of events to return in the
+		// initial query, so "limit":0 asks for none of them — a client
+		// that wants live updates only. queryEvents emits no SQL LIMIT
+		// below a positive limit, so querying here would answer that
+		// request with every matching row instead of none. The
+		// subscription is already stored, so live delivery continues.
+		if f.LimitZero {
+			continue
+		}
 		start := time.Now()
 		events, err := h.eventService.QueryEvents(context.Background(), f)
 		metrics.QueryDuration.WithLabelValues("req").Observe(time.Since(start).Seconds())
