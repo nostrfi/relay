@@ -2815,6 +2815,12 @@ func TestWebsocketOriginPolicy(t *testing.T) {
 		dialWithOrigin(t, server, "https://anything.example", true)
 	})
 
+	t.Run("development mode allows an absent origin", func(t *testing.T) {
+		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{Mode: "development"})
+		defer cleanup()
+		dialWithOrigin(t, server, "", true)
+	})
+
 	t.Run("production mode allows a configured origin", func(t *testing.T) {
 		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
 		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
@@ -2829,11 +2835,17 @@ func TestWebsocketOriginPolicy(t *testing.T) {
 		dialWithOrigin(t, server, "https://denied.example", false)
 	})
 
-	t.Run("production mode denies an absent origin", func(t *testing.T) {
+	// Reversed under nostrfi/workspace#45: this subtest used to assert the
+	// absent-Origin dial was refused. Only browsers send Origin, so the old
+	// behaviour excluded every CLI client, wscat, and relay-to-relay sync
+	// from production mode while stopping no attacker — a non-browser
+	// client forges any Origin it likes. The allow-list still binds the
+	// case it can bind: an Origin that is present.
+	t.Run("production mode allows an absent origin", func(t *testing.T) {
 		wsCfg := ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://allowed.example"}}
 		server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, wsCfg)
 		defer cleanup()
-		dialWithOrigin(t, server, "", false)
+		dialWithOrigin(t, server, "", true)
 	})
 
 	t.Run("production mode denies a malformed origin", func(t *testing.T) {
@@ -2882,6 +2894,60 @@ func TestNip42NoChallengeOrPayloadInLogs(t *testing.T) {
 	assert.NotContains(t, logged, challenge2, "AUTH challenge must never be logged")
 	assert.NotContains(t, logged, authEv.Sig, "AUTH event payload must never be logged")
 	assert.NotContains(t, logged, badAuthEv.Sig, "AUTH event payload must never be logged")
+}
+
+// TestConfigDevelopmentModeWarnsOnPublicBind pins nostrfi/workspace#45's
+// decision: the permissive default stands, and what it bought in exchange
+// is that it cannot reach a public interface silently. Loopback binds stay
+// quiet — local development is the mode's purpose, and a warning that fires
+// on every dev loop is a warning nobody reads.
+func TestConfigDevelopmentModeWarnsOnPublicBind(t *testing.T) {
+	loadWithListenAddr := func(t *testing.T, websocketBlock, listenAddr string) string {
+		t.Helper()
+		tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		t.Cleanup(func() { os.RemoveAll(tmpDir) })
+		configContent := websocketBlock + "\nserver:\n  listen_addr: \"" + listenAddr + "\"\n"
+		if err := os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(configContent), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		var buf bytes.Buffer
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(prevLogger)
+
+		viper.Reset()
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(tmpDir)
+		if _, err := ws.LoadConfig(); err != nil {
+			t.Fatalf("expected config to load: %v", err)
+		}
+		return buf.String()
+	}
+
+	const warned = "every browser Origin will be accepted"
+	devBlock := "relay_info:\n  name: \"Warn Test Relay\""
+	prodBlock := "websocket:\n  mode: \"production\"\n  allowed_origins: [\"https://relay.example.com\"]"
+
+	t.Run("development mode on a public bind warns", func(t *testing.T) {
+		assert.Contains(t, loadWithListenAddr(t, devBlock, ":8080"), warned)
+	})
+	t.Run("an explicit public interface warns too", func(t *testing.T) {
+		assert.Contains(t, loadWithListenAddr(t, devBlock, "0.0.0.0:8080"), warned)
+	})
+	t.Run("a loopback bind stays quiet", func(t *testing.T) {
+		assert.NotContains(t, loadWithListenAddr(t, devBlock, "127.0.0.1:8080"), warned)
+	})
+	t.Run("localhost counts as loopback", func(t *testing.T) {
+		assert.NotContains(t, loadWithListenAddr(t, devBlock, "localhost:8080"), warned)
+	})
+	t.Run("production mode on a public bind does not warn", func(t *testing.T) {
+		assert.NotContains(t, loadWithListenAddr(t, prodBlock, ":8080"), warned)
+	})
 }
 
 func TestConfigWebsocketProductionRequiresOrigins(t *testing.T) {
