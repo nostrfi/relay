@@ -51,6 +51,10 @@ func main() {
 		return
 	}
 
+	// Only a run that will actually bind the listener warns about it; a
+	// -backup/-restore run has already returned above.
+	cfg.WarnOnPermissivePublicListener()
+
 	slog.Info("Starting relay", "version", version)
 
 	// 3. Initialize Repository

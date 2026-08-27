@@ -188,6 +188,24 @@ func configSearchPaths() []string {
 	return paths
 }
 
+// WarnOnPermissivePublicListener says, once, when development mode is about
+// to accept any browser Origin on a non-loopback interface — the loud half
+// of nostrfi/workspace#45's re-decision. Loopback binds stay quiet: local
+// development is what the mode is for.
+//
+// A method called by cmd/relay after the -backup/-restore dispatch rather
+// than a side effect of LoadConfig, because LoadConfig cannot tell a relay
+// run from a backup run — and a warning about a listener that will never be
+// bound is a false alarm during routine administration (caught in review on
+// nostrfi/relay#35).
+func (cfg *Config) WarnOnPermissivePublicListener() {
+	if cfg.Websocket.Mode == websocketModeDevelopment && !isLoopbackListenAddr(cfg.Server.ListenAddr) {
+		slog.Warn("websocket.mode is \"development\" on a non-loopback listener; every browser Origin will be accepted",
+			"listen_addr", cfg.Server.ListenAddr,
+			"to_restrict_origins", "set websocket.mode: \"production\" with websocket.allowed_origins")
+	}
+}
+
 func LoadConfig() (*Config, error) {
 	viper.SetConfigType("yaml")
 	if explicit := os.Getenv(ConfigFileEnv); explicit != "" {
@@ -281,18 +299,6 @@ func LoadConfig() (*Config, error) {
 	}
 	if cfg.Server.ShutdownTimeoutSeconds == 0 {
 		cfg.Server.ShutdownTimeoutSeconds = 5
-	}
-	// Development mode on a public interface accepts a WebSocket connection
-	// from any web page a visitor's browser happens to be on. That is the
-	// right default for a public reusable relay (nostrfi/workspace#45
-	// re-decided it with the dashboard considered), but it should never
-	// reach an internet-facing deployment silently — so it is said here,
-	// once, at the only point that knows both the mode and the bind.
-	// Loopback binds stay quiet: local development is what the mode is for.
-	if cfg.Websocket.Mode == websocketModeDevelopment && !isLoopbackListenAddr(cfg.Server.ListenAddr) {
-		slog.Warn("websocket.mode is \"development\" on a non-loopback listener; every browser Origin will be accepted",
-			"listen_addr", cfg.Server.ListenAddr,
-			"to_restrict_origins", "set websocket.mode: \"production\" with websocket.allowed_origins")
 	}
 	if cfg.Storage.DBPath == "" {
 		cfg.Storage.DBPath = "db/relay.db"

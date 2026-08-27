@@ -34,6 +34,7 @@ import (
 	"github.com/gorilla/websocket"
 	negentropy "github.com/illuzen/go-negentropy"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/nbd-wtf/go-nostr/nip13"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
@@ -2196,9 +2197,15 @@ func TestResourceLimitsProofOfWork(t *testing.T) {
 	c := connectTestRelay(t, server)
 	defer c.Close()
 
-	// An ordinary, unmined event essentially never satisfies an 8-bit
-	// difficulty requirement.
+	// An ordinary, unmined event fails an 8-bit difficulty requirement —
+	// except once in 256, when the random id happens to start with a zero
+	// byte, the relay rightly accepts it, and this test used to fail with
+	// `"" does not contain "pow: ..."`. Re-sign until the id genuinely
+	// lacks the difficulty, so the rejection asserted on must happen.
 	ev := signedEvent(t, 1, "no pow here", nil)
+	for i := 0; nip13.Difficulty(ev.ID) >= limitation.MinPowDifficulty; i++ {
+		ev = signedEvent(t, 1, fmt.Sprintf("no pow here %d", i), nil)
+	}
 	msg, _ := json.Marshal([]any{"EVENT", ev})
 	c.WriteMessage(websocket.TextMessage, msg)
 
@@ -2923,9 +2930,15 @@ func TestConfigDevelopmentModeWarnsOnPublicBind(t *testing.T) {
 		viper.SetConfigName("config")
 		viper.SetConfigType("yaml")
 		viper.AddConfigPath(tmpDir)
-		if _, err := ws.LoadConfig(); err != nil {
+		cfg, err := ws.LoadConfig()
+		if err != nil {
 			t.Fatalf("expected config to load: %v", err)
 		}
+		// The warning is a separate call, made by cmd/relay only when a
+		// server will actually start — LoadConfig alone cannot tell a relay
+		// run from a -backup/-restore run, and warning during a backup
+		// would be a false alarm (review on nostrfi/relay#35).
+		cfg.WarnOnPermissivePublicListener()
 		return buf.String()
 	}
 
@@ -2947,6 +2960,31 @@ func TestConfigDevelopmentModeWarnsOnPublicBind(t *testing.T) {
 	})
 	t.Run("production mode on a public bind does not warn", func(t *testing.T) {
 		assert.NotContains(t, loadWithListenAddr(t, prodBlock, ":8080"), warned)
+	})
+
+	t.Run("LoadConfig alone does not warn", func(t *testing.T) {
+		// A -backup/-restore run loads the config and exits without ever
+		// binding the listener; the warning belongs to the run that will.
+		tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
+		if err != nil {
+			t.Fatalf("failed to create temp dir: %v", err)
+		}
+		t.Cleanup(func() { os.RemoveAll(tmpDir) })
+		if err := os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(devBlock+"\nserver:\n  listen_addr: \":8080\"\n"), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+		var buf bytes.Buffer
+		prevLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+		defer slog.SetDefault(prevLogger)
+		viper.Reset()
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(tmpDir)
+		if _, err := ws.LoadConfig(); err != nil {
+			t.Fatalf("expected config to load: %v", err)
+		}
+		assert.NotContains(t, buf.String(), warned)
 	})
 }
 
