@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"time"
@@ -36,9 +37,17 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 			continue
 		}
 		start := time.Now()
-		events, err := h.eventService.QueryEvents(context.Background(), f)
+		events, err := h.eventService.QueryEvents(c.ctx, f)
 		metrics.QueryDuration.WithLabelValues("req").Observe(time.Since(start).Seconds())
 		if err != nil {
+			// The client hanging up mid-query is the connection ending, not
+			// a query failing; logging it as an error would let any client
+			// spam the relay's error log by disconnecting at the right
+			// moment. Nothing more useful remains to do for this REQ either
+			// way — the remaining filters would be cancelled too.
+			if errors.Is(err, context.Canceled) {
+				return
+			}
 			slog.Error("query error", "error", err)
 			continue
 		}

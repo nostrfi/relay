@@ -5,6 +5,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"relay/internal/application"
 	"relay/pkg/metrics"
@@ -218,11 +220,14 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		conn.SetReadLimit(int64(h.relayInfo.Limitation.MaxMessageLength))
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	client := &Client{
 		handler:      h,
 		conn:         conn,
 		msgLimiter:   newLimiter(h.resourceLimits.MessagesPerSecond),
 		eventLimiter: newLimiter(h.resourceLimits.EventsPerSecond),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 	h.clients.Store(client, true)
 
@@ -230,7 +235,42 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	client.challenge = fmt.Sprintf("%x", nostr.GeneratePrivateKey()[:16])
 	h.sendAuth(client, client.challenge)
 
+	// One worker per connection runs handleMessage in arrival order, off
+	// the read loop. With dispatch inline in the read loop (the previous
+	// shape), the connection's context could only ever be cancelled after
+	// the in-flight handler returned — exactly too late to interrupt it.
+	// Splitting reader from handler is what lets a disconnect observed by
+	// the reader abort work the handler is still doing. A single worker
+	// (not a goroutine per message) preserves the ordering and
+	// single-writer assumptions handleMessage inherits from the old shape:
+	// challenge/authPubkey and subscription bookkeeping are only ever
+	// touched from one goroutine at a time.
+	queue := newMessageQueue()
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for {
+			item, ok := queue.pop()
+			if !ok {
+				return
+			}
+			if item.notice != "" {
+				h.sendNotice(client, item.notice)
+				continue
+			}
+			h.handleMessage(client, item.msg)
+		}
+	}()
+
 	defer func() {
+		// Order matters: cancel first so the in-flight handler's repository
+		// work is aborted; then close the queue, which discards anything
+		// still buffered, so the worker exits right after its current
+		// message; then wait for it, so no handler can touch conn or the
+		// counters after they're torn down.
+		client.cancel()
+		queue.close()
+		<-workerDone
 		h.clients.Delete(client)
 		h.connCount.Add(-1)
 		metrics.ConnectionsActive.Dec()
@@ -241,16 +281,48 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		conn.Close()
 	}()
 
+	// The read pump. It must never block anywhere but ReadMessage: the
+	// pump is the only goroutine that can observe a disconnect, so a pump
+	// stuck on a full hand-off would leave cancellation unreachable right
+	// when a slow query makes it matter — the failure mode this design
+	// exists to remove. push is therefore non-blocking; a client that
+	// overruns the queue's byte budget while its worker is busy is
+	// disconnected (the teardown above cancels whatever its worker is
+	// doing), not silently dropped a message or waited on.
+	var lastRateNotice time.Time
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
 		if client.msgLimiter != nil && !client.msgLimiter.Allow() {
-			h.sendNotice(client, prefixRateLimited+": message rate exceeded")
+			// The notice rides the queue so the worker writes it in
+			// order: the pump must never touch the write path (it can
+			// stall on c.mu behind a slow worker write for a full write
+			// deadline), and a goroutine per notice would let a stalled
+			// peer accumulate one blocked goroutine per second for the
+			// flood's duration. Throttled because this branch fires per
+			// flooded frame: the client learns it is over the limit, it
+			// does not get a per-frame echo.
+			if time.Since(lastRateNotice) >= time.Second {
+				lastRateNotice = time.Now()
+				queue.pushNotice(prefixRateLimited + ": message rate exceeded")
+			}
 			continue
 		}
-		h.handleMessage(client, message)
+		if !queue.push(message) {
+			// A close frame with the reason, then teardown. WriteControl
+			// is the one write gorilla allows concurrently with the
+			// worker's writes, and its deadline bounds the pump's only
+			// non-ReadMessage wait to this one moment on this already-dead
+			// connection; a NOTICE can't be used here because the queue it
+			// would ride is the thing that just overflowed.
+			deadline := time.Now().Add(500 * time.Millisecond)
+			_ = conn.WriteControl(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.ClosePolicyViolation, prefixRateLimited+": message queue overflow"),
+				deadline)
+			break
+		}
 	}
 }
 
