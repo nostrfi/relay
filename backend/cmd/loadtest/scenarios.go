@@ -628,6 +628,7 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 	var rateLimitedRetries atomic.Int64
 	var workerFailed atomic.Bool
 	var searchWg sync.WaitGroup
+	classes := []string{commonTerm, rareTerm, missTerm}
 	for w, c := range searchConns {
 		searchWg.Add(1)
 		go func(w int, c *websocket.Conn) {
@@ -635,7 +636,13 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 			defer c.Close()
 			subID := fmt.Sprintf("lt_search_%d", w)
 			for time.Now().Before(deadline) {
-				for _, term := range []string{commonTerm, rareTerm, missTerm} {
+				// Each worker starts one class further along: with every
+				// worker walking common→rare→miss, a window shorter than
+				// the first query would leave the later classes with no
+				// attempts at all, and the always-first class would soak up
+				// any systematic first-in-cycle cost alone.
+				for i := range classes {
+					term := classes[(w+i)%len(classes)]
 					// Re-checked per term, not per cycle: the concurrent
 					// publish workload stops at exactly searchDuration, so a
 					// search started after the window would be measured
@@ -762,6 +769,19 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 		note := fmt.Sprintf("the concurrent publish workload ran below the requested concurrency (%d connections refused, %d lost mid-window); scenario aborted rather than reporting reduced contention as the requested workload", published.health.dialFailures, published.health.workersLost)
 		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
 		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	// A class no worker reached — a window shorter than the queries running
+	// in it — must not surface as a normal-looking zero-throughput result:
+	// zero attempts is the absence of a measurement, not a measurement of
+	// zero. The rotation above makes this an extreme-configuration case,
+	// not a structural one, but the guard is what makes it impossible to
+	// misread.
+	for _, cl := range []struct{ term, name string }{{commonTerm, "common"}, {rareTerm, "rare"}, {missTerm, "miss"}} {
+		if buckets[cl.term].attempted == 0 {
+			note := fmt.Sprintf("the %s class received no attempts inside the window (search-duration too short for the queries it ran); scenario aborted rather than reporting an unmeasured class as zero throughput", cl.name)
+			fail := func(n string) ScenarioResult { return ScenarioResult{Name: n, Notes: note} }
+			return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+		}
 	}
 
 	class := func(name, term string) ScenarioResult {
