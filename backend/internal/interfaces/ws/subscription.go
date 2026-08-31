@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	domainevent "relay/internal/domain/event"
 	"relay/internal/domain/subscription"
 	"relay/pkg/metrics"
 
@@ -37,7 +38,7 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 			continue
 		}
 		start := time.Now()
-		events, err := h.eventService.QueryEvents(c.ctx, f)
+		events, err := h.queryFilter(c, f)
 		metrics.QueryDuration.WithLabelValues("req").Observe(time.Since(start).Seconds())
 		if err != nil {
 			// The client hanging up mid-query is the connection ending, not
@@ -46,6 +47,15 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 			// moment. Nothing more useful remains to do for this REQ either
 			// way — the remaining filters would be cancelled too.
 			if errors.Is(err, context.Canceled) {
+				return
+			}
+			// A search that outran its work budget answers with an explicit
+			// failure and the subscription is dropped: a cancelled query
+			// returns no partial rows, so the only honest alternative to
+			// this CLOSED is an EOSE that silently pretends the search ran.
+			// The client can retry with a narrower term.
+			if errors.Is(err, context.DeadlineExceeded) {
+				h.sendClosed(c, subID, prefixError+": search timed out")
 				return
 			}
 			slog.Error("query error", "error", err)
@@ -74,6 +84,24 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 		}
 	}
 	h.sendEOSE(c, subID)
+}
+
+// queryFilter runs one REQ filter's stored query on the connection's
+// context, applying the configured search work budget when the filter
+// carries a NIP-50 term. Search is the one query no index can answer — an
+// unindexed ILIKE scan whose quality ordering is computed across every
+// candidate row before LIMIT selects among them, so max_limit bounds what
+// it returns, not what it reads — which is why it alone gets a deadline
+// (workspace #59; measured in capacity-baseline.md's search scenarios).
+// Zero or negative search_timeout_seconds disables the budget.
+func (h *RelayHandler) queryFilter(c *Client, f nostr.Filter) ([]*domainevent.Event, error) {
+	ctx := c.ctx
+	if f.Search != "" && h.resourceLimits.SearchTimeoutSeconds > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(h.resourceLimits.SearchTimeoutSeconds)*time.Second)
+		defer cancel()
+	}
+	return h.eventService.QueryEvents(ctx, f)
 }
 
 // matchesFilter is nostr.Filter.Matches plus the one dimension it does not

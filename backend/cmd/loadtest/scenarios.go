@@ -398,6 +398,203 @@ func runLiveFanout(relayURL string, subscribers, fanoutEvents int) ScenarioResul
 	return res
 }
 
+// runSearch measures NIP-50 search — the one query no index can answer: an
+// unindexed ILIKE scan whose quality ordering is computed across every
+// candidate row before LIMIT selects among them, so max_limit bounds what a
+// search returns, not what it reads (workspace #59). It seeds a corpus with
+// controlled selectivity, then drives concurrent searchers across three
+// term classes for a fixed duration — a common term (in ~10% of the seeded
+// rows), a rare term (in exactly one), and a miss (in none) — measuring
+// REQ-to-EOSE latency per class. A sustained-publish workload runs
+// concurrently for the same duration, so its result, compared with the
+// solo sustained-publish scenario from the same run, shows how much search
+// work degrades publish throughput.
+//
+// All three terms carry a per-run marker, so selectivity is relative to
+// this run's corpus even against a database that has seen earlier runs.
+// Searches are narrowed only by kinds — the shape capacity-baseline.md and
+// threat-model.md name as the unmeasured worst case. A CLOSED answer (the
+// relay's search work budget firing) counts as a failure with a note, not
+// a latency sample: it means the budget bound the query before EOSE.
+func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Duration, publishConns int, publishRate float64) (common, rare, miss, publish ScenarioResult) {
+	marker := randomHex(6)
+	commonTerm := "common" + marker
+	rareTerm := "rare" + marker
+	missTerm := "miss" + marker
+	filler := strings.Repeat("lorem ipsum dolor sit amet ", 8) // ~216 chars of realistic content length
+
+	// Seed in parallel: the relay's rate limiters are per-connection, so
+	// spreading the corpus across seeders keeps the shipped
+	// events_per_second config while finishing in reasonable time.
+	const seeders = 20
+	var seeded atomic.Int64
+	var seedWg sync.WaitGroup
+	perSeeder := seedCount / seeders
+	for s := range seeders {
+		seedWg.Add(1)
+		go func(s int) {
+			defer seedWg.Done()
+			c, err := dialAndSkipAuth(relayURL)
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			sk := nostr.GeneratePrivateKey()
+			pk, _ := nostr.GetPublicKey(sk)
+			for i := range perSeeder {
+				content := filler
+				global := s*perSeeder + i
+				if global%10 == 0 {
+					content = filler + " " + commonTerm
+				}
+				if global == 1 {
+					content = filler + " " + rareTerm
+				}
+				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: content}
+				ev.Sign(sk)
+				if _, err := publishUntilAccepted(c, ev); err != nil {
+					return
+				}
+				seeded.Add(1)
+			}
+		}(s)
+	}
+	seedWg.Wait()
+
+	type classBucket struct {
+		mu        sync.Mutex
+		latencies []time.Duration
+		attempted int
+		succeeded int
+		closed    int
+	}
+	buckets := map[string]*classBucket{commonTerm: {}, rareTerm: {}, missTerm: {}}
+
+	// The concurrent publish workload, measured over the same window as
+	// the searchers.
+	publishDone := make(chan ScenarioResult, 1)
+	go func() {
+		publishDone <- runSustainedPublish(relayURL, publishConns, publishRate, searchDuration)
+	}()
+
+	// Each worker reuses one subscription id: a REQ with an existing id
+	// replaces that subscription, so no CLOSE is needed between cycles —
+	// half the message rate against messages_per_second, and no
+	// subscription growth toward max_subscriptions. A REQ dropped by the
+	// message rate limiter is answered only with a NOTICE, so the worker
+	// recognizes it and retries with a backoff (as publishUntilAccepted
+	// does for events) instead of waiting for an EOSE that never comes.
+	var rateLimitedRetries atomic.Int64
+	var searchWg sync.WaitGroup
+	for w := range searchers {
+		searchWg.Add(1)
+		go func(w int) {
+			defer searchWg.Done()
+			c, err := dialAndSkipAuth(relayURL)
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			subID := fmt.Sprintf("lt_search_%d", w)
+			deadline := time.Now().Add(searchDuration)
+			for time.Now().Before(deadline) {
+				for _, term := range []string{commonTerm, rareTerm, missTerm} {
+					b := buckets[term]
+					req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{Search: term, Kinds: []int{1}}})
+
+					outcome := ""
+					var lat time.Duration
+					for attempt := 0; attempt < 100 && outcome == ""; attempt++ {
+						t0 := time.Now()
+						if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
+							outcome = "err"
+							break
+						}
+						c.SetReadDeadline(time.Now().Add(30 * time.Second))
+						for outcome == "" {
+							_, raw, err := c.ReadMessage()
+							if err != nil {
+								outcome = "err"
+								break
+							}
+							var arr []json.RawMessage
+							if json.Unmarshal(raw, &arr) != nil || len(arr) < 2 {
+								continue
+							}
+							var msgType, second string
+							json.Unmarshal(arr[0], &msgType)
+							json.Unmarshal(arr[1], &second)
+							if msgType == "NOTICE" && strings.HasPrefix(second, "rate-limited") {
+								// The REQ itself was dropped; back off and resend.
+								rateLimitedRetries.Add(1)
+								time.Sleep(100 * time.Millisecond)
+								break
+							}
+							if second != subID {
+								continue
+							}
+							switch msgType {
+							case "EOSE":
+								outcome = "eose"
+								lat = time.Since(t0)
+							case "CLOSED":
+								var reason string
+								if len(arr) > 2 {
+									json.Unmarshal(arr[2], &reason)
+								}
+								if strings.Contains(reason, "search timed out") {
+									outcome = "budget"
+								} else {
+									outcome = "closed"
+								}
+								lat = time.Since(t0)
+							}
+						}
+						c.SetReadDeadline(time.Time{})
+					}
+
+					b.mu.Lock()
+					b.attempted++
+					switch outcome {
+					case "eose":
+						b.succeeded++
+						b.latencies = append(b.latencies, lat)
+					case "budget":
+						b.closed++
+					}
+					b.mu.Unlock()
+
+					if outcome == "err" {
+						return
+					}
+				}
+			}
+		}(w)
+	}
+	searchWg.Wait()
+
+	class := func(name, term string) ScenarioResult {
+		b := buckets[term]
+		res := summarize(name, b.attempted, b.succeeded, b.attempted-b.succeeded, b.latencies)
+		res.Notes = fmt.Sprintf("%d seeded events, %d searchers, %s window", seeded.Load(), searchers, searchDuration)
+		if b.closed > 0 {
+			res.Notes += fmt.Sprintf("; %d answered CLOSED by the search work budget", b.closed)
+		}
+		if n := rateLimitedRetries.Load(); n > 0 && term == commonTerm {
+			res.Notes += fmt.Sprintf("; %d rate-limited REQ retries absorbed across all classes", n)
+		}
+		return res
+	}
+	common = class("search_common", commonTerm)
+	rare = class("search_rare", rareTerm)
+	miss = class("search_miss", missTerm)
+
+	publish = <-publishDone
+	publish.Name = "publish_during_search"
+	publish.Notes = strings.TrimSpace(publish.Notes + " (measured concurrently with the search phase; compare with sustained_publish)")
+	return common, rare, miss, publish
+}
+
 // runNegentropy reliably seeds seedCount events from one author (retrying
 // through rate limits via publishUntilAccepted, since this scenario
 // measures reconciliation, not publish throughput), then reconciles an

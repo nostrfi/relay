@@ -50,6 +50,7 @@ export function hasNoResourceLimits(config: RelayConfig | null): boolean {
     && limits.max_connections <= 0
     && limits.messages_per_second <= 0
     && limits.events_per_second <= 0
+    && limits.search_timeout_seconds <= 0
 }
 
 export function configSections(config: RelayConfig): ConfigSection[] {
@@ -59,7 +60,8 @@ export function configSections(config: RelayConfig): ConfigSection[] {
       rows: [
         { label: 'Max connections', value: formatLimit(config.resource_limits.max_connections, 'connections'), tabular: true },
         { label: 'Messages per second', value: formatLimit(config.resource_limits.messages_per_second, 'per second'), tabular: true },
-        { label: 'Events per second', value: formatLimit(config.resource_limits.events_per_second, 'per second'), tabular: true }
+        { label: 'Events per second', value: formatLimit(config.resource_limits.events_per_second, 'per second'), tabular: true },
+        { label: 'Search timeout', value: formatLimit(config.resource_limits.search_timeout_seconds, 'seconds'), tabular: true }
       ]
     },
     {

@@ -12,7 +12,7 @@ import {
 
 /** A relay configured explicitly — every field set in config.yaml. */
 const configured: RelayConfig = {
-  resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5 },
+  resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5, search_timeout_seconds: 5 },
   auth: { relay_url: 'wss://relay.example.com', max_event_age_seconds: 600 },
   moderation: { admin_pubkey: 'a'.repeat(64), max_event_age_seconds: 60 },
   websocket: { mode: 'production', allowed_origins: ['https://relay.example.com'] },
@@ -24,7 +24,7 @@ const configured: RelayConfig = {
 /** What the relay reports when config.yaml omits those sections. */
 const omitted: RelayConfig = {
   ...configured,
-  resource_limits: { max_connections: 0, messages_per_second: 0, events_per_second: 0 },
+  resource_limits: { max_connections: 0, messages_per_second: 0, events_per_second: 0, search_timeout_seconds: 0 },
   auth: { relay_url: '', max_event_age_seconds: 600 },
   websocket: { mode: 'development', allowed_origins: [] }
 }
