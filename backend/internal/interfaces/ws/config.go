@@ -38,11 +38,19 @@ type RelayLimitation struct {
 }
 
 // ResourceLimits configures operational controls that NIP-11 does not model:
-// connection admission and per-connection rate limiting.
+// connection admission, per-connection rate limiting, and the search work
+// budget.
 type ResourceLimits struct {
 	MaxConnections    int `mapstructure:"max_connections"`
 	MessagesPerSecond int `mapstructure:"messages_per_second"`
 	EventsPerSecond   int `mapstructure:"events_per_second"`
+	// SearchTimeoutSeconds bounds the work one NIP-50 search may do before
+	// it is cancelled and answered with CLOSED. Search is the one query
+	// whose cost max_limit cannot bound — NIP-50 applies the limit after
+	// ranking, so it caps what a search returns, not what it reads
+	// (workspace #59; measured in capacity-baseline.md's search
+	// scenarios). Zero disables the budget.
+	SearchTimeoutSeconds int `mapstructure:"search_timeout_seconds"`
 }
 
 // AuthConfig binds NIP-42 authentication to this specific relay instance.
@@ -162,6 +170,14 @@ const MetricsListenAddrEnv = "RELAY_METRICS_LISTEN_ADDR"
 // repository already uses 9090 as its example of a relay moved off :8080.
 const defaultMetricsListenAddr = "127.0.0.1:2112"
 
+// defaultSearchTimeoutSeconds is the search work budget applied when a
+// configuration does not mention resource_limits.search_timeout_seconds at
+// all — an operator config predating the field, or no config file. It is
+// registered as a Viper default rather than patched after Unmarshal so an
+// explicitly configured zero (disable the budget) survives: after
+// Unmarshal, zero-because-absent and zero-on-purpose are the same value.
+const defaultSearchTimeoutSeconds = 5
+
 // configSearchPaths lists where a config.yaml is looked for, in order.
 //
 // The relay used to look only in the working directory, which is right for
@@ -227,6 +243,9 @@ func LoadConfig() (*Config, error) {
 	if err := viper.BindEnv("server.metrics_listen_addr", MetricsListenAddrEnv); err != nil {
 		return nil, err
 	}
+	// See defaultSearchTimeoutSeconds: a config that never mentions the key
+	// gets the shipped budget; an explicit zero still disables it.
+	viper.SetDefault("resource_limits.search_timeout_seconds", defaultSearchTimeoutSeconds)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

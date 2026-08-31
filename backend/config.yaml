@@ -24,6 +24,7 @@ resource_limits:
   max_connections: 1000
   messages_per_second: 20
   events_per_second: 5
+  search_timeout_seconds: 5 # a NIP-50 search past this budget is cancelled and answered with CLOSED; 0 disables
 
 auth:
   relay_url: "" # set to this relay's canonical wss:// URL to enable NIP-42 endpoint binding

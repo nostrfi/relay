@@ -468,6 +468,16 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, s
 		ev.Tags = r.reconstructTags(ctx, ev.ID, tagsJSON)
 		events = append(events, &ev)
 	}
+	// rows.Err carries a context cancellation or deadline that fired while
+	// rows were being iterated — after QueryContext itself succeeded.
+	// Swallowing it returned a silently truncated result set with a nil
+	// error, which upstream answers with EOSE as if the query completed;
+	// the search work budget (workspace #59) depends on the deadline
+	// surfacing so the client gets CLOSED instead of a partial answer
+	// presented as a full one.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 

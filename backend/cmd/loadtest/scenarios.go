@@ -90,8 +90,8 @@ func classifyPublishResponse(raw []byte) (publishOutcome, string) {
 }
 
 // publishUntilAccepted writes ev on c and retries on a rate-limited
-// response (with a short backoff) until the relay accepts it, rejects it
-// for a non-rate-limit reason, or a read/write error occurs. It returns the
+// response until the relay accepts it, rejects it for a non-rate-limit
+// reason, or a read/write error occurs. It returns the
 // time the relay's OK arrived, for scenarios that need N events reliably
 // stored rather than measuring raw publish throughput (which
 // runSustainedPublish does separately, without retrying).
@@ -116,7 +116,12 @@ func publishUntilAccepted(c *websocket.Conn, ev nostr.Event) (time.Time, error) 
 			case outcomeAccepted:
 				return time.Now(), nil
 			case outcomeRateLimited:
-				time.Sleep(100 * time.Millisecond)
+				// A full second, matching the relay's NOTICE throttle: a
+				// faster resend into a still-depleted token bucket is
+				// dropped without even a NOTICE (the relay sends at most
+				// one per second), so the writer would wait out its whole
+				// read deadline for an answer that never comes.
+				time.Sleep(time.Second)
 				goto retry
 			case outcomeRejected:
 				return time.Time{}, fmt.Errorf("event rejected: %s", reason)
@@ -202,19 +207,42 @@ func runConnectionRamp(relayURL string, n int) ScenarioResult {
 	return res
 }
 
+// publishHealth reports whether the publish workload actually ran at the
+// requested concurrency: dial failures mean fewer publishers than claimed
+// ever started, and lost workers mean the concurrency decayed mid-window.
+// Callers that present other measurements as "concurrent with publishing"
+// use it to invalidate those claims rather than report a workload that did
+// not happen.
+type publishHealth struct {
+	dialFailures int
+	workersLost  int
+}
+
+func (h publishHealth) degraded() bool {
+	return h.dialFailures > 0 || h.workersLost > 0
+}
+
 // runSustainedPublish holds n connections open, each publishing at
 // ratePerConn events/sec for duration, and measures the
 // write-EVENT-to-receive-response round-trip latency of each publish.
 // Unlike publishUntilAccepted, this does not retry on rate-limiting: a
 // rate-limited response is exactly what this scenario measures capacity
 // against, so it counts as a failure rather than being absorbed.
-func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration time.Duration) ScenarioResult {
+func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration time.Duration) (ScenarioResult, publishHealth) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var latencies []time.Duration
 	var succeeded, failed, rateLimited atomic.Int64
+	var dialFailures, workersLost atomic.Int64
 
 	interval := time.Duration(float64(time.Second) / ratePerConn)
+
+	// One absolute deadline shared by every publisher, computed before any
+	// dial: a per-worker window starting after that worker's dial would
+	// stretch the scenario's tail past the claimed duration and, when this
+	// runs concurrently with the search phase, leave publishers writing
+	// alone after the searchers stop.
+	deadline := time.Now().Add(duration)
 
 	for range n {
 		wg.Add(1)
@@ -223,6 +251,7 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 			c, err := dialAndSkipAuth(relayURL)
 			if err != nil {
 				failed.Add(1)
+				dialFailures.Add(1)
 				return
 			}
 			defer c.Close()
@@ -232,24 +261,54 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
-			deadline := time.Now().Add(duration)
-			for time.Now().Before(deadline) {
-				<-ticker.C
-				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: "loadtest sustained publish"}
+			// The window closes on this timer, not only on the pre-send
+			// check below: a worker blocked on the next tick when the
+			// deadline passes must stop waiting, or a slow configured rate
+			// would leave it sending — and counting — a post-window event
+			// long after every other workload has stopped.
+			windowClosed := time.NewTimer(time.Until(deadline))
+			defer windowClosed.Stop()
+			// The serial keeps every event's id unique: an id hashes pubkey,
+			// second-resolution created_at, kind, tags, and content, so
+			// fixed-content events published faster than one per second
+			// deduplicated in storage while still drawing accepted
+			// responses — the scenario then measured response throughput
+			// against roughly one real write per connection per second.
+			serial := 0
+			for {
+				select {
+				case <-windowClosed.C:
+					return
+				case <-ticker.C:
+				}
+				// Re-checked after the tick: when both channels are ready
+				// the select picks arbitrarily, and a tick delivered just
+				// past the deadline must not turn into a post-window send.
+				if !time.Now().Before(deadline) {
+					return
+				}
+				serial++
+				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: fmt.Sprintf("loadtest sustained publish #%d", serial)}
 				ev.Sign(sk)
 				msg, _ := json.Marshal([]any{"EVENT", ev})
 
 				t0 := time.Now()
 				if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
 					failed.Add(1)
-					continue
+					workersLost.Add(1)
+					return
 				}
 				c.SetReadDeadline(time.Now().Add(5 * time.Second))
 				_, raw, err := c.ReadMessage()
 				c.SetReadDeadline(time.Time{})
 				if err != nil {
+					// gorilla/websocket marks the connection failed after any
+					// read error (a deadline included), so continuing would
+					// just count a failure per tick against a dead socket
+					// while the run claims n live publishers.
 					failed.Add(1)
-					continue
+					workersLost.Add(1)
+					return
 				}
 				lat := time.Since(t0)
 
@@ -276,7 +335,15 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 	if rateLimited.Load() > 0 {
 		res.Notes = fmt.Sprintf("%d of %d failures were rate-limited (resource_limits.events_per_second / messages_per_second)", rateLimited.Load(), failed.Load())
 	}
-	return res
+	health := publishHealth{dialFailures: int(dialFailures.Load()), workersLost: int(workersLost.Load())}
+	if health.degraded() {
+		note := fmt.Sprintf("%d of %d publisher connections were refused and %d were lost mid-window; the workload ran below the requested concurrency", health.dialFailures, n, health.workersLost)
+		if res.Notes != "" {
+			res.Notes += "; "
+		}
+		res.Notes += note
+	}
+	return res, health
 }
 
 // runLiveFanout opens `subscribers` connections subscribed to a filter
@@ -396,6 +463,357 @@ func runLiveFanout(relayURL string, subscribers, fanoutEvents int) ScenarioResul
 	res := summarize("live_fanout", expected, int(received.Load()), expected-int(received.Load()), latencies)
 	res.Notes = fmt.Sprintf("%d subscriber connections, %d/%d events published (rate-limit retries absorbed)", len(subConns), published, fanoutEvents)
 	return res
+}
+
+// minSearchSeed is the smallest corpus the search scenario accepts: the
+// common term lands on every tenth seeded index, so this is the point
+// where the common class (10 rows) and the rare class (1 row) first
+// measure genuinely different amounts of work.
+const minSearchSeed = 100
+
+// runSearch measures NIP-50 search — the one query no index can answer: an
+// unindexed ILIKE scan whose quality ordering is computed across every
+// candidate row before LIMIT selects among them, so max_limit bounds what a
+// search returns, not what it reads (workspace #59). It seeds a corpus with
+// controlled selectivity, then drives concurrent searchers across three
+// term classes for a fixed duration — a common term (in ~10% of the seeded
+// rows), a rare term (in exactly one), and a miss (in none) — measuring
+// REQ-to-EOSE latency per class. A sustained-publish workload runs
+// concurrently for the same duration, so its result, compared with the
+// solo sustained-publish scenario from the same run, shows how much search
+// work degrades publish throughput.
+//
+// All three terms carry a per-run marker, so selectivity is relative to
+// this run's corpus even against a database that has seen earlier runs.
+// Searches are narrowed only by kinds — the shape capacity-baseline.md and
+// threat-model.md name as the unmeasured worst case. A CLOSED answer (the
+// relay's search work budget firing) counts as a failure with a note, not
+// a latency sample: it means the budget bound the query before EOSE.
+func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Duration, publishConns int, publishRate float64) (common, rare, miss, publish ScenarioResult) {
+	// Below minSearchSeed the class design collapses: the common term
+	// lands on every tenth index and the rare term on index 1 only, so a
+	// tiny corpus gives the "common" class one row — indistinguishable
+	// from rare, and at a seed of 2 actually 50% of the corpus rather
+	// than the advertised ~10%. One hundred rows is the smallest corpus
+	// where common (10 rows) and rare (1 row) measure different work.
+	if seedCount < minSearchSeed {
+		note := fmt.Sprintf("search-seed %d cannot separate the common and rare classes (minimum %d); scenario aborted", seedCount, minSearchSeed)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	marker := randomHex(6)
+	commonTerm := "common" + marker
+	rareTerm := "rare" + marker
+	missTerm := "miss" + marker
+	filler := strings.Repeat("lorem ipsum dolor sit amet ", 8) // ~216 chars of realistic content length
+
+	// Seed in parallel: the relay's rate limiters are per-connection, so
+	// spreading the corpus across seeders keeps the shipped
+	// events_per_second config while finishing in reasonable time. Indices
+	// come from one shared counter, so exactly seedCount events are
+	// attempted whatever the divisibility — per-seeder division truncated
+	// the remainder and seeded nothing at all below one event per seeder.
+	const seeders = 20
+	var nextIndex atomic.Int64
+	var seeded atomic.Int64
+	var seedWg sync.WaitGroup
+	for range seeders {
+		seedWg.Add(1)
+		go func() {
+			defer seedWg.Done()
+			c, err := dialAndSkipAuth(relayURL)
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			sk := nostr.GeneratePrivateKey()
+			pk, _ := nostr.GetPublicKey(sk)
+			for {
+				global := int(nextIndex.Add(1)) - 1
+				if global >= seedCount {
+					return
+				}
+				// The per-event serial matters, not just for realism: an
+				// event id hashes pubkey, second-resolution created_at,
+				// kind, tags, and content, so same-content events from one
+				// seeder inside one second share an id, the relay dedups
+				// them into a single row, and the corpus silently stops
+				// growing while the seeded count advances.
+				content := fmt.Sprintf("%s #%d", filler, global)
+				if global%10 == 0 {
+					content += " " + commonTerm
+				}
+				if global == 1 {
+					content += " " + rareTerm
+				}
+				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: content}
+				ev.Sign(sk)
+				if _, err := publishUntilAccepted(c, ev); err != nil {
+					return
+				}
+				seeded.Add(1)
+			}
+		}()
+	}
+	seedWg.Wait()
+
+	// A partial corpus has unknown selectivity — a failed seeder consumes
+	// its indices permanently, and the lost rows may include the sole
+	// rare-term event or a disproportionate share of common ones. Numbers
+	// measured against it would claim a corpus that does not exist, so the
+	// scenario aborts instead of guessing.
+	if int(seeded.Load()) != seedCount {
+		note := fmt.Sprintf("seeding incomplete (%d of %d events accepted); scenario aborted rather than measuring a corpus with unknown selectivity", seeded.Load(), seedCount)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+
+	type classBucket struct {
+		mu        sync.Mutex
+		latencies []time.Duration
+		attempted int
+		succeeded int
+		closed    int
+	}
+	buckets := map[string]*classBucket{commonTerm: {}, rareTerm: {}, missTerm: {}}
+
+	// Searcher connections are dialed before the measurement window opens,
+	// and every worker shares one phase deadline computed after the dials:
+	// a per-worker window starting at that worker's dial would let slow
+	// admission skew the workloads apart, with searches or publishes
+	// running alone while the results claim one concurrent window.
+	// (Publisher dials happen inside runSustainedPublish; their skew is
+	// bounded by connection-ramp latency, milliseconds on the measured
+	// hardware, and starts alongside the searchers below.)
+	searchConns := make([]*websocket.Conn, 0, searchers)
+	for range searchers {
+		c, err := dialAndSkipAuth(relayURL)
+		if err != nil {
+			continue
+		}
+		searchConns = append(searchConns, c)
+	}
+	// Fewer searchers than requested is a different workload, not a
+	// smaller sample of the same one — two runs of the same command would
+	// stop being comparable. Abort rather than measure it.
+	if len(searchConns) != searchers {
+		for _, c := range searchConns {
+			c.Close()
+		}
+		note := fmt.Sprintf("only %d of %d searcher connections could be opened; scenario aborted", len(searchConns), searchers)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	deadline := time.Now().Add(searchDuration)
+
+	// The concurrent publish workload, measured over the same window as
+	// the searchers.
+	type publishOutcome struct {
+		result ScenarioResult
+		health publishHealth
+	}
+	publishDone := make(chan publishOutcome, 1)
+	go func() {
+		res, health := runSustainedPublish(relayURL, publishConns, publishRate, searchDuration)
+		publishDone <- publishOutcome{res, health}
+	}()
+
+	// Each worker reuses one subscription id: a REQ with an existing id
+	// replaces that subscription, so no CLOSE is needed between cycles —
+	// half the message rate against messages_per_second, and no
+	// subscription growth toward max_subscriptions. A REQ dropped by the
+	// message rate limiter is answered only with a NOTICE, so the worker
+	// recognizes it and retries with a backoff (as publishUntilAccepted
+	// does for events) instead of waiting for an EOSE that never comes.
+	var rateLimitedRetries atomic.Int64
+	var workerFailed atomic.Bool
+	var searchWg sync.WaitGroup
+	classes := []string{commonTerm, rareTerm, missTerm}
+	for w, c := range searchConns {
+		searchWg.Add(1)
+		go func(w int, c *websocket.Conn) {
+			defer searchWg.Done()
+			defer c.Close()
+			subID := fmt.Sprintf("lt_search_%d", w)
+			for time.Now().Before(deadline) {
+				// Each worker starts one class further along: with every
+				// worker walking common→rare→miss, a window shorter than
+				// the first query would leave the later classes with no
+				// attempts at all, and the always-first class would soak up
+				// any systematic first-in-cycle cost alone.
+				for i := range classes {
+					term := classes[(w+i)%len(classes)]
+					// Re-checked per term, not per cycle: the concurrent
+					// publish workload stops at exactly searchDuration, so a
+					// search started after the window would be measured
+					// without the contention this scenario exists to include.
+					if !time.Now().Before(deadline) {
+						break
+					}
+					b := buckets[term]
+					req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{Search: term, Kinds: []int{1}}})
+
+					outcome := ""
+					var lat time.Duration
+					for attempt := 0; attempt < 100 && outcome == ""; attempt++ {
+						// Re-checked before every send, not just per term: a
+						// rate-limited retry sleeps and could otherwise start
+						// its resend after the publish workload has stopped,
+						// recording a sample without the claimed contention.
+						// An abandoned query is not counted at all.
+						if !time.Now().Before(deadline) {
+							outcome = "window"
+							break
+						}
+						t0 := time.Now()
+						if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
+							outcome = "err"
+							break
+						}
+						// Generous on purpose: this must outlast the relay's
+						// search budget (search_timeout_seconds, which an
+						// operator may raise well past the shipped 5s or
+						// disable), or the tool would record an ordinary
+						// failure before it could observe the EOSE or CLOSED
+						// it exists to measure.
+						c.SetReadDeadline(time.Now().Add(2 * time.Minute))
+						for outcome == "" {
+							_, raw, err := c.ReadMessage()
+							if err != nil {
+								outcome = "err"
+								break
+							}
+							var arr []json.RawMessage
+							if json.Unmarshal(raw, &arr) != nil || len(arr) < 2 {
+								continue
+							}
+							var msgType, second string
+							json.Unmarshal(arr[0], &msgType)
+							json.Unmarshal(arr[1], &second)
+							if msgType == "NOTICE" && strings.HasPrefix(second, "rate-limited") {
+								// The REQ itself was dropped; back off a full
+								// second before resending. Shorter backoffs can
+								// re-trip a still-depleted token bucket, and the
+								// relay throttles rate-limit NOTICEs to one per
+								// second — a dropped resend inside that window
+								// gets no answer at all, leaving the worker
+								// waiting out its whole read deadline.
+								rateLimitedRetries.Add(1)
+								time.Sleep(time.Second)
+								break
+							}
+							if second != subID {
+								continue
+							}
+							switch msgType {
+							case "EOSE":
+								outcome = "eose"
+								lat = time.Since(t0)
+							case "CLOSED":
+								var reason string
+								if len(arr) > 2 {
+									json.Unmarshal(arr[2], &reason)
+								}
+								if strings.Contains(reason, "search timed out") {
+									outcome = "budget"
+								} else {
+									outcome = "closed"
+								}
+								lat = time.Since(t0)
+							}
+						}
+						c.SetReadDeadline(time.Time{})
+					}
+
+					if outcome == "window" {
+						continue // the per-term deadline check ends the phase
+					}
+					b.mu.Lock()
+					b.attempted++
+					switch outcome {
+					case "eose":
+						b.succeeded++
+						b.latencies = append(b.latencies, lat)
+					case "budget":
+						b.closed++
+					}
+					b.mu.Unlock()
+
+					if outcome == "err" {
+						// A worker lost mid-phase means the rest of the run
+						// measures reduced concurrency, not the requested
+						// workload; the flag invalidates the whole scenario
+						// after the phase drains.
+						workerFailed.Store(true)
+						return
+					}
+				}
+			}
+		}(w, c)
+	}
+	searchWg.Wait()
+	published := <-publishDone
+
+	if workerFailed.Load() {
+		note := "a searcher connection failed mid-phase; scenario aborted rather than reporting reduced concurrency as the requested workload"
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	// The search buckets claim contention from publishConns concurrent
+	// publishers, so publisher admission and mid-window health invalidate
+	// them exactly as searcher admission and health do above: numbers
+	// measured against fewer publishers than requested — possibly zero, if
+	// the searchers consumed every max_connections slot — would report
+	// reduced or absent write contention as the requested workload.
+	if published.health.degraded() {
+		note := fmt.Sprintf("the concurrent publish workload ran below the requested concurrency (%d connections refused, %d lost mid-window); scenario aborted rather than reporting reduced contention as the requested workload", published.health.dialFailures, published.health.workersLost)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	// Healthy connections that never published are still no contention: a
+	// publish interval longer than the window means every worker's first
+	// tick fell outside it, so no health counter trips and yet the search
+	// buckets would claim a concurrency that consisted of zero writes.
+	if published.result.Attempted == 0 {
+		note := "the concurrent publish workload made no in-window publish attempts (rate too low for the window); scenario aborted rather than claiming contention that never occurred"
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	// A class no worker reached — a window shorter than the queries running
+	// in it — must not surface as a normal-looking zero-throughput result:
+	// zero attempts is the absence of a measurement, not a measurement of
+	// zero. The rotation above makes this an extreme-configuration case,
+	// not a structural one, but the guard is what makes it impossible to
+	// misread.
+	for _, cl := range []struct{ term, name string }{{commonTerm, "common"}, {rareTerm, "rare"}, {missTerm, "miss"}} {
+		if buckets[cl.term].attempted == 0 {
+			note := fmt.Sprintf("the %s class received no attempts inside the window (search-duration too short for the queries it ran); scenario aborted rather than reporting an unmeasured class as zero throughput", cl.name)
+			fail := func(n string) ScenarioResult { return ScenarioResult{Name: n, Notes: note} }
+			return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+		}
+	}
+
+	class := func(name, term string) ScenarioResult {
+		b := buckets[term]
+		res := summarize(name, b.attempted, b.succeeded, b.attempted-b.succeeded, b.latencies)
+		res.ThroughputPerSec = float64(b.succeeded) / searchDuration.Seconds()
+		res.Notes = fmt.Sprintf("%d seeded events, %d searchers, %s window", seeded.Load(), len(searchConns), searchDuration)
+		if b.closed > 0 {
+			res.Notes += fmt.Sprintf("; %d answered CLOSED by the search work budget", b.closed)
+		}
+		if n := rateLimitedRetries.Load(); n > 0 && term == commonTerm {
+			res.Notes += fmt.Sprintf("; %d rate-limited REQ retries absorbed across all classes", n)
+		}
+		return res
+	}
+	common = class("search_common", commonTerm)
+	rare = class("search_rare", rareTerm)
+	miss = class("search_miss", missTerm)
+
+	publish = published.result
+	publish.Name = "publish_during_search"
+	publish.Notes = strings.TrimSpace(publish.Notes + " (measured concurrently with the search phase; compare with sustained_publish)")
+	return common, rare, miss, publish
 }
 
 // runNegentropy reliably seeds seedCount events from one author (retrying

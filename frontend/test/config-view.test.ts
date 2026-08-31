@@ -12,7 +12,7 @@ import {
 
 /** A relay configured explicitly — every field set in config.yaml. */
 const configured: RelayConfig = {
-  resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5 },
+  resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5, search_timeout_seconds: 5 },
   auth: { relay_url: 'wss://relay.example.com', max_event_age_seconds: 600 },
   moderation: { admin_pubkey: 'a'.repeat(64), max_event_age_seconds: 60 },
   websocket: { mode: 'production', allowed_origins: ['https://relay.example.com'] },
@@ -24,7 +24,7 @@ const configured: RelayConfig = {
 /** What the relay reports when config.yaml omits those sections. */
 const omitted: RelayConfig = {
   ...configured,
-  resource_limits: { max_connections: 0, messages_per_second: 0, events_per_second: 0 },
+  resource_limits: { max_connections: 0, messages_per_second: 0, events_per_second: 0, search_timeout_seconds: 0 },
   auth: { relay_url: '', max_event_age_seconds: 600 },
   websocket: { mode: 'development', allowed_origins: [] }
 }
@@ -72,6 +72,14 @@ describe('formatText and formatSeconds', () => {
 describe('hasNoResourceLimits', () => {
   it('is true when every limit is off, which an omitted section causes', () => {
     expect(hasNoResourceLimits(omitted)).toBe(true)
+  })
+
+  it('still warns when only the search timeout is set', () => {
+    // The server defaults search_timeout_seconds even when the whole
+    // resource_limits section is omitted, and a search work budget is
+    // neither a connection cap nor rate limiting — the warning this
+    // predicate drives must not be suppressed by it.
+    expect(hasNoResourceLimits({ ...omitted, resource_limits: { ...omitted.resource_limits, search_timeout_seconds: 5 } })).toBe(true)
   })
 
   it('is false when any limit is set', () => {

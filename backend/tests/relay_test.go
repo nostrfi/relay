@@ -3116,6 +3116,55 @@ websocket:
 	assert.Equal(t, 600, cfg.Auth.MaxEventAgeSeconds, "default freshness window should apply")
 }
 
+// TestConfigSearchTimeoutDefault pins the upgrade path for the search work
+// budget (workspace #59): a configuration that never mentions
+// resource_limits.search_timeout_seconds gets the shipped 5-second budget
+// rather than silently unbounded search, while an explicitly configured
+// zero still disables it — the distinction a post-Unmarshal patch cannot
+// make, which is why the default is registered with Viper.
+func TestConfigSearchTimeoutDefault(t *testing.T) {
+	load := func(t *testing.T, configContent string) *ws.Config {
+		t.Helper()
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(configContent), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+		viper.Reset()
+		viper.SetConfigName("config")
+		viper.SetConfigType("yaml")
+		viper.AddConfigPath(tmpDir)
+		cfg, err := ws.LoadConfig()
+		if err != nil {
+			t.Fatalf("expected config to load: %v", err)
+		}
+		return cfg
+	}
+
+	t.Run("an absent key gets the shipped default", func(t *testing.T) {
+		cfg := load(t, `
+resource_limits:
+  max_connections: 100
+`)
+		assert.Equal(t, 5, cfg.ResourceLimits.SearchTimeoutSeconds)
+	})
+
+	t.Run("an explicit zero still disables the budget", func(t *testing.T) {
+		cfg := load(t, `
+resource_limits:
+  search_timeout_seconds: 0
+`)
+		assert.Equal(t, 0, cfg.ResourceLimits.SearchTimeoutSeconds)
+	})
+
+	t.Run("an explicit value wins", func(t *testing.T) {
+		cfg := load(t, `
+resource_limits:
+  search_timeout_seconds: 30
+`)
+		assert.Equal(t, 30, cfg.ResourceLimits.SearchTimeoutSeconds)
+	})
+}
+
 func TestConfigServerStorageDefaults(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
 	if err != nil {
