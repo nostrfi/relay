@@ -90,8 +90,8 @@ func classifyPublishResponse(raw []byte) (publishOutcome, string) {
 }
 
 // publishUntilAccepted writes ev on c and retries on a rate-limited
-// response (with a short backoff) until the relay accepts it, rejects it
-// for a non-rate-limit reason, or a read/write error occurs. It returns the
+// response until the relay accepts it, rejects it for a non-rate-limit
+// reason, or a read/write error occurs. It returns the
 // time the relay's OK arrived, for scenarios that need N events reliably
 // stored rather than measuring raw publish throughput (which
 // runSustainedPublish does separately, without retrying).
@@ -116,7 +116,12 @@ func publishUntilAccepted(c *websocket.Conn, ev nostr.Event) (time.Time, error) 
 			case outcomeAccepted:
 				return time.Now(), nil
 			case outcomeRateLimited:
-				time.Sleep(100 * time.Millisecond)
+				// A full second, matching the relay's NOTICE throttle: a
+				// faster resend into a still-depleted token bucket is
+				// dropped without even a NOTICE (the relay sends at most
+				// one per second), so the writer would wait out its whole
+				// read deadline for an answer that never comes.
+				time.Sleep(time.Second)
 				goto retry
 			case outcomeRejected:
 				return time.Time{}, fmt.Errorf("event rejected: %s", reason)
@@ -202,17 +207,33 @@ func runConnectionRamp(relayURL string, n int) ScenarioResult {
 	return res
 }
 
+// publishHealth reports whether the publish workload actually ran at the
+// requested concurrency: dial failures mean fewer publishers than claimed
+// ever started, and lost workers mean the concurrency decayed mid-window.
+// Callers that present other measurements as "concurrent with publishing"
+// use it to invalidate those claims rather than report a workload that did
+// not happen.
+type publishHealth struct {
+	dialFailures int
+	workersLost  int
+}
+
+func (h publishHealth) degraded() bool {
+	return h.dialFailures > 0 || h.workersLost > 0
+}
+
 // runSustainedPublish holds n connections open, each publishing at
 // ratePerConn events/sec for duration, and measures the
 // write-EVENT-to-receive-response round-trip latency of each publish.
 // Unlike publishUntilAccepted, this does not retry on rate-limiting: a
 // rate-limited response is exactly what this scenario measures capacity
 // against, so it counts as a failure rather than being absorbed.
-func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration time.Duration) ScenarioResult {
+func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration time.Duration) (ScenarioResult, publishHealth) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var latencies []time.Duration
 	var succeeded, failed, rateLimited atomic.Int64
+	var dialFailures, workersLost atomic.Int64
 
 	interval := time.Duration(float64(time.Second) / ratePerConn)
 
@@ -230,6 +251,7 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 			c, err := dialAndSkipAuth(relayURL)
 			if err != nil {
 				failed.Add(1)
+				dialFailures.Add(1)
 				return
 			}
 			defer c.Close()
@@ -239,6 +261,13 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
+			// The window closes on this timer, not only on the pre-send
+			// check below: a worker blocked on the next tick when the
+			// deadline passes must stop waiting, or a slow configured rate
+			// would leave it sending — and counting — a post-window event
+			// long after every other workload has stopped.
+			windowClosed := time.NewTimer(time.Until(deadline))
+			defer windowClosed.Stop()
 			// The serial keeps every event's id unique: an id hashes pubkey,
 			// second-resolution created_at, kind, tags, and content, so
 			// fixed-content events published faster than one per second
@@ -246,8 +275,18 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 			// responses — the scenario then measured response throughput
 			// against roughly one real write per connection per second.
 			serial := 0
-			for time.Now().Before(deadline) {
-				<-ticker.C
+			for {
+				select {
+				case <-windowClosed.C:
+					return
+				case <-ticker.C:
+				}
+				// Re-checked after the tick: when both channels are ready
+				// the select picks arbitrarily, and a tick delivered just
+				// past the deadline must not turn into a post-window send.
+				if !time.Now().Before(deadline) {
+					return
+				}
 				serial++
 				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: fmt.Sprintf("loadtest sustained publish #%d", serial)}
 				ev.Sign(sk)
@@ -256,14 +295,20 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 				t0 := time.Now()
 				if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
 					failed.Add(1)
-					continue
+					workersLost.Add(1)
+					return
 				}
 				c.SetReadDeadline(time.Now().Add(5 * time.Second))
 				_, raw, err := c.ReadMessage()
 				c.SetReadDeadline(time.Time{})
 				if err != nil {
+					// gorilla/websocket marks the connection failed after any
+					// read error (a deadline included), so continuing would
+					// just count a failure per tick against a dead socket
+					// while the run claims n live publishers.
 					failed.Add(1)
-					continue
+					workersLost.Add(1)
+					return
 				}
 				lat := time.Since(t0)
 
@@ -290,7 +335,15 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 	if rateLimited.Load() > 0 {
 		res.Notes = fmt.Sprintf("%d of %d failures were rate-limited (resource_limits.events_per_second / messages_per_second)", rateLimited.Load(), failed.Load())
 	}
-	return res
+	health := publishHealth{dialFailures: int(dialFailures.Load()), workersLost: int(workersLost.Load())}
+	if health.degraded() {
+		note := fmt.Sprintf("%d of %d publisher connections were refused and %d were lost mid-window; the workload ran below the requested concurrency", health.dialFailures, n, health.workersLost)
+		if res.Notes != "" {
+			res.Notes += "; "
+		}
+		res.Notes += note
+	}
+	return res, health
 }
 
 // runLiveFanout opens `subscribers` connections subscribed to a filter
@@ -555,9 +608,14 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 
 	// The concurrent publish workload, measured over the same window as
 	// the searchers.
-	publishDone := make(chan ScenarioResult, 1)
+	type publishOutcome struct {
+		result ScenarioResult
+		health publishHealth
+	}
+	publishDone := make(chan publishOutcome, 1)
 	go func() {
-		publishDone <- runSustainedPublish(relayURL, publishConns, publishRate, searchDuration)
+		res, health := runSustainedPublish(relayURL, publishConns, publishRate, searchDuration)
+		publishDone <- publishOutcome{res, health}
 	}()
 
 	// Each worker reuses one subscription id: a REQ with an existing id
@@ -687,10 +745,21 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 		}(w, c)
 	}
 	searchWg.Wait()
+	published := <-publishDone
 
 	if workerFailed.Load() {
-		publish = <-publishDone
 		note := "a searcher connection failed mid-phase; scenario aborted rather than reporting reduced concurrency as the requested workload"
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+	// The search buckets claim contention from publishConns concurrent
+	// publishers, so publisher admission and mid-window health invalidate
+	// them exactly as searcher admission and health do above: numbers
+	// measured against fewer publishers than requested — possibly zero, if
+	// the searchers consumed every max_connections slot — would report
+	// reduced or absent write contention as the requested workload.
+	if published.health.degraded() {
+		note := fmt.Sprintf("the concurrent publish workload ran below the requested concurrency (%d connections refused, %d lost mid-window); scenario aborted rather than reporting reduced contention as the requested workload", published.health.dialFailures, published.health.workersLost)
 		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
 		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
 	}
@@ -712,7 +781,7 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 	rare = class("search_rare", rareTerm)
 	miss = class("search_miss", missTerm)
 
-	publish = <-publishDone
+	publish = published.result
 	publish.Name = "publish_during_search"
 	publish.Notes = strings.TrimSpace(publish.Notes + " (measured concurrently with the search phase; compare with sustained_publish)")
 	return common, rare, miss, publish

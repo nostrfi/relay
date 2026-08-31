@@ -69,7 +69,7 @@ func main() {
 	printScenario(results.ConnectionRamp)
 
 	fmt.Println("--- sustained publish ---")
-	results.SustainedPublish = runSustainedPublish(*relayURL, *connections, *rate, *duration)
+	results.SustainedPublish, _ = runSustainedPublish(*relayURL, *connections, *rate, *duration)
 	printScenario(results.SustainedPublish)
 
 	fmt.Println("--- live fanout ---")
