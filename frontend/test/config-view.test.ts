@@ -74,6 +74,14 @@ describe('hasNoResourceLimits', () => {
     expect(hasNoResourceLimits(omitted)).toBe(true)
   })
 
+  it('still warns when only the search timeout is set', () => {
+    // The server defaults search_timeout_seconds even when the whole
+    // resource_limits section is omitted, and a search work budget is
+    // neither a connection cap nor rate limiting — the warning this
+    // predicate drives must not be suppressed by it.
+    expect(hasNoResourceLimits({ ...omitted, resource_limits: { ...omitted.resource_limits, search_timeout_seconds: 5 } })).toBe(true)
+  })
+
   it('is false when any limit is set', () => {
     expect(hasNoResourceLimits(configured)).toBe(false)
     expect(hasNoResourceLimits({ ...omitted, resource_limits: { ...omitted.resource_limits, max_connections: 10 } })).toBe(false)

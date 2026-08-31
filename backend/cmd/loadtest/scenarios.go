@@ -216,6 +216,13 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 
 	interval := time.Duration(float64(time.Second) / ratePerConn)
 
+	// One absolute deadline shared by every publisher, computed before any
+	// dial: a per-worker window starting after that worker's dial would
+	// stretch the scenario's tail past the claimed duration and, when this
+	// runs concurrently with the search phase, leave publishers writing
+	// alone after the searchers stop.
+	deadline := time.Now().Add(duration)
+
 	for range n {
 		wg.Add(1)
 		go func() {
@@ -232,7 +239,6 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
-			deadline := time.Now().Add(duration)
 			// The serial keeps every event's id unique: an id hashes pubkey,
 			// second-resolution created_at, kind, tags, and content, so
 			// fixed-content events published faster than one per second
@@ -425,6 +431,14 @@ func runLiveFanout(relayURL string, subscribers, fanoutEvents int) ScenarioResul
 // relay's search work budget firing) counts as a failure with a note, not
 // a latency sample: it means the budget bound the query before EOSE.
 func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Duration, publishConns int, publishRate float64) (common, rare, miss, publish ScenarioResult) {
+	// Below two rows the class design collapses: index 0 carries the
+	// common term and index 1 the sole rare row, so a smaller corpus
+	// would relabel misses as the classes it claims to measure.
+	if seedCount < 2 {
+		note := fmt.Sprintf("search-seed %d cannot populate the rare class (minimum 2); scenario aborted", seedCount)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
 	marker := randomHex(6)
 	commonTerm := "common" + marker
 	rareTerm := "rare" + marker
@@ -517,6 +531,17 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 		}
 		searchConns = append(searchConns, c)
 	}
+	// Fewer searchers than requested is a different workload, not a
+	// smaller sample of the same one — two runs of the same command would
+	// stop being comparable. Abort rather than measure it.
+	if len(searchConns) != searchers {
+		for _, c := range searchConns {
+			c.Close()
+		}
+		note := fmt.Sprintf("only %d of %d searcher connections could be opened; scenario aborted", len(searchConns), searchers)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
 	deadline := time.Now().Add(searchDuration)
 
 	// The concurrent publish workload, measured over the same window as
@@ -561,7 +586,13 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 							outcome = "err"
 							break
 						}
-						c.SetReadDeadline(time.Now().Add(30 * time.Second))
+						// Generous on purpose: this must outlast the relay's
+						// search budget (search_timeout_seconds, which an
+						// operator may raise well past the shipped 5s or
+						// disable), or the tool would record an ordinary
+						// failure before it could observe the EOSE or CLOSED
+						// it exists to measure.
+						c.SetReadDeadline(time.Now().Add(2 * time.Minute))
 						for outcome == "" {
 							_, raw, err := c.ReadMessage()
 							if err != nil {

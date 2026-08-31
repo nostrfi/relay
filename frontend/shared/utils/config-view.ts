@@ -46,11 +46,15 @@ export function formatLimit(value: number | undefined, unit: string): string {
 /** True when every resource limit is off, which an omitted section causes. */
 export function hasNoResourceLimits(config: RelayConfig | null): boolean {
   const limits = config?.resource_limits
+  // Deliberately scoped to the three admission/rate controls the warning
+  // names: the search timeout defaults on server-side even when the whole
+  // resource_limits section is omitted, and a search work budget is
+  // neither a connection cap nor rate limiting — counting it here would
+  // suppress the warning for exactly the configuration it exists for.
   return !!limits
     && limits.max_connections <= 0
     && limits.messages_per_second <= 0
     && limits.events_per_second <= 0
-    && limits.search_timeout_seconds <= 0
 }
 
 export function configSections(config: RelayConfig): ConfigSection[] {
