@@ -233,9 +233,17 @@ func runSustainedPublish(relayURL string, n int, ratePerConn float64, duration t
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			deadline := time.Now().Add(duration)
+			// The serial keeps every event's id unique: an id hashes pubkey,
+			// second-resolution created_at, kind, tags, and content, so
+			// fixed-content events published faster than one per second
+			// deduplicated in storage while still drawing accepted
+			// responses — the scenario then measured response throughput
+			// against roughly one real write per connection per second.
+			serial := 0
 			for time.Now().Before(deadline) {
 				<-ticker.C
-				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: "loadtest sustained publish"}
+				serial++
+				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: fmt.Sprintf("loadtest sustained publish #%d", serial)}
 				ev.Sign(sk)
 				msg, _ := json.Marshal([]any{"EVENT", ev})
 
@@ -425,14 +433,17 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 
 	// Seed in parallel: the relay's rate limiters are per-connection, so
 	// spreading the corpus across seeders keeps the shipped
-	// events_per_second config while finishing in reasonable time.
+	// events_per_second config while finishing in reasonable time. Indices
+	// come from one shared counter, so exactly seedCount events are
+	// attempted whatever the divisibility — per-seeder division truncated
+	// the remainder and seeded nothing at all below one event per seeder.
 	const seeders = 20
+	var nextIndex atomic.Int64
 	var seeded atomic.Int64
 	var seedWg sync.WaitGroup
-	perSeeder := seedCount / seeders
-	for s := range seeders {
+	for range seeders {
 		seedWg.Add(1)
-		go func(s int) {
+		go func() {
 			defer seedWg.Done()
 			c, err := dialAndSkipAuth(relayURL)
 			if err != nil {
@@ -441,8 +452,11 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 			defer c.Close()
 			sk := nostr.GeneratePrivateKey()
 			pk, _ := nostr.GetPublicKey(sk)
-			for i := range perSeeder {
-				global := s*perSeeder + i
+			for {
+				global := int(nextIndex.Add(1)) - 1
+				if global >= seedCount {
+					return
+				}
 				// The per-event serial matters, not just for realism: an
 				// event id hashes pubkey, second-resolution created_at,
 				// kind, tags, and content, so same-content events from one
@@ -463,7 +477,7 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 				}
 				seeded.Add(1)
 			}
-		}(s)
+		}()
 	}
 	seedWg.Wait()
 
@@ -475,6 +489,24 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 		closed    int
 	}
 	buckets := map[string]*classBucket{commonTerm: {}, rareTerm: {}, missTerm: {}}
+
+	// Searcher connections are dialed before the measurement window opens,
+	// and every worker shares one phase deadline computed after the dials:
+	// a per-worker window starting at that worker's dial would let slow
+	// admission skew the workloads apart, with searches or publishes
+	// running alone while the results claim one concurrent window.
+	// (Publisher dials happen inside runSustainedPublish; their skew is
+	// bounded by connection-ramp latency, milliseconds on the measured
+	// hardware, and starts alongside the searchers below.)
+	searchConns := make([]*websocket.Conn, 0, searchers)
+	for range searchers {
+		c, err := dialAndSkipAuth(relayURL)
+		if err != nil {
+			continue
+		}
+		searchConns = append(searchConns, c)
+	}
+	deadline := time.Now().Add(searchDuration)
 
 	// The concurrent publish workload, measured over the same window as
 	// the searchers.
@@ -492,17 +524,12 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 	// does for events) instead of waiting for an EOSE that never comes.
 	var rateLimitedRetries atomic.Int64
 	var searchWg sync.WaitGroup
-	for w := range searchers {
+	for w, c := range searchConns {
 		searchWg.Add(1)
-		go func(w int) {
+		go func(w int, c *websocket.Conn) {
 			defer searchWg.Done()
-			c, err := dialAndSkipAuth(relayURL)
-			if err != nil {
-				return
-			}
 			defer c.Close()
 			subID := fmt.Sprintf("lt_search_%d", w)
-			deadline := time.Now().Add(searchDuration)
 			for time.Now().Before(deadline) {
 				for _, term := range []string{commonTerm, rareTerm, missTerm} {
 					// Re-checked per term, not per cycle: the concurrent
@@ -538,9 +565,15 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 							json.Unmarshal(arr[0], &msgType)
 							json.Unmarshal(arr[1], &second)
 							if msgType == "NOTICE" && strings.HasPrefix(second, "rate-limited") {
-								// The REQ itself was dropped; back off and resend.
+								// The REQ itself was dropped; back off a full
+								// second before resending. Shorter backoffs can
+								// re-trip a still-depleted token bucket, and the
+								// relay throttles rate-limit NOTICEs to one per
+								// second — a dropped resend inside that window
+								// gets no answer at all, leaving the worker
+								// waiting out its whole read deadline.
 								rateLimitedRetries.Add(1)
-								time.Sleep(100 * time.Millisecond)
+								time.Sleep(time.Second)
 								break
 							}
 							if second != subID {
@@ -582,14 +615,15 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 					}
 				}
 			}
-		}(w)
+		}(w, c)
 	}
 	searchWg.Wait()
 
 	class := func(name, term string) ScenarioResult {
 		b := buckets[term]
 		res := summarize(name, b.attempted, b.succeeded, b.attempted-b.succeeded, b.latencies)
-		res.Notes = fmt.Sprintf("%d seeded events, %d searchers, %s window", seeded.Load(), searchers, searchDuration)
+		res.ThroughputPerSec = float64(b.succeeded) / searchDuration.Seconds()
+		res.Notes = fmt.Sprintf("%d seeded events, %d searchers, %s window", seeded.Load(), len(searchConns), searchDuration)
 		if b.closed > 0 {
 			res.Notes += fmt.Sprintf("; %d answered CLOSED by the search work budget", b.closed)
 		}
