@@ -442,13 +442,19 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 			sk := nostr.GeneratePrivateKey()
 			pk, _ := nostr.GetPublicKey(sk)
 			for i := range perSeeder {
-				content := filler
 				global := s*perSeeder + i
+				// The per-event serial matters, not just for realism: an
+				// event id hashes pubkey, second-resolution created_at,
+				// kind, tags, and content, so same-content events from one
+				// seeder inside one second share an id, the relay dedups
+				// them into a single row, and the corpus silently stops
+				// growing while the seeded count advances.
+				content := fmt.Sprintf("%s #%d", filler, global)
 				if global%10 == 0 {
-					content = filler + " " + commonTerm
+					content += " " + commonTerm
 				}
 				if global == 1 {
-					content = filler + " " + rareTerm
+					content += " " + rareTerm
 				}
 				ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now(), Kind: 1, Content: content}
 				ev.Sign(sk)
@@ -499,6 +505,13 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 			deadline := time.Now().Add(searchDuration)
 			for time.Now().Before(deadline) {
 				for _, term := range []string{commonTerm, rareTerm, missTerm} {
+					// Re-checked per term, not per cycle: the concurrent
+					// publish workload stops at exactly searchDuration, so a
+					// search started after the window would be measured
+					// without the contention this scenario exists to include.
+					if !time.Now().Before(deadline) {
+						break
+					}
 					b := buckets[term]
 					req, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{Search: term, Kinds: []int{1}}})
 
