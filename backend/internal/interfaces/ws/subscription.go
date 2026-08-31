@@ -104,22 +104,53 @@ func (h *RelayHandler) queryFilter(c *Client, f nostr.Filter) ([]*domainevent.Ev
 	return h.eventService.QueryEvents(ctx, f)
 }
 
-// matchesFilter is nostr.Filter.Matches plus the one dimension it does not
-// know about: NIP-50's search term.
+// matchesPrefixes applies the relay's NIP-01 prefix rule for ids/authors
+// values: exact equality at the full 64 hex characters, prefix match below.
+// The semantics here must equal prefixMatchCondition's (the stored-query
+// side, infrastructure/duckdb) or stored and live answers diverge — a REQ
+// would return prefix-matched stored events and then silently drop matching
+// live ones, which is exactly the bug this exists to fix. The mirroring is
+// deliberate down to the edges: an empty values list is no constraint at
+// all (the SQL builder's len > 0 gate — go-nostr instead rejects everything
+// for a non-nil empty list, the same divergence in miniature); an
+// empty-string value matches every event, as starts_with with an empty
+// prefix does; a value longer than 64 characters matches nothing, as a
+// longer prefix of a 64-character column does.
+func matchesPrefixes(values []string, actual string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	for _, v := range values {
+		if len(v) == 64 {
+			if v == actual {
+				return true
+			}
+		} else if strings.HasPrefix(actual, v) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesFilter is nostr.Filter.Matches plus the dimensions it gets wrong
+// for this relay: NIP-50's search term, which it ignores entirely, and
+// NIP-01 prefix matching on ids/authors, which it treats as exact
+// membership (v0.52.3, filter.go, slices.Contains on both). Either gap has
+// the same failure shape — a REQ answers correctly from storage and then
+// silently diverges after EOSE — so both dimensions are judged here by the
+// same criterion the stored results were.
 //
-// go-nostr's Matches ignores Search entirely, so it answers true for an
-// event whose content does not contain the term (v0.52.3, filter.go). Left
-// alone, an open REQ carrying a search term would return a correctly
-// filtered batch of stored events and then stream every later event
-// matching the rest of the filter — the search silently expiring at EOSE.
-//
-// The term was parsed and folded once, when the REQ was accepted, so a live
-// event is judged by exactly the criterion the stored results were —
-// without re-deriving it per event.
-//
-// loweredContent folds the event's content at most once per broadcast; see
-// the comment in broadcast for why that matters.
+// The search term was parsed and folded once, when the REQ was accepted;
+// loweredContent folds the event's content at most once per broadcast (see
+// the comment in broadcast for why that matters).
 func matchesFilter(f nostr.Filter, ev *nostr.Event, loweredContent func() string) bool {
+	if !matchesPrefixes(f.IDs, ev.ID) || !matchesPrefixes(f.Authors, ev.PubKey) {
+		return false
+	}
+	// Cleared on this local copy so Matches cannot re-reject a prefix
+	// match with its exact-membership reading of the same fields.
+	f.IDs = nil
+	f.Authors = nil
 	if !f.Matches(ev) {
 		return false
 	}
