@@ -412,6 +412,12 @@ func runLiveFanout(relayURL string, subscribers, fanoutEvents int) ScenarioResul
 	return res
 }
 
+// minSearchSeed is the smallest corpus the search scenario accepts: the
+// common term lands on every tenth seeded index, so this is the point
+// where the common class (10 rows) and the rare class (1 row) first
+// measure genuinely different amounts of work.
+const minSearchSeed = 100
+
 // runSearch measures NIP-50 search — the one query no index can answer: an
 // unindexed ILIKE scan whose quality ordering is computed across every
 // candidate row before LIMIT selects among them, so max_limit bounds what a
@@ -431,11 +437,14 @@ func runLiveFanout(relayURL string, subscribers, fanoutEvents int) ScenarioResul
 // relay's search work budget firing) counts as a failure with a note, not
 // a latency sample: it means the budget bound the query before EOSE.
 func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Duration, publishConns int, publishRate float64) (common, rare, miss, publish ScenarioResult) {
-	// Below two rows the class design collapses: index 0 carries the
-	// common term and index 1 the sole rare row, so a smaller corpus
-	// would relabel misses as the classes it claims to measure.
-	if seedCount < 2 {
-		note := fmt.Sprintf("search-seed %d cannot populate the rare class (minimum 2); scenario aborted", seedCount)
+	// Below minSearchSeed the class design collapses: the common term
+	// lands on every tenth index and the rare term on index 1 only, so a
+	// tiny corpus gives the "common" class one row — indistinguishable
+	// from rare, and at a seed of 2 actually 50% of the corpus rather
+	// than the advertised ~10%. One hundred rows is the smallest corpus
+	// where common (10 rows) and rare (1 row) measure different work.
+	if seedCount < minSearchSeed {
+		note := fmt.Sprintf("search-seed %d cannot separate the common and rare classes (minimum %d); scenario aborted", seedCount, minSearchSeed)
 		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
 		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
 	}
@@ -559,6 +568,7 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 	// recognizes it and retries with a backoff (as publishUntilAccepted
 	// does for events) instead of waiting for an EOSE that never comes.
 	var rateLimitedRetries atomic.Int64
+	var workerFailed atomic.Bool
 	var searchWg sync.WaitGroup
 	for w, c := range searchConns {
 		searchWg.Add(1)
@@ -581,6 +591,15 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 					outcome := ""
 					var lat time.Duration
 					for attempt := 0; attempt < 100 && outcome == ""; attempt++ {
+						// Re-checked before every send, not just per term: a
+						// rate-limited retry sleeps and could otherwise start
+						// its resend after the publish workload has stopped,
+						// recording a sample without the claimed contention.
+						// An abandoned query is not counted at all.
+						if !time.Now().Before(deadline) {
+							outcome = "window"
+							break
+						}
 						t0 := time.Now()
 						if err := c.WriteMessage(websocket.TextMessage, req); err != nil {
 							outcome = "err"
@@ -641,6 +660,9 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 						c.SetReadDeadline(time.Time{})
 					}
 
+					if outcome == "window" {
+						continue // the per-term deadline check ends the phase
+					}
 					b.mu.Lock()
 					b.attempted++
 					switch outcome {
@@ -653,6 +675,11 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 					b.mu.Unlock()
 
 					if outcome == "err" {
+						// A worker lost mid-phase means the rest of the run
+						// measures reduced concurrency, not the requested
+						// workload; the flag invalidates the whole scenario
+						// after the phase drains.
+						workerFailed.Store(true)
 						return
 					}
 				}
@@ -660,6 +687,13 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 		}(w, c)
 	}
 	searchWg.Wait()
+
+	if workerFailed.Load() {
+		publish = <-publishDone
+		note := "a searcher connection failed mid-phase; scenario aborted rather than reporting reduced concurrency as the requested workload"
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
 
 	class := func(name, term string) ScenarioResult {
 		b := buckets[term]

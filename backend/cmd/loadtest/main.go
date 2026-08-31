@@ -31,6 +31,25 @@ func main() {
 	outputJSON := flag.String("json", "", "optional path to also write results as JSON")
 	flag.Parse()
 
+	// Invalid search-phase controls are rejected up front rather than
+	// producing misleading output: zero searchers would run a vacuous
+	// all-zero scenario (a negative count panics), a non-positive duration
+	// divides by zero into NaN throughput that also breaks the JSON
+	// output, and a corpus below minSearchSeed cannot separate the common
+	// and rare classes.
+	if *searchers <= 0 {
+		fmt.Fprintf(os.Stderr, "-searchers must be positive (got %d)\n", *searchers)
+		os.Exit(2)
+	}
+	if *searchDuration <= 0 {
+		fmt.Fprintf(os.Stderr, "-search-duration must be positive (got %s)\n", *searchDuration)
+		os.Exit(2)
+	}
+	if *searchSeed < minSearchSeed {
+		fmt.Fprintf(os.Stderr, "-search-seed must be at least %d to separate the common and rare classes (got %d)\n", minSearchSeed, *searchSeed)
+		os.Exit(2)
+	}
+
 	env := Environment{
 		GoVersion: runtime.Version(),
 		GOOS:      runtime.GOOS,
