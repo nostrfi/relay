@@ -770,6 +770,15 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
 		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
 	}
+	// Healthy connections that never published are still no contention: a
+	// publish interval longer than the window means every worker's first
+	// tick fell outside it, so no health counter trips and yet the search
+	// buckets would claim a concurrency that consisted of zero writes.
+	if published.result.Attempted == 0 {
+		note := "the concurrent publish workload made no in-window publish attempts (rate too low for the window); scenario aborted rather than claiming contention that never occurred"
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
 	// A class no worker reached — a window shorter than the queries running
 	// in it — must not surface as a normal-looking zero-throughput result:
 	// zero attempts is the absence of a measurement, not a measurement of

@@ -37,6 +37,22 @@ func main() {
 	// divides by zero into NaN throughput that also breaks the JSON
 	// output, and a corpus below minSearchSeed cannot separate the common
 	// and rare classes.
+	// The publish controls get the same treatment: they drive both the solo
+	// scenario and the workload the search buckets claim to run against, so
+	// zero connections would let the search phase report contention that
+	// never existed, and a non-positive rate panics NewTicker.
+	if *connections <= 0 {
+		fmt.Fprintf(os.Stderr, "-connections must be positive (got %d)\n", *connections)
+		os.Exit(2)
+	}
+	if *rate <= 0 {
+		fmt.Fprintf(os.Stderr, "-rate must be positive (got %g)\n", *rate)
+		os.Exit(2)
+	}
+	if *duration <= 0 {
+		fmt.Fprintf(os.Stderr, "-duration must be positive (got %s)\n", *duration)
+		os.Exit(2)
+	}
 	if *searchers <= 0 {
 		fmt.Fprintf(os.Stderr, "-searchers must be positive (got %d)\n", *searchers)
 		os.Exit(2)
