@@ -276,6 +276,77 @@ func TestNip01PrefixFilter(t *testing.T) {
 	assert.False(t, drainToEOSE("prefix_mismatch_sub", nostr.Filter{IDs: []string{"deadbeef"}}), "a non-matching prefix must match nothing")
 }
 
+// TestNip01PrefixFilterLive is the live-path companion to
+// TestNip01PrefixFilter: the same abbreviated ids/authors values that match
+// stored events must go on matching events published after EOSE. Before
+// nostrfi/workspace#57 they did not — broadcast delegated both fields to
+// go-nostr's exact membership check, so a prefix subscription answered
+// correctly from storage and then silently dropped every matching live
+// event.
+func TestNip01PrefixFilterLive(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+	subscriber := connectTestRelay(t, server)
+	defer subscriber.Close()
+	publisher := connectTestRelay(t, server)
+	defer publisher.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	// Signed before subscribing so its id is known to the id-prefix filter.
+	matching := signedEventWithKey(t, sk, 1, "delivered live by prefix", nil)
+
+	openSub := func(subID string, filter nostr.Filter) {
+		req, _ := json.Marshal([]any{"REQ", subID, filter})
+		if err := subscriber.WriteMessage(websocket.TextMessage, req); err != nil {
+			t.Fatalf("write REQ: %v", err)
+		}
+		assert.Empty(t, collectUntilEOSE(t, subscriber, subID), "nothing stored yet on %s", subID)
+	}
+	openSub("live_author", nostr.Filter{Authors: []string{pk[:10]}})
+	openSub("live_id", nostr.Filter{IDs: []string{matching.ID[:12]}})
+	openSub("live_miss", nostr.Filter{Authors: []string{"deadbeef"}})
+
+	// The decoy first: if non-matching events were delivered to any of the
+	// three subscriptions, it would arrive ahead of the deliveries asserted
+	// below and fail the subscription-id check.
+	publishEvent(t, publisher, signedEvent(t, 1, "decoy from an unrelated author", nil))
+	publishEvent(t, publisher, matching)
+
+	got := map[string]string{} // subID -> content
+	deadline := time.Now().Add(5 * time.Second)
+	for len(got) < 2 {
+		subscriber.SetReadDeadline(deadline)
+		_, raw, err := subscriber.ReadMessage()
+		if err != nil {
+			t.Fatalf("expected live deliveries on live_author and live_id, got %v after %v", err, got)
+		}
+		var arr []json.RawMessage
+		json.Unmarshal(raw, &arr)
+		var msgType string
+		json.Unmarshal(arr[0], &msgType)
+		require.Equal(t, "EVENT", msgType, "expected only live EVENT messages, got %s", raw)
+		var subID string
+		json.Unmarshal(arr[1], &subID)
+		var ev nostr.Event
+		json.Unmarshal(arr[2], &ev)
+		require.Equal(t, matching.ID, ev.ID, "only the prefix-matched event may be delivered; got %q on %s", ev.Content, subID)
+		got[subID] = ev.Content
+	}
+	assert.Equal(t, map[string]string{
+		"live_author": "delivered live by prefix",
+		"live_id":     "delivered live by prefix",
+	}, got, "the matching event must be delivered on both prefix subscriptions and nowhere else")
+
+	// Nothing further may arrive: not the decoy on any subscription, and
+	// nothing at all on live_miss.
+	subscriber.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, raw, err := subscriber.ReadMessage(); err == nil {
+		t.Fatalf("unexpected extra delivery: %s", raw)
+	}
+	subscriber.SetReadDeadline(time.Time{})
+}
+
 // TestTagFidelity exercises full tag round-trip fidelity end to end over the
 // wire: a multi-field tag (relay hint + marker), a multi-letter tag name,
 // and a single-element tag (e.g. NIP-36's bare "content-warning") must all
