@@ -481,6 +481,17 @@ func runSearch(relayURL string, seedCount, searchers int, searchDuration time.Du
 	}
 	seedWg.Wait()
 
+	// A partial corpus has unknown selectivity — a failed seeder consumes
+	// its indices permanently, and the lost rows may include the sole
+	// rare-term event or a disproportionate share of common ones. Numbers
+	// measured against it would claim a corpus that does not exist, so the
+	// scenario aborts instead of guessing.
+	if int(seeded.Load()) != seedCount {
+		note := fmt.Sprintf("seeding incomplete (%d of %d events accepted); scenario aborted rather than measuring a corpus with unknown selectivity", seeded.Load(), seedCount)
+		fail := func(name string) ScenarioResult { return ScenarioResult{Name: name, Notes: note} }
+		return fail("search_common"), fail("search_rare"), fail("search_miss"), fail("publish_during_search")
+	}
+
 	type classBucket struct {
 		mu        sync.Mutex
 		latencies []time.Duration
