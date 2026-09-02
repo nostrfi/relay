@@ -266,7 +266,10 @@ resource_limits:                 # operational controls outside the NIP-11 spec
   max_connections: 1000          # total concurrent WebSocket connections
   messages_per_second: 20        # per-connection token-bucket rate for all messages
   events_per_second: 5           # per-connection token-bucket rate for EVENT publishes
+  search_timeout_seconds: 5      # per-query work budget for NIP-50 searches; 0 disables
 ```
+
+`search_timeout_seconds` bounds the one query no index can answer: a NIP-50 search is an unindexed scan whose quality ordering is computed across every candidate row before `LIMIT` selects among them, so `max_limit` caps what a search returns, not what it reads. A search past the budget is cancelled and answered with `CLOSED` `error: search timed out`, and the subscription is dropped — the client can retry with a narrower term. Ordinary `REQ` filters carry no deadline. The default was calibrated from measurement (see the capacity baseline's search scenarios in the workspace repository): search cost grows roughly linearly with table size, and a broad search reaches the 5-second budget only in the low hundreds of thousands of rows.
 
 Rejections use a stable, machine-readable prefix (`invalid:`, `restricted:`, `rate-limited:`, `auth-required:`, `pow:`, `error:`) and never include raw internal error text. `REQ`s rejected for filter count, subscription count, or subscription-id length receive a `CLOSED` message; `EVENT`s rejected for any reason receive `OK false <reason>`.
 
@@ -600,6 +603,22 @@ curl https://localhost:8443/admin                                  # admin dashb
 ```
 
 The bundled `Caddyfile` uses `tls internal` (Caddy issues itself a locally-trusted certificate) so this works out of the box with no domain or DNS setup — exactly what's exercised above. For an internet-facing deployment: replace `localhost` in the `Caddyfile` with your real domain and delete the `tls internal` line; Caddy then obtains and renews a real Let's Encrypt certificate automatically via ACME, no other configuration changes needed. Port `8443` is used above because this was verified in a rootless-container environment that can't bind privileged host ports without extra host configuration — on a host that can, map `443:443` (and `80:80` for the ACME HTTP challenge) instead.
+
+### Resource sizing
+
+A rough baseline for running the two application processes side by side, measured on a development sandbox (4 logical CPUs, linux/amd64, Node v22 — the `frontend/Dockerfile` base) with each process run directly and observed via `/proc`. Like every number in the capacity baseline (workspace `capacity-baseline.md`), this describes that sandbox, not production hardware — re-measure on your own host before relying on it.
+
+| Process | Idle RSS | Under load | Load applied |
+| --- | --- | --- | --- |
+| Go relay | ~55 MB (fresh database) | ~272 MB peak, settling near ~257 MB | the full `cmd/loadtest` battery at defaults: 50 publishing connections, live fanout, Negentropy resync, NIP-50 search over a 5,000-event corpus |
+| Nuxt SSR dashboard | ~97 MB after first render | ~250 MB | ~110 server-rendered pages/s from 4 concurrent clients (1,600 requests) |
+
+Two properties of those numbers worth knowing when choosing limits:
+
+- **Both processes hold their high-water mark.** The relay settles near its loaded footprint because DuckDB keeps its buffer pool, and Node's heap does not shrink promptly after a burst. Size for the loaded number, not the idle one.
+- **CPU is the relay's constraint, not the dashboard's.** The loadtest battery kept the relay at roughly one busy core on this sandbox (NIP-50 search is an unindexed scan and the dominant CPU cost — see "Resource limits" for its work budget); a server-rendered dashboard page costs ~7ms of CPU, so a handful of operators rounds to zero and the SSR process is effectively memory, not CPU.
+
+As a floor: the relay, the dashboard, and Caddy (a static Go binary whose footprint at this scale is small next to the other two; not measured here — this sandbox has no container runtime) fit together in **1 GB of RAM** at the scales above. On CPU, **1 vCPU** covers the realistic shape — a handful of operators on the dashboard while the relay carries traffic — but not both measured loads at once: the relay's ~1 busy core plus ~0.8 of a core at the hammered SSR rate is ~1.8 cores, so plan **2 vCPUs** if the dashboard will see sustained traffic alongside a loaded relay. **2 GB** buys headroom for database growth, concurrent search load, and traffic bursts. The shipped Compose files deliberately set no `mem_limit`/`cpus` — resource limits are a per-deployment choice, and a wrong guess baked into the repository would fail someone else's workload. In production the relay's own footprint is observable as `process_resident_memory_bytes` on its `/metrics` listener (see "Scraping metrics"); the Node dashboard exposes no equivalent endpoint, so verify its footprint with `docker stats` or the host's own tooling.
 
 ### Scraping metrics
 
