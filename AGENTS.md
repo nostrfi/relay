@@ -4,7 +4,7 @@ Guidance for AI coding agents (Junie, Claude, Codex, etc.) working in this repos
 
 ## Project Overview
 
-This is the **Nostrfi Relay** monorepo: a **Nostr Relay** backend written in **Go 1.25**
+This is the **Nostrfi Relay** monorepo: a **Nostr Relay** backend written in **Go 1.26**
 (`backend/`) plus its **admin dashboard**, a **Nuxt 4** SSR app (`frontend/`). The relay speaks
 the Nostr WebSocket protocol and implements a range of NIPs (NIP-01, 02, 09, 11, 17, 22, 28, 40,
 42, 70, 71, 77, 86, 98). The dashboard runs as its own Node process, reverse-proxied at `/admin`
