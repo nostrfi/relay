@@ -9,6 +9,9 @@ on:
   # the tag (a tag created with GITHUB_TOKEN starts no tag-push workflows).
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -26,12 +29,15 @@ jobs:
       majorMinor: ${{ steps.version.outputs.majorMinor }}
       sha: ${{ steps.version.outputs.sha }}
       release: ${{ steps.version.outputs.release }}
+      promoteLatest: ${{ steps.version.outputs.promoteLatest }}
+      promoteMinor: ${{ steps.version.outputs.promoteMinor }}
     steps:
       - name: Determine version
         id: version
         env:
           REF: ${{ github.ref }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
           sha="${SHA:0:7}"
@@ -44,13 +50,28 @@ jobs:
             majorMinor=""
             release=false
           fi
+          # Mutable aliases only move forward: a rebuild of an older release
+          # keeps its own version tag but must not take over latest, or its
+          # minor-line alias from a newer patch.
+          promoteLatest=false
+          promoteMinor=false
+          if [ "$release" = true ]; then
+            tags="$(git ls-remote --tags --refs "$REPO_URL" 'v*' \
+              | sed -n 's#.*refs/tags/v\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p')"
+            highest="$(printf '%s\n%s\n' "$tags" "$version" | sed '/^$/d' | sort -V | tail -n1)"
+            highestMinor="$(printf '%s\n%s\n' "$tags" "$version" | awk -F. -v mm="$majorMinor" '$1"."$2 == mm' | sort -V | tail -n1)"
+            [ "$version" = "$highest" ] && promoteLatest=true
+            [ "$version" = "$highestMinor" ] && promoteMinor=true
+          fi
           {
             echo "version=$version"
             echo "majorMinor=$majorMinor"
             echo "sha=$sha"
             echo "release=$release"
+            echo "promoteLatest=$promoteLatest"
+            echo "promoteMinor=$promoteMinor"
           } >> "$GITHUB_OUTPUT"
-          echo "Version: $version (release: $release)"
+          echo "Version: $version (release: $release, latest: $promoteLatest, minor alias: $promoteMinor)"
 
   # ── Build & test (backend) ───────────────────────────────────────
   build:
@@ -114,9 +135,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ needs.version.outputs.version }},enable=${{ needs.version.outputs.release == 'true' }}
-            type=raw,value=${{ needs.version.outputs.majorMinor }},enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=${{ needs.version.outputs.majorMinor }},enable=${{ needs.version.outputs.promoteMinor == 'true' }}
             type=raw,value=sha-${{ needs.version.outputs.sha }}
-            type=raw,value=latest,enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.promoteLatest == 'true' }}
           labels: |
             org.opencontainers.image.title=Nostrfi Relay
             org.opencontainers.image.description=A custom Nostr relay configured via YAML
@@ -180,9 +201,9 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.DASHBOARD_IMAGE_NAME }}
           tags: |
             type=raw,value=${{ needs.version.outputs.version }},enable=${{ needs.version.outputs.release == 'true' }}
-            type=raw,value=${{ needs.version.outputs.majorMinor }},enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=${{ needs.version.outputs.majorMinor }},enable=${{ needs.version.outputs.promoteMinor == 'true' }}
             type=raw,value=sha-${{ needs.version.outputs.sha }}
-            type=raw,value=latest,enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.promoteLatest == 'true' }}
           labels: |
             org.opencontainers.image.title=Nostrfi Relay Dashboard
             org.opencontainers.image.description=Admin dashboard for the Nostrfi relay

@@ -174,23 +174,48 @@ jobs:
           if-no-files-found: error
 
   # A tag made with GITHUB_TOKEN does not start tag-push workflows, so the
-  # image build is started explicitly on the tag ref.
+  # image build is started explicitly on the tag ref, and this job waits for
+  # it: the release is only published once its images exist.
   images:
     needs: resolve
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.images == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       actions: write
     steps:
-      - name: Start the CI image build for the tag
+      - name: Build and push the images for the tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.resolve.outputs.tag }}
-        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+        run: |
+          set -euo pipefail
+          started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          run_id=""
+          for _ in $(seq 1 30); do
+            sleep 10
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+              --event workflow_dispatch --branch "$TAG" --limit 20 \
+              --json databaseId,createdAt \
+              --jq "[.[] | select(.createdAt >= \"$started\")] | sort_by(.createdAt) | last | .databaseId // empty")"
+            [ -n "$run_id" ] && break
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::The CI run for $TAG did not appear within five minutes."
+            exit 1
+          fi
+          echo "Waiting for CI run $run_id"
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --interval 30 --exit-status
 
   publish-release:
-    needs: [resolve, binary]
-    if: ${{ !cancelled() && needs.binary.result == 'success' }}
+    needs: [resolve, binary, images]
+    # Publish only when the binary built and the images either built or were
+    # deliberately not requested on a manual run.
+    if: >-
+      !cancelled() &&
+      needs.binary.result == 'success' &&
+      (needs.images.result == 'success' || needs.resolve.outputs.images != 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: write

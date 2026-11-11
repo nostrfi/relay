@@ -84,9 +84,11 @@ The `Release` workflow (`.github/workflows/release.yml`):
    `autorelease: tagged`;
 2. closes the milestone named after the version (a missing milestone is only a notice);
 3. builds `relay-linux-amd64.tar.gz` from the tag, after checking `version.txt` matches it;
-4. starts the CI workflow on the tag, which pushes both images as `<version>`, `<major.minor>`,
-   `sha-<shortsha>`, and `latest`;
-5. attaches the archive (after checking its SHA-256) and publishes the release as latest.
+4. starts the CI workflow on the tag and waits for it to finish. CI pushes both images as
+   `<version>` and `sha-<shortsha>`, and moves `<major.minor>` and `latest` only if this is the
+   newest release in that line (a rebuild of an older release never moves them back);
+5. attaches the archive (after checking its SHA-256) and publishes the release as latest, but
+   only once the binary and the images have both succeeded.
 
 If a step fails, the release stays a draft that only maintainers see.
 
@@ -103,8 +105,14 @@ Fix the cause, then re-run the failed jobs, or run the `Release` workflow by han
 
 ## Hotfixes
 
-Fix on a `fix/` branch from `master` and merge. release-please turns the open release PR into a
-patch release, or opens one.
+Fix on a `fix/` branch from `master` and merge. release-please adds the fix to the open release PR,
+or opens one.
+
+The release PR always takes the largest change since the last release. If unreleased `feat`
+commits are already on `master`, the release stays a minor release and ships those features with
+the fix; a `fix` does not turn it into a patch release. To ship only the fix in that case, ask the
+owner first: it needs a release branch cut from the last release tag, which is an exception to
+this process.
 
 ## Secrets
 
