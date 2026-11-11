@@ -588,7 +588,7 @@ This tool is deliberately not scheduled or triggered automatically by the relay 
 
 ## Deployment
 
-The relay itself never terminates TLS — see `operating-model.md`'s application-vs-deployment boundary. `docker-compose.yml`'s `relay.image` references `ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}` and `dashboard.image` references `ghcr.io/nostrfi/relay-dashboard:${DASHBOARD_VERSION:-latest}` — the tags CI actually publishes for each (GitVersion-driven semver, `sha-<shortsha>`, and `latest`), so both TLS termination and rollback below use the real deployment artifacts rather than locally-built, disconnected image names.
+The relay itself never terminates TLS — see `operating-model.md`'s application-vs-deployment boundary. `docker-compose.yml`'s `relay.image` references `ghcr.io/nostrfi/relay:${RELAY_VERSION:-latest}` and `dashboard.image` references `ghcr.io/nostrfi/relay-dashboard:${DASHBOARD_VERSION:-latest}` — the tags CI actually publishes for each (the release version, `sha-<shortsha>`, and `latest`), so both TLS termination and rollback below use the real deployment artifacts rather than locally-built, disconnected image names.
 
 The relay and the dashboard are **separate processes** (the dashboard is a Nuxt SSR app, not a static bundle baked into the relay binary) — see [`AGENTS.md`](AGENTS.md)'s "Two-process architecture" for how they're wired together.
 
@@ -644,7 +644,7 @@ curl -s localhost:8080/metrics                                      # from outsi
 
 ### Rollback
 
-Every CI build publishes to `ghcr.io/nostrfi/relay` and `ghcr.io/nostrfi/relay-dashboard` under several tags each (see `.github/workflows/ci.yml`): a full semver (`1.2.3`), `sha-<shortsha>`, and `latest` (non-prerelease builds only). To run a specific previously-published version, or roll back to one:
+CI publishes to `ghcr.io/nostrfi/relay` and `ghcr.io/nostrfi/relay-dashboard` (see `.github/workflows/ci.yml`). Every push to `master` publishes `sha-<shortsha>`. A release additionally publishes the version (`1.2.3`), its minor line (`1.2`), and `latest`; see [`docs/releasing.md`](docs/releasing.md). To run a specific previously-published version, or roll back to one:
 
 ```sh
 RELAY_VERSION=1.2.2 docker compose pull relay
@@ -655,6 +655,10 @@ DASHBOARD_VERSION=1.2.2 docker compose up -d dashboard
 ```
 
 This mechanism — swap `RELAY_VERSION`/`DASHBOARD_VERSION`, then recreate the container — is what was exercised for the relay during development (using two locally-built images standing in for two releases, since pulling the real published tags requires registry credentials not available in every environment): deploying one version, then switching to the other, confirms the running version (visible in the NIP-11 `version` field) changes correctly on each swap. The dashboard image follows the same mechanism but has no equivalent version-visible-in-response check yet.
+
+## Releasing
+
+Releases are cut by merging a release-please release PR. See [`docs/releasing.md`](docs/releasing.md).
 
 ## Continuous integration
 
@@ -670,4 +674,4 @@ Frontend (`frontend/`):
 2. `pnpm typecheck` (`nuxt typecheck`)
 3. `pnpm build`
 
-Version tagging (GitVersion), the Docker image build/push to `ghcr.io/nostrfi/relay` and `ghcr.io/nostrfi/relay-dashboard`, and GitHub Releases on tag pushes run in later jobs in the same workflow, gated on the steps above passing.
+The Docker image build/push to `ghcr.io/nostrfi/relay` and `ghcr.io/nostrfi/relay-dashboard` runs in later jobs in the same workflow, gated on the steps above passing. Versions and GitHub Releases come from release-please, in `.github/workflows/release.yml`; see [`docs/releasing.md`](docs/releasing.md).
