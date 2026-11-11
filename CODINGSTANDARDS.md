@@ -6,7 +6,7 @@ The sections below through "Security Guardrails" cover the Go backend (`backend/
 "Frontend Conventions (TypeScript / Nuxt)" at the end of this document for the Nuxt admin
 dashboard (`frontend/`).
 
-## Coding Conventions (Go 1.25)
+## Coding Conventions (Go 1.26)
 
 Agents MUST use modern Go idioms. Non-exhaustive checklist:
 
