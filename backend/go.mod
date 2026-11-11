@@ -2,7 +2,7 @@ module relay
 
 go 1.25.0
 
-toolchain go1.25.13
+toolchain go1.26.11
 
 require (
 	github.com/duckdb/duckdb-go/v2 v2.5.5
