@@ -14,7 +14,7 @@ useSeoMeta({ title: 'Metrics' })
 // Private by default — see app/middleware/auth.global.ts.
 definePageMeta({ layout: 'dashboard' })
 
-const { samples, latest, previous, ready, error, paused, refresh } = useRelayMetrics()
+const { samples, latest, previous, ready, error, paused, polling, refresh } = useRelayMetrics()
 
 /**
  * Rates are ranked tables with one sparkline each rather than a multi-series
@@ -117,11 +117,19 @@ const windowLabel = computed(() => {
         </UButton>
       </div>
 
-      <MetricsMetricTiles
+      <!--
+        The same status band as the Overview, over live gauges rather than
+        stored events: the Storage section below already explains those, and
+        repeating them here would show each figure twice (nostrfi/relay#49).
+      -->
+      <MetricsRelayStatusCard
         :snapshot="latest"
+        :samples="samples"
         :ready="ready"
         :paused="paused"
+        :polling="polling"
         :failing="error !== ''"
+        :figures="['uptime', 'connections', 'subscriptions']"
       />
 
       <UCard class="mb-6">
