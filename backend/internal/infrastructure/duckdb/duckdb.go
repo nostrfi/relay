@@ -237,23 +237,31 @@ func saveEventTx(ctx context.Context, tx *sql.Tx, event *nostr.Event) (bool, err
 		return true, nil
 	}
 
-	// This index only ever needs to serve NIP-01 single-letter tag filters
-	// (`#e`, `#p`, ...), which match on a tag's name and first value alone —
-	// full tag fidelity for served events comes from tags_json above, not
-	// from this table.
+	// This index serves tag filters, which match on a tag's name and first
+	// value alone — full tag fidelity for served events comes from
+	// tags_json above, not from this table. It holds NIP-01's single-letter
+	// tags (`#e`, `#p`, ...) plus the operator's allowlisted tags
+	// (domainevent.IndexedTag decides which).
 	for _, tag := range event.Tags {
-		if len(tag) < 2 {
-			continue
-		}
-		if len(tag[0]) == 1 && ((tag[0][0] >= 'a' && tag[0][0] <= 'z') || (tag[0][0] >= 'A' && tag[0][0] <= 'Z')) {
-			_, err = tx.ExecContext(ctx, "INSERT INTO tags (event_id, tag, value) VALUES (?, ?, ?)", event.ID, tag[0], tag[1])
-			if err != nil {
-				slog.Error("failed to insert tag", "event_id", event.ID, "tag", tag[0], "error", err)
-			}
+		if err := insertTagRow(ctx, tx, event.ID, tag); err != nil {
+			slog.Error("failed to insert tag", "event_id", event.ID, "tag", tag[0], "error", err)
 		}
 	}
 
 	return true, nil
+}
+
+// insertTagRow indexes one tag of an event, when domainevent.IndexedTag
+// says it is indexed. A value-less tag is stored with a NULL value: a
+// presence filter finds it by name, and no value filter can ever match it.
+func insertTagRow(ctx context.Context, tx *sql.Tx, eventID string, tag nostr.Tag) error {
+	name, value, hasValue, ok := domainevent.IndexedTag(tag)
+	if !ok {
+		return nil
+	}
+	stored := sql.NullString{String: value, Valid: hasValue}
+	_, err := tx.ExecContext(ctx, "INSERT INTO tags (event_id, tag, value) VALUES (?, ?, ?)", eventID, name, stored)
+	return err
 }
 
 // deleteMatchingEvents deletes every event matching whereClause, along with
@@ -377,9 +385,33 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, s
 		if len(values) == 0 {
 			continue
 		}
+		// A protocol filter only ever matches NIP-01's single-letter tags.
+		// The index now also holds the operator's multi-letter tags
+		// (nostrfi/relay#45), and a public REQ for #client must keep
+		// matching no stored event rather than start reading them.
+		if !domainevent.IsSingleLetterTag(tag) {
+			conditions = append(conditions, "FALSE")
+			continue
+		}
 		conditions = append(conditions, fmt.Sprintf(`
 			e.id IN (SELECT event_id FROM tags WHERE tag = ? AND value IN (%s))
 		`, placeholders(len(values))))
+		args = append(args, tag)
+		for _, val := range values {
+			args = append(args, val)
+		}
+	}
+
+	// The operator's tag filter: every name must match, any of its values
+	// may, and no values means the tag merely has to be there.
+	for tag, values := range query.TagConditions {
+		if len(values) == 0 {
+			conditions = append(conditions, "e.id IN (SELECT event_id FROM tags WHERE tag = ?)")
+			args = append(args, tag)
+			continue
+		}
+		conditions = append(conditions, fmt.Sprintf(
+			"e.id IN (SELECT event_id FROM tags WHERE tag = ? AND value IN (%s))", placeholders(len(values))))
 		args = append(args, tag)
 		for _, val := range values {
 			args = append(args, val)
@@ -556,9 +588,14 @@ func (r *Repository) getLegacyTags(ctx context.Context, eventID string) nostr.Ta
 
 	var tags nostr.Tags
 	for rows.Next() {
-		var tag, value string
+		var tag string
+		var value sql.NullString
 		if err := rows.Scan(&tag, &value); err == nil {
-			tags = append(tags, []string{tag, value})
+			if value.Valid {
+				tags = append(tags, []string{tag, value.String})
+			} else {
+				tags = append(tags, []string{tag})
+			}
 		}
 	}
 	return tags

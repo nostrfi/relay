@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { StoredEvent } from '../shared/types/events'
 import {
   EVENT_PAGE_SIZE,
+  SUPPORTED_FILTER_TAGS,
   buildEventQuery,
   contentPreview,
   describeResults,
@@ -56,11 +57,48 @@ describe('buildEventQuery', () => {
     expect(buildEventQuery(form({ id: 'zzzz' })).errors[0]).toContain('hex')
   })
 
-  it('needs both halves of a tag filter, and a single-letter name', () => {
-    expect(buildEventQuery(form({ tagName: 'e' })).errors[0]).toContain('both a name and a value')
-    expect(buildEventQuery(form({ tagValue: 'x' })).errors[0]).toContain('both a name and a value')
-    expect(buildEventQuery(form({ tagName: 'expiration', tagValue: '1' })).errors[0]).toContain('single letter')
-    expect(buildEventQuery(form({ tagName: 'e', tagValue: 'abc' })).request?.tags).toEqual({ e: ['abc'] })
+  describe('tag filters', () => {
+    const tags = (...rows: Array<[string, string]>) =>
+      buildEventQuery(form({ tags: rows.map(([name, value]) => ({ name, value })) }))
+
+    it('sends no tags for blank rows', () => {
+      expect(tags(['', ''], ['', '']).request?.tags).toBeUndefined()
+    })
+
+    it('accepts multi-letter tags from the supported list', () => {
+      expect(tags(['client', 'amethyst']).request?.tags).toEqual({ client: ['amethyst'] })
+    })
+
+    it('combines different tags, which the relay ANDs', () => {
+      expect(tags(['t', 'nostr'], ['client', 'amethyst']).request?.tags)
+        .toEqual({ t: ['nostr'], client: ['amethyst'] })
+    })
+
+    it('collects rows sharing a name as alternatives, without repeats', () => {
+      expect(tags(['t', 'nostr'], ['t', ' bitcoin '], ['t', 'nostr']).request?.tags)
+        .toEqual({ t: ['nostr', 'bitcoin'] })
+    })
+
+    it('reads a blank value as "has this tag", which outweighs values for that name', () => {
+      expect(tags(['-', '']).request?.tags).toEqual({ '-': [] })
+      expect(tags(['t', 'nostr'], ['t', '']).request?.tags).toEqual({ t: [] })
+    })
+
+    it('refuses a tag outside the supported list, and a value with no tag', () => {
+      expect(tags(['expiration', '1']).errors[0]).toContain('"expiration" is not a tag')
+      expect(tags(['', 'x']).errors[0]).toContain('Choose a tag')
+      expect(tags(['', 'x']).request).toBeUndefined()
+    })
+
+    it('mirrors the relay\'s list of 18 tags', () => {
+      expect(SUPPORTED_FILTER_TAGS.map(tag => tag.name)).toEqual([
+        'a', 'alt', 'd', 'e', 'g', 'h', 'i', 'p', 'q', 'rank', 'r', 't', '-', 'client', 'emoji', 'imeta', 'proxy', 'zap'
+      ])
+    })
+
+    it('starts, and clears, with one empty row', () => {
+      expect(emptyEventQueryForm().tags).toEqual([{ name: '', value: '' }])
+    })
   })
 
   it('converts the time range to unix seconds', () => {
