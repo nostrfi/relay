@@ -11,6 +11,9 @@ import type { MetricsSnapshot } from '~~/shared/types/metrics'
  */
 export type RelayStatus = 'ok' | 'paused' | 'error' | 'unknown'
 
+/** A figure the status card can show beneath its band. */
+export type StatusFigure = 'uptime' | 'connections' | 'subscriptions' | 'eventsStored'
+
 export function relayStatus(ready: boolean | null, failing: boolean, paused: boolean): RelayStatus {
   if (failing) {
     return 'unknown'

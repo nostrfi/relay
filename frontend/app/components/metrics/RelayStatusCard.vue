@@ -3,20 +3,25 @@ import type { MetricsSnapshot } from '~~/shared/types/metrics'
 import { formatCount } from '~~/shared/utils/event-stats'
 import { sampleAge } from '~~/shared/utils/metric-rates'
 import { formatUptime, gaugeSeries, relayStatus } from '~~/shared/utils/relay-status'
-import type { RelayStatus } from '~~/shared/utils/relay-status'
+import type { RelayStatus, StatusFigure } from '~~/shared/utils/relay-status'
 
 /**
- * The Overview's status band and the three figures beneath it.
+ * The relay's status band and the figures beneath it, shared by the Overview
+ * and Metrics pages so both always say the same thing about the same relay.
  *
  * The band is a traffic light and one word. How fresh the figures are is
  * carried by the refresh icon instead of a line of text: it turns while a
  * sample is being read, so a poller that has stopped is visible as an icon
  * that has stopped — still the thing a quiet relay must not be mistaken for.
  * The exact sample age stays one hover or focus away.
+ *
+ * Only the figures differ between pages. The Metrics page explains stored
+ * events in its own Storage section, so it shows live gauges here instead of
+ * repeating them (nostrfi/relay#49).
  */
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   snapshot: MetricsSnapshot | null
-  /** Oldest first, for the connections sparkline. */
+  /** Oldest first, for the sparklines. */
   samples: MetricsSnapshot[]
   ready: boolean | null
   paused: boolean
@@ -24,7 +29,11 @@ const props = defineProps<{
   failing: boolean
   /** True while a sample is in flight. */
   polling: boolean
-}>()
+  /** Which figures to show beneath the band, in order. */
+  figures?: StatusFigure[]
+}>(), {
+  figures: () => ['uptime', 'connections', 'eventsStored']
+})
 
 const now = ref(Date.now())
 let ticker: ReturnType<typeof setInterval> | null = null
@@ -132,6 +141,14 @@ const startedLabel = computed(() => {
 })
 
 const connections = computed(() => gaugeSeries(props.samples, 'connectionsActive'))
+const subscriptions = computed(() => gaugeSeries(props.samples, 'subscriptionsActive'))
+
+/* Written out in full so Tailwind can find each class in the source. */
+const COLUMNS: Record<number, string> = {
+  2: 'sm:grid-cols-2',
+  3: 'sm:grid-cols-3',
+  4: 'sm:grid-cols-2 lg:grid-cols-4'
+}
 </script>
 
 <template>
@@ -183,48 +200,72 @@ const connections = computed(() => gaugeSeries(props.samples, 'connectionsActive
       </div>
     </template>
 
-    <dl class="grid grid-cols-1 gap-4 sm:grid-cols-3">
-      <div class="tile">
-        <dt class="text-sm text-(--ui-text-muted)">
-          Uptime
-        </dt>
-        <dd class="nf-tabular font-display text-3xl font-semibold">
-          {{ uptime }}
-        </dd>
-        <dd class="nf-tabular mt-1 text-sm text-(--ui-text-dimmed)">
-          {{ startedLabel }}
-        </dd>
-      </div>
+    <dl
+      class="grid grid-cols-1 gap-4"
+      :class="COLUMNS[figures.length]"
+    >
+      <div
+        v-for="figure in figures"
+        :key="figure"
+        class="tile"
+      >
+        <template v-if="figure === 'uptime'">
+          <dt class="text-sm text-(--ui-text-muted)">
+            Uptime
+          </dt>
+          <dd class="nf-tabular font-display text-3xl font-semibold">
+            {{ uptime }}
+          </dd>
+          <dd class="nf-tabular mt-1 text-sm text-(--ui-text-dimmed)">
+            {{ startedLabel }}
+          </dd>
+        </template>
 
-      <div class="tile">
-        <dt class="text-sm text-(--ui-text-muted)">
-          Connections
-        </dt>
-        <dd class="flex items-end justify-between gap-3">
-          <span class="nf-tabular font-display text-3xl font-semibold">
-            {{ snapshot ? formatCount(snapshot.connectionsActive) : '—' }}
-          </span>
-          <MetricsSparkline :values="connections" />
-        </dd>
-        <dd class="mt-1 text-sm text-(--ui-text-dimmed)">
-          Since this page opened
-        </dd>
-      </div>
+        <template v-else-if="figure === 'connections'">
+          <dt class="text-sm text-(--ui-text-muted)">
+            Connections
+          </dt>
+          <dd class="flex items-end justify-between gap-3">
+            <span class="nf-tabular font-display text-3xl font-semibold">
+              {{ snapshot ? formatCount(snapshot.connectionsActive) : '—' }}
+            </span>
+            <MetricsSparkline :values="connections" />
+          </dd>
+          <dd class="mt-1 text-sm text-(--ui-text-dimmed)">
+            Since this page opened
+          </dd>
+        </template>
 
-      <div class="tile">
-        <dt class="text-sm text-(--ui-text-muted)">
-          Events stored
-        </dt>
-        <dd class="nf-tabular font-display text-3xl font-semibold">
-          {{ snapshot ? formatCount(snapshot.eventsStored) : '—' }}
-        </dd>
-        <dd
-          class="mt-1 text-sm"
-          :class="snapshot && snapshot.saveFailures > 0 ? 'text-(--ui-error)' : 'text-(--ui-text-dimmed)'"
-        >
-          <span class="nf-tabular font-semibold">{{ snapshot ? formatCount(snapshot.saveFailures) : '—' }}</span>
-          save failures
-        </dd>
+        <template v-else-if="figure === 'subscriptions'">
+          <dt class="text-sm text-(--ui-text-muted)">
+            Subscriptions
+          </dt>
+          <dd class="flex items-end justify-between gap-3">
+            <span class="nf-tabular font-display text-3xl font-semibold">
+              {{ snapshot ? formatCount(snapshot.subscriptionsActive) : '—' }}
+            </span>
+            <MetricsSparkline :values="subscriptions" />
+          </dd>
+          <dd class="mt-1 text-sm text-(--ui-text-dimmed)">
+            Open across all connections
+          </dd>
+        </template>
+
+        <template v-else-if="figure === 'eventsStored'">
+          <dt class="text-sm text-(--ui-text-muted)">
+            Events stored
+          </dt>
+          <dd class="nf-tabular font-display text-3xl font-semibold">
+            {{ snapshot ? formatCount(snapshot.eventsStored) : '—' }}
+          </dd>
+          <dd
+            class="mt-1 text-sm"
+            :class="snapshot && snapshot.saveFailures > 0 ? 'text-(--ui-error)' : 'text-(--ui-text-dimmed)'"
+          >
+            <span class="nf-tabular font-semibold">{{ snapshot ? formatCount(snapshot.saveFailures) : '—' }}</span>
+            save failures
+          </dd>
+        </template>
       </div>
     </dl>
   </UCard>
