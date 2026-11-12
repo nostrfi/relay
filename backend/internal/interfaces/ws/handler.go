@@ -421,7 +421,9 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 	case "AUTH":
 		var ev nostr.Event
 		if err := json.Unmarshal(raw[1], &ev); err != nil {
-			h.sendNotice(c, prefixInvalid+": invalid AUTH event")
+			// The event id is unknown, so answer with an empty one — the
+			// same shape a malformed EVENT gets.
+			h.sendOK(c, "", false, prefixInvalid+": invalid AUTH event")
 			return
 		}
 		h.handleAuth(c, &ev)

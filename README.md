@@ -81,7 +81,15 @@ Upon connection, the relay sends an `AUTH` challenge:
 ```json
 ["AUTH", "<challenge_string>"]
 ```
-To authenticate, send an `AUTH` event (Kind 22242) containing the challenge.
+To authenticate, send an `AUTH` event (Kind 22242) containing the challenge and a `relay` tag.
+The relay answers every `AUTH` with an `OK`, the same way it answers an `EVENT`:
+```json
+["OK", "<auth_event_id>", true, ""]
+["OK", "<auth_event_id>", false, "invalid: AUTH event created_at is more than 600 seconds from now"]
+```
+A rejection's reason starts with `invalid:` (bad signature, wrong kind, stale `created_at`, missing
+or mismatched challenge, missing `relay` tag) or `restricted:` (the `relay` tag names a different
+endpoint than `auth.relay_url`).
 
 #### NIP-70: Protected Events
 Publish an event with the `"-"` tag. It will be rejected unless you have authenticated as the event's author (NIP-42).
