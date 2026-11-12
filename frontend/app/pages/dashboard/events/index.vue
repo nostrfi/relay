@@ -81,10 +81,15 @@ async function run(append: boolean) {
   }
 }
 
-/** The relay's supported tags, named and explained, for the tag picker. */
+/**
+ * The relay's supported tags for the tag picker. The name alone is the label,
+ * so a narrow trigger still shows which tag is chosen; the explanation and
+ * its NIPs ride along in the open list.
+ */
 const tagItems = SUPPORTED_FILTER_TAGS.map(tag => ({
-  label: `${tag.name} — ${tag.description}`,
-  value: tag.name
+  label: tag.name,
+  value: tag.name,
+  description: `${tag.description} (${tag.nips})`
 }))
 
 function addTagRow() {
@@ -200,7 +205,8 @@ onMounted(() => run(false))
                   :items="tagItems"
                   placeholder="Tag name"
                   :aria-label="`Tag name, row ${index + 1}`"
-                  class="w-40 shrink-0 font-mono"
+                  :ui="{ content: 'min-w-96', itemDescription: 'font-sans' }"
+                  class="w-32 shrink-0 font-mono"
                 />
                 <UInput
                   v-model="row.value"
