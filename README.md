@@ -383,7 +383,7 @@ Request fields, all optional:
 | `ids` | `string[]` | Event ids, or prefixes of them (NIP-01 prefix matching) |
 | `authors` | `string[]` | Pubkeys, or prefixes |
 | `kinds` | `number[]` | Event kinds |
-| `tags` | `{ "e": ["..."] }` | Single-letter tag name to values |
+| `tags` | `{ "t": ["nostr"], "-": [] }` | Tag name to values; see below for the names accepted |
 | `since` / `until` | `number` | Unix seconds, inclusive |
 | `content_contains` | `string` | Case-insensitive substring of the content, **minimum 3 characters** |
 | `limit` | `number` | Page size; defaults to `100` |
@@ -402,6 +402,14 @@ Three behaviours are worth knowing:
   timestamp, events sharing that second can appear on two consecutive pages, so **callers must
   de-duplicate by id** — the dashboard does. Offset paging was avoided deliberately: it re-scans
   everything it skips, so it degrades as the relay fills up.
+- **`tags` reaches more than a NIP-01 `REQ` can.** Accepted names are `a`, `alt`, `d`, `e`, `g`, `h`,
+  `i`, `p`, `q`, `rank`, `r`, `t`, `-`, `client`, `emoji`, `imeta`, `proxy` and `zap`; any other name
+  is refused with `400 unsupported tag: <name>`. Every name given must match, while the values of
+  one name are alternatives, matched against the tag's first value as in NIP-01. An empty list
+  means the event merely carries the tag, which is how NIP-70's value-less `-` is found. The
+  multi-letter names are indexed for this endpoint only: a public `REQ` still matches stored events
+  by single-letter tags alone. Events stored before full tag storage (schema version 3) never kept
+  their multi-letter tags, so those cannot match.
 - **`content_contains` is the one unindexed filter.** It is a case-insensitive scan (`ILIKE`),
   bounded by the rest of the filter and by `limit`, with `%` and `_` in the search text treated as
   literal characters rather than wildcards. It is the first thing that will hurt on a large

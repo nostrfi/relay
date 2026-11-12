@@ -21,6 +21,44 @@ const HEX = /^[0-9a-f]+$/
 /** Below this a prefix matches so much that it is not a filter. */
 const MIN_HEX_PREFIX_LENGTH = 4
 
+/**
+ * The tag names the relay lets the operator filter by (nostrfi/relay#45),
+ * mirroring SupportedFilterTags in backend/internal/domain/event/tags.go. The
+ * relay refuses any other name, so offering one here would only spend a
+ * signature on a 400.
+ */
+export const SUPPORTED_FILTER_TAGS: ReadonlyArray<{ name: string, description: string, nips: string }> = [
+  { name: 'a', description: 'References an addressable or replaceable event', nips: 'NIP-01' },
+  { name: 'alt', description: 'Human-readable summary for custom event kinds', nips: 'NIP-31' },
+  { name: 'd', description: 'Unique identifier for addressable events', nips: 'NIP-01' },
+  { name: 'e', description: 'References another event', nips: 'NIP-01' },
+  { name: 'g', description: 'Geographic location as a geohash', nips: 'NIP-52' },
+  { name: 'h', description: 'Group in the relay-based groups system', nips: 'NIP-29' },
+  { name: 'i', description: 'External identities and content identifiers', nips: 'NIP-39, NIP-35, NIP-73' },
+  { name: 'p', description: 'References a user\'s public key', nips: 'NIP-01' },
+  { name: 'q', description: 'References an event in a quote repost', nips: 'NIP-18' },
+  { name: 'rank', description: 'Ranking score (0-100) for trusted assertions', nips: 'NIP-85' },
+  { name: 'r', description: 'References a URL or relay address', nips: 'NIP-24, NIP-65' },
+  { name: 't', description: 'Hashtag', nips: 'NIP-24' },
+  { name: '-', description: 'Protected event, publishable only by its author', nips: 'NIP-70' },
+  { name: 'client', description: 'Client application that published the event', nips: 'NIP-89' },
+  { name: 'emoji', description: 'Custom emoji used in the content', nips: 'NIP-30' },
+  { name: 'imeta', description: 'Metadata about media URLs in the content', nips: 'NIP-92' },
+  { name: 'proxy', description: 'Source of the event on another protocol', nips: 'NIP-48' },
+  { name: 'zap', description: 'Recipients of Lightning payments (zaps)', nips: 'NIP-57' }
+]
+
+const SUPPORTED_FILTER_TAG_NAMES = new Set(SUPPORTED_FILTER_TAGS.map(tag => tag.name))
+
+/** One row of the tag filter: a supported tag name and an optional value. */
+export interface TagFilterRow {
+  name: string
+  /** Blank means "the event carries this tag", whatever its value. */
+  value: string
+}
+
+export const emptyTagFilterRow = (): TagFilterRow => ({ name: '', value: '' })
+
 export interface EventQueryForm {
   /** Comma-separated kind numbers, e.g. "1, 7". */
   kinds: string
@@ -28,9 +66,11 @@ export interface EventQueryForm {
   author: string
   /** Hex event id or prefix. */
   id: string
-  /** Single-letter tag name, e.g. "e" or "p". */
-  tagName: string
-  tagValue: string
+  /**
+   * Tag filter rows. Different names must all match; rows sharing a name
+   * are alternatives, as in NIP-01.
+   */
+  tags: TagFilterRow[]
   /** datetime-local values, in the browser's own timezone. */
   since: string
   until: string
@@ -41,8 +81,7 @@ export const emptyEventQueryForm = (): EventQueryForm => ({
   kinds: '',
   author: '',
   id: '',
-  tagName: '',
-  tagValue: '',
+  tags: [emptyTagFilterRow()],
   since: '',
   until: '',
   content: ''
@@ -96,16 +135,9 @@ export function buildEventQuery(form: EventQueryForm, until?: number): EventQuer
     }
   }
 
-  const tagName = form.tagName.trim()
-  const tagValue = form.tagValue.trim()
-  if (tagName !== '' || tagValue !== '') {
-    if (tagName === '' || tagValue === '') {
-      errors.push('A tag filter needs both a name and a value.')
-    } else if (tagName.length !== 1) {
-      errors.push('Tag name must be a single letter, as NIP-01 filters only index single-letter tags.')
-    } else {
-      request.tags = { [tagName]: [tagValue] }
-    }
+  const tags = buildTagFilter(form.tags, errors)
+  if (tags !== undefined) {
+    request.tags = tags
   }
 
   const since = parseLocalDateTime(form.since)
@@ -142,6 +174,52 @@ export function buildEventQuery(form: EventQueryForm, until?: number): EventQuer
   }
 
   return errors.length > 0 ? { errors } : { request, errors }
+}
+
+/**
+ * Groups the tag rows into the relay's `tags` map, or undefined when no row
+ * filters anything. Problems are appended to errors.
+ *
+ * A blank value asks only that the tag be there, so for that name it
+ * outweighs any value rows: "has a t tag, or has t = nostr" is just "has a t
+ * tag". The relay reads an empty list as exactly that.
+ */
+function buildTagFilter(rows: TagFilterRow[], errors: string[]): Record<string, string[]> | undefined {
+  const values = new Map<string, Set<string>>()
+  const presenceOnly = new Set<string>()
+  let missingName = false
+
+  for (const row of rows) {
+    const name = row.name.trim()
+    const value = row.value.trim()
+    if (name === '') {
+      // A wholly blank row is just an unused one; a value with no tag is a
+      // mistake worth saying so, not a filter to drop silently.
+      missingName ||= value !== ''
+      continue
+    }
+    if (!SUPPORTED_FILTER_TAG_NAMES.has(name)) {
+      errors.push(`"${name}" is not a tag the relay can filter by.`)
+      continue
+    }
+    if (value === '') {
+      presenceOnly.add(name)
+    }
+    const forName = values.get(name) ?? new Set<string>()
+    if (value !== '') {
+      forName.add(value)
+    }
+    values.set(name, forName)
+  }
+
+  if (missingName) {
+    errors.push('Choose a tag for each tag value.')
+  }
+  if (values.size === 0) {
+    return undefined
+  }
+  return Object.fromEntries([...values].map(([name, forName]) =>
+    [name, presenceOnly.has(name) ? [] : [...forName]]))
 }
 
 /** Unix seconds from a datetime-local value, or undefined when unusable. */

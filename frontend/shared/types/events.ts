@@ -21,6 +21,11 @@ export interface EventQueryRequest {
   ids?: string[]
   authors?: string[]
   kinds?: number[]
+  /**
+   * Tag name to values: every name must match, any of its values may. An
+   * empty list means the event merely carries the tag. Names are limited to
+   * SUPPORTED_FILTER_TAGS (shared/utils/event-query.ts).
+   */
   tags?: Record<string, string[]>
   since?: number
   until?: number

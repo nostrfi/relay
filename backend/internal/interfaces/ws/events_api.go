@@ -44,12 +44,15 @@ const (
 // and the LimitZero subtlety, and it would tie the dashboard's request
 // shape to a protocol type that changes for protocol reasons.
 type eventQueryRequest struct {
-	IDs     []string            `json:"ids"`
-	Authors []string            `json:"authors"`
-	Kinds   []int               `json:"kinds"`
-	Tags    map[string][]string `json:"tags"`
-	Since   *nostr.Timestamp    `json:"since"`
-	Until   *nostr.Timestamp    `json:"until"`
+	IDs     []string `json:"ids"`
+	Authors []string `json:"authors"`
+	Kinds   []int    `json:"kinds"`
+	// Tags is the operator's tag filter (nostrfi/relay#45): any name in
+	// domainevent.SupportedFilterTags, every name must match, any of its
+	// values may, and an empty list means the tag merely has to be there.
+	Tags  map[string][]string `json:"tags"`
+	Since *nostr.Timestamp    `json:"since"`
+	Until *nostr.Timestamp    `json:"until"`
 
 	// ContentContains matches case-insensitively anywhere in the content.
 	ContentContains string `json:"content_contains"`
@@ -119,6 +122,13 @@ func newEventsQueryHandler(cfg Config, events application.EventService) http.Han
 			return
 		}
 
+		for name := range req.Tags {
+			if !domainevent.IsSupportedFilterTag(name) {
+				writeEventQueryError(w, http.StatusBadRequest, "unsupported tag: "+name)
+				return
+			}
+		}
+
 		limit := req.Limit
 		if limit <= 0 {
 			limit = defaultEventQueryLimit
@@ -135,12 +145,12 @@ func newEventsQueryHandler(cfg Config, events application.EventService) http.Han
 				IDs:     req.IDs,
 				Authors: req.Authors,
 				Kinds:   req.Kinds,
-				Tags:    nostr.TagMap(req.Tags),
 				Since:   req.Since,
 				Until:   req.Until,
 				Limit:   limit,
 			},
 			ContentContains: req.ContentContains,
+			TagConditions:   req.Tags,
 		}
 
 		stored, err := events.QueryEventsMatching(r.Context(), query)

@@ -3,7 +3,13 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"log/slog"
+
+	domainevent "relay/internal/domain/event"
+
+	"github.com/nbd-wtf/go-nostr"
 )
 
 type migration struct {
@@ -103,6 +109,91 @@ var migrations = []migration{
 			return err
 		},
 	},
+	{
+		version:     5,
+		description: "index the operator's allowlisted multi-letter and value-less tags",
+		up:          backfillExtendedTagRows,
+	},
+}
+
+// backfillTagsPageSize bounds how many events migration 5 holds in memory
+// at once while it rebuilds their extended tag rows.
+const backfillTagsPageSize = 1000
+
+// backfillExtendedTagRows gives every stored event the tag index rows
+// domainevent.IndexedTag now asks for beyond NIP-01's single-letter tags:
+// allowlisted multi-letter tags, and value-less tags (nostrfi/relay#45).
+//
+// Built from tags_json, so an event saved before migration 3 gets nothing:
+// its multi-letter tags were never stored and cannot be recovered. Its
+// single-letter rows are untouched, as are everyone's.
+//
+// Idempotent by rebuilding rather than appending: the extended rows are
+// deleted first, then written again from tags_json, which also keeps them
+// identical to what saveEventTx writes for a new event.
+func backfillExtendedTagRows(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tags WHERE length(tag) <> 1 OR value IS NULL"); err != nil {
+		return fmt.Errorf("clear extended tag rows: %w", err)
+	}
+
+	after := ""
+	for {
+		page, err := readTagsJSONPage(ctx, tx, after)
+		if err != nil {
+			return err
+		}
+		for _, row := range page {
+			for _, tag := range row.tags {
+				name, _, hasValue, ok := domainevent.IndexedTag(tag)
+				// Single-letter tags with a value are indexed already.
+				if !ok || (hasValue && domainevent.IsSingleLetterTag(name)) {
+					continue
+				}
+				if err := insertTagRow(ctx, tx, row.id, tag); err != nil {
+					return fmt.Errorf("index tag %q of event %s: %w", name, row.id, err)
+				}
+			}
+		}
+		if len(page) < backfillTagsPageSize {
+			return nil
+		}
+		after = page[len(page)-1].id
+	}
+}
+
+type tagsJSONRow struct {
+	id   string
+	tags nostr.Tags
+}
+
+// readTagsJSONPage reads the next page of events by id, fully, before any
+// tag row is written: the transaction's connection cannot write while it
+// still has a result set open.
+func readTagsJSONPage(ctx context.Context, tx *sql.Tx, after string) ([]tagsJSONRow, error) {
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id, tags_json FROM events WHERE tags_json IS NOT NULL AND id > ? ORDER BY id LIMIT ?",
+		after, backfillTagsPageSize)
+	if err != nil {
+		return nil, fmt.Errorf("read events for tag backfill: %w", err)
+	}
+	defer rows.Close()
+
+	var page []tagsJSONRow
+	for rows.Next() {
+		var id, tagsJSON string
+		if err := rows.Scan(&id, &tagsJSON); err != nil {
+			return nil, err
+		}
+		var tags nostr.Tags
+		if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+			// The read path falls back to the legacy rows for such an
+			// event too (reconstructTags); there is nothing to index.
+			slog.Warn("skipping unreadable tags_json in tag backfill", "event_id", id, "error", err)
+			tags = nil
+		}
+		page = append(page, tagsJSONRow{id: id, tags: tags})
+	}
+	return page, rows.Err()
 }
 
 func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {

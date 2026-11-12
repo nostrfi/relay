@@ -3,10 +3,12 @@ import type { StoredEvent } from '~~/shared/types/events'
 import type { QueryPhase } from '~~/shared/utils/event-query'
 import {
   EVENT_PAGE_SIZE,
+  SUPPORTED_FILTER_TAGS,
   buildEventQuery,
   contentPreview,
   describeResults,
   emptyEventQueryForm,
+  emptyTagFilterRow,
   formatEventTime,
   kindLabel,
   mergeEventPage,
@@ -77,6 +79,17 @@ async function run(append: boolean) {
   } finally {
     busy.value = false
   }
+}
+
+/** The relay's supported tag names, for the tag picker. */
+const tagItems = SUPPORTED_FILTER_TAGS.map(tag => tag.name)
+
+function addTagRow() {
+  form.value.tags.push(emptyTagFilterRow())
+}
+
+function removeTagRow(index: number) {
+  form.value.tags.splice(index, 1)
 }
 
 function reset() {
@@ -151,24 +164,6 @@ onMounted(() => run(false))
             />
           </UFormField>
 
-          <UFormField
-            label="Tag"
-            hint="Single letter, e.g. e or p"
-          >
-            <div class="flex gap-2">
-              <UInput
-                v-model="form.tagName"
-                placeholder="e"
-                class="w-16 font-mono"
-              />
-              <UInput
-                v-model="form.tagValue"
-                placeholder="value"
-                class="w-full font-mono"
-              />
-            </div>
-          </UFormField>
-
           <div class="grid grid-cols-2 gap-2">
             <UFormField label="From">
               <UInput
@@ -185,6 +180,51 @@ onMounted(() => run(false))
               />
             </UFormField>
           </div>
+
+          <UFormField
+            label="Tags"
+            hint="Leave a value blank to match any event with that tag"
+            class="sm:col-span-2"
+          >
+            <div class="flex flex-col gap-2">
+              <div
+                v-for="(row, index) in form.tags"
+                :key="index"
+                class="flex gap-2"
+              >
+                <USelect
+                  v-model="row.name"
+                  :items="tagItems"
+                  placeholder="Tag name"
+                  :aria-label="`Tag name, row ${index + 1}`"
+                  class="w-32 shrink-0 font-mono"
+                />
+                <UInput
+                  v-model="row.value"
+                  placeholder="tag value"
+                  :aria-label="`Tag value, row ${index + 1}`"
+                  class="w-full font-mono"
+                />
+                <UButton
+                  icon="i-lucide-trash-2"
+                  color="error"
+                  variant="ghost"
+                  :aria-label="`Remove tag filter ${index + 1}`"
+                  @click="removeTagRow(index)"
+                />
+              </div>
+              <div>
+                <UButton
+                  icon="i-lucide-plus"
+                  variant="outline"
+                  size="sm"
+                  @click="addTagRow"
+                >
+                  Add Tag
+                </UButton>
+              </div>
+            </div>
+          </UFormField>
 
           <div class="flex items-end gap-2 sm:col-span-2">
             <UButton

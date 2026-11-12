@@ -4578,6 +4578,99 @@ func TestEventsQueryAPIFilters(t *testing.T) {
 	})
 }
 
+// TestEventsQueryAPITagFilters covers the operator's tag filter
+// (nostrfi/relay#45): multi-letter and value-less tags, several tags at once,
+// and the allowlist that bounds it.
+func TestEventsQueryAPITagFilters(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	})
+
+	now := nostr.Now()
+	nostrFromAmethyst := seedEvent(t, repo, operatorSk, &nostr.Event{
+		CreatedAt: now, Kind: 1, Content: "nostr from amethyst",
+		Tags: nostr.Tags{{"t", "nostr"}, {"client", "amethyst"}},
+	})
+	bitcoinFromDamus := seedEvent(t, repo, operatorSk, &nostr.Event{
+		CreatedAt: now - 10, Kind: 1, Content: "bitcoin from damus",
+		Tags: nostr.Tags{{"t", "bitcoin"}, {"client", "damus"}},
+	})
+	protectedNote := seedEvent(t, repo, operatorSk, &nostr.Event{
+		CreatedAt: now - 20, Kind: 1, Content: "protected",
+		Tags: nostr.Tags{{"-"}, {"alt", "a protected note"}},
+	})
+
+	query := func(t *testing.T, tags map[string][]string) []string {
+		t.Helper()
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{"tags": tags})
+		require.Equal(t, http.StatusOK, status, "response: %v", out)
+		return eventIDs(t, out)
+	}
+
+	t.Run("a multi-letter tag", func(t *testing.T) {
+		assert.Equal(t, []string{bitcoinFromDamus.ID}, query(t, map[string][]string{"client": {"damus"}}))
+		assert.Equal(t, []string{protectedNote.ID}, query(t, map[string][]string{"alt": {"a protected note"}}))
+	})
+
+	t.Run("different tags must all match", func(t *testing.T) {
+		assert.Equal(t, []string{nostrFromAmethyst.ID},
+			query(t, map[string][]string{"t": {"nostr"}, "client": {"amethyst"}}))
+		assert.Empty(t, query(t, map[string][]string{"t": {"nostr"}, "client": {"damus"}}))
+	})
+
+	t.Run("values of one tag are alternatives", func(t *testing.T) {
+		assert.Equal(t, []string{nostrFromAmethyst.ID, bitcoinFromDamus.ID},
+			query(t, map[string][]string{"t": {"nostr", "bitcoin"}}))
+	})
+
+	t.Run("no values means the tag is present", func(t *testing.T) {
+		assert.Equal(t, []string{protectedNote.ID}, query(t, map[string][]string{"-": {}}))
+		assert.Equal(t, []string{nostrFromAmethyst.ID, bitcoinFromDamus.ID}, query(t, map[string][]string{"client": {}}))
+	})
+
+	t.Run("a tag outside the supported list is refused", func(t *testing.T) {
+		out, status := callEventsAPI(t, server, operatorSk, map[string]any{
+			"tags": map[string][]string{"published_at": {"1"}},
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "unsupported tag: published_at", out["error"])
+		assert.Nil(t, out["events"])
+	})
+}
+
+// TestReqTagFiltersStaySingleLetter pins that indexing the operator's
+// multi-letter tags (nostrfi/relay#45) changed nothing a public REQ can
+// read: NIP-01 tag filters still match stored events by single-letter tags
+// only.
+func TestReqTagFiltersStaySingleLetter(t *testing.T) {
+	server, repo := startTestRelayWithOperatorAPIs(t, ws.Config{})
+
+	sk := nostr.GeneratePrivateKey()
+	seedEvent(t, repo, sk, &nostr.Event{
+		CreatedAt: nostr.Now(), Kind: 1, Content: "tagged note",
+		Tags: nostr.Tags{{"t", "nostr"}, {"client", "amethyst"}, {"e"}},
+	})
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	req := func(subID string, tags nostr.TagMap) []string {
+		msg, _ := json.Marshal([]any{"REQ", subID, nostr.Filter{Tags: tags}})
+		require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+		return collectUntilEOSE(t, c, subID)
+	}
+
+	assert.Equal(t, []string{"tagged note"}, req("single_letter", nostr.TagMap{"t": {"nostr"}}),
+		"a single-letter tag filter still matches")
+	assert.Empty(t, req("multi_letter", nostr.TagMap{"client": {"amethyst"}}),
+		"a multi-letter tag filter must not match stored events")
+	assert.Empty(t, req("empty_value", nostr.TagMap{"e": {""}}),
+		"a value-less tag must not match an empty-string value")
+}
+
 // TestEventsQueryAPIEmptyAnswerNamesTheDatabase covers the case a bug report
 // could not diagnose (nostrfi/workspace#49): an empty answer that might mean
 // "nothing matched" or "this is not the database you filled". The response

@@ -24,6 +24,16 @@ type Query struct {
 	// ContentContains matches case-insensitively anywhere in the content.
 	// Empty means no content condition.
 	ContentContains string
+
+	// TagConditions is the operator's tag filter (nostrfi/relay#45), kept
+	// off Filter.Tags for the same reason as ContentContains: it reaches
+	// tags a public REQ cannot, and must not hand them to every client.
+	//
+	// Each entry must match (AND). Within an entry the values are
+	// alternatives (OR), as in NIP-01, matched against the tag's first
+	// value. An empty value list means the event merely carries the tag.
+	// Names are expected to be SupportedFilterTags; the API checks that.
+	TagConditions map[string][]string
 }
 
 // StatsBucket is the granularity a statistics query groups by.
