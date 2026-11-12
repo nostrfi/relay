@@ -81,16 +81,8 @@ async function run(append: boolean) {
   }
 }
 
-/**
- * The relay's supported tags for the tag picker. The name alone is the label,
- * so a narrow trigger still shows which tag is chosen; the explanation and
- * its NIPs ride along in the open list.
- */
-const tagItems = SUPPORTED_FILTER_TAGS.map(tag => ({
-  label: tag.name,
-  value: tag.name,
-  description: `${tag.description} (${tag.nips})`
-}))
+/** The relay's supported tag names, for the tag picker. */
+const tagItems = SUPPORTED_FILTER_TAGS.map(tag => tag.name)
 
 function addTagRow() {
   form.value.tags.push(emptyTagFilterRow())
@@ -205,7 +197,6 @@ onMounted(() => run(false))
                   :items="tagItems"
                   placeholder="Tag name"
                   :aria-label="`Tag name, row ${index + 1}`"
-                  :ui="{ content: 'min-w-96', itemDescription: 'font-sans' }"
                   class="w-32 shrink-0 font-mono"
                 />
                 <UInput
