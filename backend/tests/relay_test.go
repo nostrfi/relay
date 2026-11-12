@@ -95,6 +95,26 @@ func (c *testClient) readNotice(t *testing.T) []any {
 	return c.readMessageType(t, "NOTICE")
 }
 
+// authenticate sends ev as an AUTH and returns the relay's OK reply,
+// checking that it answers this AUTH event rather than some other message.
+// NIP-42 requires every AUTH to be answered with OK; reading it here also
+// keeps it from being mistaken for the reply to a later EVENT.
+func (c *testClient) authenticate(t *testing.T, ev nostr.Event) []any {
+	t.Helper()
+	msg, _ := json.Marshal([]any{"AUTH", ev})
+	if err := c.WriteMessage(websocket.TextMessage, msg); err != nil {
+		t.Fatalf("write AUTH: %v", err)
+	}
+	// Bound the wait so a relay that never answers fails this test rather
+	// than hanging the suite until go test's own timeout.
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	okMsg := c.readOK(t)
+	require.Len(t, okMsg, 4)
+	assert.Equal(t, ev.ID, okMsg[1], "OK must carry the AUTH event id")
+	return okMsg
+}
+
 // readMessageAny reads and decodes the next message without filtering by
 // type. Unlike readMessageType it does not skip AUTH, since callers use it
 // after the initial challenge has already been consumed by connectTestRelay.
@@ -1852,8 +1872,10 @@ func TestNip42And70(t *testing.T) {
 	authEv.Sign(sk)
 	msgAuth, _ := json.Marshal([]any{"AUTH", authEv})
 	c.WriteMessage(websocket.TextMessage, msgAuth)
-	// No response for AUTH message in this implementation except slog,
-	// but we can try to publish the event again.
+	_, authResp, _ := c.ReadMessage()
+	var authOK []any
+	json.Unmarshal(authResp, &authOK)
+	assert.Equal(t, []any{"OK", authEv.ID, true, ""}, authOK, "AUTH must be answered with OK")
 
 	// 4. Publish protected event WITH authentication
 	c.WriteMessage(websocket.TextMessage, msgEv)
@@ -2092,7 +2114,15 @@ func TestNip17(t *testing.T) {
 	authEv.Sign(skBob)
 	authMsg, _ := json.Marshal([]any{"AUTH", authEv})
 	cBob2.WriteMessage(websocket.TextMessage, authMsg)
-	// No response for AUTH unless we try to do something
+	for {
+		_, msg, _ := cBob2.ReadMessage()
+		var raw []any
+		json.Unmarshal(msg, &raw)
+		if raw[0] == "OK" {
+			assert.Equal(t, []any{"OK", authEv.ID, true, ""}, raw, "Bob's AUTH must be answered with OK")
+			break
+		}
+	}
 
 	// Now Bob requests his gift wraps
 	subIDBob := "bob_sub"
@@ -2726,8 +2756,7 @@ func TestNip42EndpointBinding(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
+		assert.Equal(t, []any{"OK", authEv.ID, true, ""}, c.authenticate(t, authEv))
 
 		publishAndExpect(t, c, sk, true)
 	})
@@ -2738,8 +2767,7 @@ func TestNip42EndpointBinding(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, challenge, canonicalURL+"/", nostr.Now())
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
+		assert.Equal(t, []any{"OK", authEv.ID, true, ""}, c.authenticate(t, authEv))
 
 		publishAndExpect(t, c, sk, true)
 	})
@@ -2750,12 +2778,9 @@ func TestNip42EndpointBinding(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, challenge, "wss://different-relay.example", nostr.Now())
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
-
-		notice := c.readNotice(t)
-		assert.Contains(t, notice[1], "restricted")
-		assert.Contains(t, notice[1], "does not match")
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "restricted: AUTH event relay tag does not match this relay's endpoint", okMsg[3])
 
 		publishAndExpect(t, c, sk, false)
 	})
@@ -2770,11 +2795,9 @@ func TestNip42EndpointBinding(t *testing.T) {
 		if err := authEv.Sign(sk); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
-
-		notice := c.readNotice(t)
-		assert.Contains(t, notice[1], "invalid")
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: AUTH event missing challenge or relay tag", okMsg[3])
 	})
 
 	t.Run("mismatched challenge is rejected", func(t *testing.T) {
@@ -2783,11 +2806,9 @@ func TestNip42EndpointBinding(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, "not-the-real-challenge", canonicalURL, nostr.Now())
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
-
-		notice := c.readNotice(t)
-		assert.Contains(t, notice[1], "invalid")
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: AUTH event missing challenge or relay tag", okMsg[3])
 	})
 
 	t.Run("malformed AUTH event kind is rejected", func(t *testing.T) {
@@ -2800,11 +2821,38 @@ func TestNip42EndpointBinding(t *testing.T) {
 		if err := authEv.Sign(sk); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: invalid AUTH event kind", okMsg[3])
+	})
 
-		notice := c.readNotice(t)
-		assert.Contains(t, notice[1], "invalid")
+	t.Run("bad signature is rejected", func(t *testing.T) {
+		c, challenge := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		sk := nostr.GeneratePrivateKey()
+		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
+		// Sign a different key's event and keep its signature: still valid
+		// hex of the right length, but not a signature over this event.
+		other := buildAuthEvent(t, nostr.GeneratePrivateKey(), challenge, canonicalURL, nostr.Now())
+		authEv.Sig = other.Sig
+
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: AUTH event signature verification failed", okMsg[3])
+
+		publishAndExpect(t, c, sk, false)
+	})
+
+	t.Run("malformed AUTH payload is answered with OK", func(t *testing.T) {
+		c, _ := connectTestRelayWithChallenge(t, server)
+		defer c.Close()
+
+		c.WriteMessage(websocket.TextMessage, []byte(`["AUTH", "not an event"]`))
+
+		// No event id can be read from the payload, so the OK carries an
+		// empty one — the same shape a malformed EVENT is answered with.
+		assert.Equal(t, []any{"OK", "", false, "invalid: invalid AUTH event"}, c.readOK(t))
 	})
 }
 
@@ -2821,8 +2869,7 @@ func TestNip42AuthFreshness(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
+		assert.Equal(t, []any{"OK", authEv.ID, true, ""}, c.authenticate(t, authEv))
 
 		ev := signedEventWithKey(t, sk, 1, "hi", nil)
 		pubMsg, _ := json.Marshal([]any{"EVENT", ev})
@@ -2837,12 +2884,9 @@ func TestNip42AuthFreshness(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now()-3600)
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
-
-		notice := c.readNotice(t)
-		assert.Contains(t, notice[1], "invalid")
-		assert.Contains(t, notice[1], "created_at")
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: AUTH event created_at is more than 600 seconds from now", okMsg[3])
 	})
 
 	t.Run("future event is rejected", func(t *testing.T) {
@@ -2851,12 +2895,9 @@ func TestNip42AuthFreshness(t *testing.T) {
 
 		sk := nostr.GeneratePrivateKey()
 		authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now()+3600)
-		msg, _ := json.Marshal([]any{"AUTH", authEv})
-		c.WriteMessage(websocket.TextMessage, msg)
-
-		notice := c.readNotice(t)
-		assert.Contains(t, notice[1], "invalid")
-		assert.Contains(t, notice[1], "created_at")
+		okMsg := c.authenticate(t, authEv)
+		assert.Equal(t, false, okMsg[2])
+		assert.Equal(t, "invalid: AUTH event created_at is more than 600 seconds from now", okMsg[3])
 	})
 }
 
@@ -2945,27 +2986,20 @@ func TestNip42NoChallengeOrPayloadInLogs(t *testing.T) {
 	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{}, ws.ResourceLimits{}, auth, ws.ModerationConfig{}, ws.WebsocketConfig{})
 	defer cleanup()
 
-	// Successful AUTH: block until a follow-up publish confirms it landed,
-	// so the "Client authenticated" log line has already been written.
+	// Successful AUTH: the OK reply is written after the "Client
+	// authenticated" log line, so reading it means the line is in buf.
 	c, challenge := connectTestRelayWithChallenge(t, server)
 	defer c.Close()
 	sk := nostr.GeneratePrivateKey()
 	authEv := buildAuthEvent(t, sk, challenge, canonicalURL, nostr.Now())
-	msg, _ := json.Marshal([]any{"AUTH", authEv})
-	c.WriteMessage(websocket.TextMessage, msg)
-	ev := signedEventWithKey(t, sk, 1, "hi", nil)
-	pubMsg, _ := json.Marshal([]any{"EVENT", ev})
-	c.WriteMessage(websocket.TextMessage, pubMsg)
-	c.readOK(t)
+	assert.Equal(t, true, c.authenticate(t, authEv)[2])
 
 	// Failed AUTH on a second connection, to exercise the reject path too.
 	c2, challenge2 := connectTestRelayWithChallenge(t, server)
 	defer c2.Close()
 	sk2 := nostr.GeneratePrivateKey()
 	badAuthEv := buildAuthEvent(t, sk2, challenge2, "wss://different.example", nostr.Now())
-	msg2, _ := json.Marshal([]any{"AUTH", badAuthEv})
-	c2.WriteMessage(websocket.TextMessage, msg2)
-	c2.readNotice(t)
+	assert.Equal(t, false, c2.authenticate(t, badAuthEv)[2])
 
 	logged := buf.String()
 	assert.NotContains(t, logged, challenge, "AUTH challenge must never be logged")
