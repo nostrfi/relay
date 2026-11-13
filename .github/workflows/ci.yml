@@ -163,6 +163,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Trust the checkout for git
+        # The container runs as root over a runner-owned checkout; without
+        # this, go build cannot read git status for VCS stamping.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Build the Linux binary
         working-directory: backend
         env:
