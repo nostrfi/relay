@@ -128,6 +128,10 @@ jobs:
     # (glibc 2.36), not on the runner, whose glibc follows ubuntu-latest: v0.2.0
     # built there needed GLIBC_2.43 and would not start on Ubuntu 24.04.
     container: golang:1.26-bookworm
+    # Steps in a container default to sh; the scripts here need bash.
+    defaults:
+      run:
+        shell: bash
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
     steps:
