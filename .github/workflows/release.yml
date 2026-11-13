@@ -123,6 +123,11 @@ jobs:
     needs: resolve
     if: ${{ !cancelled() && needs.resolve.result == 'success' && needs.resolve.outputs.binary == 'true' }}
     runs-on: ubuntu-latest
+    # The binary links DuckDB through CGO, so it needs at least the glibc of
+    # the machine that built it. Build in the same image as backend/Dockerfile
+    # (glibc 2.36), not on the runner, whose glibc follows ubuntu-latest: v0.2.0
+    # built there needed GLIBC_2.43 and would not start on Ubuntu 24.04.
+    container: golang:1.26-bookworm
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
     steps:
@@ -142,12 +147,6 @@ jobs:
             exit 1
           fi
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
-
       - name: Build the Linux binary
         id: build
         working-directory: backend
@@ -160,6 +159,7 @@ jobs:
           set -euo pipefail
           mkdir -p ../dist
           go build -ldflags="-s -w -X main.version=$VERSION" -o ../dist/relay-linux-amd64 ./cmd/relay
+          ../.github/scripts/check-glibc.sh ../dist/relay-linux-amd64 2.36
           tar -czf ../dist/relay-linux-amd64.tar.gz -C ../dist relay-linux-amd64
           sha256="$(sha256sum ../dist/relay-linux-amd64.tar.gz | cut -d' ' -f1)"
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"

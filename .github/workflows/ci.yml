@@ -145,6 +145,35 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.version=${{ needs.version.outputs.version }}
 
+  # ── Linux release binary (glibc) ────────────────────────────────
+  # Builds the binary the way the Release workflow does, in the same
+  # golang:1.26-bookworm image, and fails if it needs a glibc newer than 2.36
+  # (Debian 12, Ubuntu 23.04+). Keep the build command in step with
+  # release.yml's binary job.
+  binary-glibc:
+    name: Linux Binary glibc Check
+    runs-on: ubuntu-latest
+    needs: version
+    container: golang:1.26-bookworm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the Linux binary
+        working-directory: backend
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p ../dist
+          go build -ldflags="-s -w -X main.version=$VERSION" -o ../dist/relay-linux-amd64 ./cmd/relay
+
+      - name: Check the glibc requirement
+        run: .github/scripts/check-glibc.sh dist/relay-linux-amd64 2.36
+
   # ── Build & check (frontend) ─────────────────────────────────────
   frontend:
     name: Frontend Build & Check
