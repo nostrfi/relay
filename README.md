@@ -7,6 +7,8 @@ This is a two-part monorepo:
 - **`backend/`** — the Go relay described below.
 - **`frontend/`** — the admin dashboard, reverse-proxied at `/admin` alongside the relay. See [`AGENTS.md`](AGENTS.md) for the full repository layout and the two-process architecture.
 
+The relay's threat model (assets, trust boundaries, every identified threat and its disposition, and the accepted risks) is in [`docs/threat-model.md`](docs/threat-model.md).
+
 ## Supported NIPs
 
 - **NIP-01**: Basic protocol flow
