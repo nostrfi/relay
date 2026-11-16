@@ -7,8 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
+	"relay/internal/domain/admin"
 	domainevent "relay/internal/domain/event"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -214,6 +216,11 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	future := int64(nostr.Now()) + 3600
 	seedEvent(t, ctx, sourceRepo, &future)
 
+	// Administrator grants live in the same database, so the backup that
+	// carries the events must carry them too (nostrfi/relay#55).
+	grant := admin.Administrator{Pubkey: strings.Repeat("a", 64), Label: "Ada", GrantedBy: strings.Repeat("b", 64), GrantedAt: 1700000000}
+	require.NoError(t, sourceRepo.GrantAdmin(ctx, grant))
+
 	backupDir := filepath.Join(t.TempDir(), "backup")
 	manifest, err := Backup(ctx, sourceDB, backupDir)
 	require.NoError(t, err)
@@ -241,6 +248,10 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	events, err := restoredRepo.QueryEvents(ctx, nostr.Filter{})
 	require.NoError(t, err)
 	assert.Len(t, events, 6)
+
+	admins, err := restoredRepo.ListAdmins(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, []admin.Administrator{grant}, admins)
 }
 
 func TestRestoreRejectsMismatchedManifest(t *testing.T) {

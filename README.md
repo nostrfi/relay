@@ -24,7 +24,7 @@ The relay's threat model (assets, trust boundaries, every identified threat and 
 - **NIP-70**: Protected Events
 - **NIP-71**: Video Events
 - **NIP-77**: Negentropy Syncing
-- **NIP-86**: Relay Management API (ban-list subset: pubkey/event bans, IP blocks)
+- **NIP-86**: Relay Management API (ban-list subset: pubkey/event bans, IP blocks; plus `assignrole`/`unassignrole` for administrators)
 - **NIP-98**: HTTP Auth (used to authenticate NIP-86 management requests)
 
 ---
@@ -305,7 +305,7 @@ websocket:
 
 ```yaml
 moderation:
-  admin_pubkey: "" # NIP-86 management API caller must sign as this pubkey (NIP-98); defaults to relay_info.pubkey when empty
+  admin_pubkey: "" # the relay's owner: signs (NIP-98) for every operator API and grants administrators; defaults to relay_info.pubkey when empty
   max_event_age_seconds: 60 # NIP-98 auth events older or further in the future than this are rejected
 ```
 
@@ -315,7 +315,7 @@ The relay exposes the ban-list subset of the [NIP-86 relay management API](https
 {"method": "banpubkey", "params": ["<32-byte-hex-pubkey>", "spam"]}
 ```
 
-Every request must carry an `Authorization: Nostr <base64>` header containing a signed [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) kind-`27235` event, with the `payload` tag set (NIP-86 requires it; generic NIP-98 only recommends it) to the hex-encoded SHA-256 of the exact request body. A request is rejected with `401` if the signature, `u`/`method`/`payload` tags, or freshness check fails, or if the signing pubkey does not match `moderation.admin_pubkey`. Any NIP-98-capable client or tool (e.g. [`nak`](https://github.com/fiatjaf/nak)) can construct this header; the relay does not provide a browser UI for it.
+Every request must carry an `Authorization: Nostr <base64>` header containing a signed [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) kind-`27235` event, with the `payload` tag set (NIP-86 requires it; generic NIP-98 only recommends it) to the hex-encoded SHA-256 of the exact request body. A request is rejected with `401` if the signature, `u`/`method`/`payload` tags, or freshness check fails, or if the signing pubkey is neither the owner (`moderation.admin_pubkey`) nor an [administrator](#administrators). An administrator calling an owner-only method gets `403` with `{"error": "forbidden", "reason": "owner only"}`. Any NIP-98-capable client or tool (e.g. [`nak`](https://github.com/fiatjaf/nak)) can construct this header; the relay does not provide a browser UI for it.
 
 Parameter validation (added in nostrfi/workspace#37, so it applies to every caller, not just the
 dashboard):
@@ -333,14 +333,52 @@ operator could believe an address was blocked when it was not.
 - **`banpubkey`**: rejects future `EVENT` publishes from that pubkey with `blocked:`. It does not retroactively hide events that pubkey already published — use `banevent` for a specific event.
 - **`banevent`**: excludes that event ID from `REQ` results. The underlying row is not deleted, so `allowevent` reverses it; independent of NIP-09 same-author deletion.
 - **`blockip`**: rejects future WebSocket upgrade attempts from that IP or CIDR with `403`. Uses the request's observed remote address, not a proxy header like `X-Forwarded-For` — behind a reverse proxy this sees the proxy's address, not the real client's.
-- Every management call, successful or not, is logged (`method`, `operator_pubkey`, and outcome) — never event content, private keys, or the raw request body.
+- Every management call, successful or not, is logged (`method`, `operator_pubkey`, `operator_role`, and outcome; `target_pubkey` for `assignrole`/`unassignrole`) — never event content, private keys, or the raw request body. The one exception is a successful `whoami`, which changes nothing and runs at every dashboard sign-in.
+
+### Administrators
+
+The owner — the key in `moderation.admin_pubkey` — can grant administrator rights to other
+pubkeys, so a team can run a relay without sharing the owner's key (nostrfi/relay#55).
+Administrators sign every request with their own key, exactly as the owner does.
+
+| Operator API | Owner | Administrator |
+| --- | --- | --- |
+| NIP-86 ban-list methods, `supportedmethods`, `whoami` | yes | yes |
+| Event browse and statistics APIs | yes | yes |
+| `assignrole`, `unassignrole`, `listroleassignments` | yes | no (`403`) |
+| Configuration API | yes | no (`403`) |
+
+Granting and revoking use NIP-86's role methods with the single built-in role id `admin`.
+`createrole` and the other custom-role methods are not implemented.
+
+```json
+{"method": "assignrole", "params": ["<64-char-lowercase-hex-pubkey>", "admin", "optional label"]}
+{"method": "unassignrole", "params": ["<64-char-lowercase-hex-pubkey>", "admin"]}
+```
+
+The third `assignrole` parameter, a label of up to 100 characters, is this relay's own extension;
+NIP-86 defines only the first two. Re-granting an administrator replaces its label. Two further
+methods are also this relay's own, because NIP-86 has no equivalent:
+
+- **`listroleassignments`** (owner only) returns the owner first, then every administrator:
+  `[{"pubkey": "...", "role": "owner"}, {"pubkey": "...", "role": "admin", "label": "...", "granted_by": "...", "granted_at": 1700000000}]`.
+- **`whoami`** returns the caller's own `{"pubkey": "...", "role": "owner" | "admin"}`. A key that
+  is neither gets the usual generic `401`, so it cannot be used to learn who the administrators are.
+
+Grants are stored in the relay's database (the `admins` table), so they survive restarts and are
+included in `-backup`/`-restore`. The relay keeps them in memory as well, so a revocation takes
+effect on the revoked key's very next request. The owner is never stored: it always comes from
+configuration and cannot be granted, revoked, or removed through the API. If you change
+`moderation.admin_pubkey`, the new key is the owner from the next start; administrators granted by
+the old owner keep their role, and `granted_by` still names the key that granted it.
 
 ### Configuration API (operator only)
 
 `POST /api/config` returns the relay's **effective** operational configuration — what the running
 process is enforcing after code defaults are applied, not a copy of `config.yaml`. It is authorized
-exactly like the NIP-86 management API: an `Authorization: Nostr <base64>` header carrying a signed
-NIP-98 kind-`27235` event whose pubkey matches `moderation.admin_pubkey`. The request body is `{}`;
+like the NIP-86 management API, but for the **owner only**: an `Authorization: Nostr <base64>`
+header carrying a signed NIP-98 kind-`27235` event whose pubkey matches `moderation.admin_pubkey`.
+An administrator gets `403`. The request body is `{}`;
 it exists only so the NIP-98 `payload` tag has something to hash.
 
 ```bash
@@ -376,8 +414,8 @@ take effect on restart.
 ### Event browse API (operator only)
 
 `POST /api/events/query` returns stored events for the dashboard's event browser. It is authorized
-exactly like the configuration and NIP-86 APIs: an `Authorization: Nostr <base64>` header carrying a
-signed NIP-98 kind-`27235` event whose pubkey matches `moderation.admin_pubkey`. POST rather than
+like the NIP-86 API: an `Authorization: Nostr <base64>` header carrying a signed NIP-98
+kind-`27235` event from the owner or an [administrator](#administrators). POST rather than
 GET so the NIP-98 `payload` tag has a body to hash.
 
 ```bash
@@ -429,8 +467,8 @@ Three behaviours are worth knowing:
 ### Event statistics API (operator only)
 
 `POST /api/events/stats` counts stored events by period and by kind, for the dashboard's overview
-charts. Authorized exactly like the browse and configuration APIs: a NIP-98 kind-`27235` event whose
-pubkey matches `moderation.admin_pubkey`.
+charts. Authorized exactly like the browse API: a NIP-98 kind-`27235` event from the owner or an
+[administrator](#administrators).
 
 ```bash
 curl -X POST https://relay.example.com/api/events/stats \

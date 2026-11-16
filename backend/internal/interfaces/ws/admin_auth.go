@@ -1,15 +1,18 @@
 package ws
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+
+	"relay/internal/application"
+	"relay/internal/domain/admin"
 )
 
-// authorizeOperator is the single admission check for every operator-only
-// HTTP endpoint: a valid NIP-98 signature over this exact request, made by
-// the configured operator key.
+// Operator authorization: a valid NIP-98 signature over this exact
+// request, made by a key the relay knows as owner or administrator.
 //
 // Extracted from the NIP-86 handler when the configuration endpoint became
 // a second caller (nostrfi/workspace#38). Both endpoints are reachable from
@@ -41,27 +44,112 @@ type operatorAuthFailure struct {
 func (f *operatorAuthFailure) Error() string { return f.err.Error() }
 func (f *operatorAuthFailure) Unwrap() error { return f.err }
 
-func authorizeOperator(r *http.Request, body []byte, adminPubkey string, maxEventAgeSeconds int) (string, error) {
-	pubkey, err := verifyNip98(r, body, maxEventAgeSeconds)
+// operatorAuthorizer is the single admission check for every operator-only
+// HTTP endpoint. It verifies the NIP-98 signature, then resolves the
+// signer's role: the configured owner, an administrator the owner has
+// granted (nostrfi/relay#55), or nobody.
+//
+// roles may be nil, in which case only the owner is admitted: the behaviour
+// every release before 0.3.0 had, and what a handler built without an
+// AdminService still gets.
+type operatorAuthorizer struct {
+	owner              string
+	roles              application.AdminService
+	maxEventAgeSeconds int
+}
+
+func newOperatorAuthorizer(owner string, maxEventAgeSeconds int, roles application.AdminService) operatorAuthorizer {
+	if roles != nil {
+		owner = roles.Owner()
+	}
+	return operatorAuthorizer{owner: owner, roles: roles, maxEventAgeSeconds: maxEventAgeSeconds}
+}
+
+func (a operatorAuthorizer) roleOf(pubkey string) admin.Role {
+	if a.roles != nil {
+		return a.roles.RoleOf(pubkey)
+	}
+	if pubkey != "" && pubkey == a.owner {
+		return admin.RoleOwner
+	}
+	return admin.RoleNone
+}
+
+// authorize admits the request if its signer holds at least minimum.
+//
+// A signer the relay does not know at all gets the same generic refusal as
+// ever, so an outsider still cannot learn which keys matter. A signer the
+// relay does know, whose role is too low for this endpoint, is told so
+// (errInsufficientRole, a 403): they have already proved who they are, and
+// "owner only" tells them nothing about anyone else's key.
+func (a operatorAuthorizer) authorize(r *http.Request, body []byte, minimum admin.Role) (string, admin.Role, error) {
+	pubkey, err := verifyNip98(r, body, a.maxEventAgeSeconds)
 	if err != nil {
 		wrapped := fmt.Errorf("NIP-98 verification failed: %w", err)
-		return "", &operatorAuthFailure{PublicReason: err.Error(), err: wrapped}
+		return "", admin.RoleNone, &operatorAuthFailure{PublicReason: err.Error(), err: wrapped}
 	}
-	if adminPubkey == "" {
+	if a.owner == "" {
 		// Not an identity failure, and safe to say: there is no operator
 		// identity here to confirm or deny. The relay is misconfigured, and
 		// the caller cannot act on that knowledge — while the operator, who
 		// otherwise sees a bare "unauthorized" indistinguishable from a
 		// wrong key, can act on it immediately (nostrfi/workspace#38).
-		return "", &operatorAuthFailure{
+		// Without an owner nobody could have granted an administrator, so
+		// nobody is admitted.
+		return "", admin.RoleNone, &operatorAuthFailure{
 			PublicReason: "this relay has no operator pubkey configured; set relay_info.pubkey or moderation.admin_pubkey in its config.yaml",
 			err:          fmt.Errorf("no operator pubkey is configured"),
 		}
 	}
-	if pubkey != adminPubkey {
-		return "", &operatorAuthFailure{err: fmt.Errorf("pubkey %s is not the configured operator", pubkey)}
+	role := a.roleOf(pubkey)
+	if role == admin.RoleNone {
+		return "", admin.RoleNone, &operatorAuthFailure{err: fmt.Errorf("pubkey %s is neither the owner nor an administrator", pubkey)}
 	}
-	return pubkey, nil
+	if !role.Satisfies(minimum) {
+		return pubkey, role, &insufficientRoleError{pubkey: pubkey, role: role, minimum: minimum}
+	}
+	return pubkey, role, nil
+}
+
+// insufficientRoleError is a known signer asking for something above their
+// role. Answered with 403 and an explanation, never with 401.
+type insufficientRoleError struct {
+	pubkey  string
+	role    admin.Role
+	minimum admin.Role
+}
+
+func (e *insufficientRoleError) Error() string {
+	return fmt.Sprintf("pubkey %s holds role %s, %s required", e.pubkey, e.role, e.minimum)
+}
+
+// publicReason is what the caller is told.
+func (e *insufficientRoleError) publicReason() string {
+	return e.minimum.String() + " only"
+}
+
+// writeOperatorRefusal answers a failed authorize with the shared
+// {"error": ..., "reason"?: ...} body: 403 "forbidden" for a known signer
+// whose role is too low, 401 "unauthorized" for everything else. NIP-86
+// callers parse this same envelope, so "unauthorized" stays the error a
+// stranger sees, exactly as before.
+func writeOperatorRefusal(w http.ResponseWriter, err error) {
+	refusal := map[string]string{"error": "unauthorized"}
+	status := http.StatusUnauthorized
+
+	var tooLow *insufficientRoleError
+	if errors.As(err, &tooLow) {
+		status = http.StatusForbidden
+		refusal["error"] = "forbidden"
+		refusal["reason"] = tooLow.publicReason()
+	} else if reason := publicReasonFor(err); reason != "" {
+		// A verification failure is safe to explain and expensive to
+		// withhold; an identity failure is not. See operatorAuthorizer.
+		refusal["reason"] = reason
+	}
+
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(refusal)
 }
 
 // publicReasonFor returns the part of err that may be shown to the caller,

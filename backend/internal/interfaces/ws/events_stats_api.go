@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"relay/internal/application"
+	"relay/internal/domain/admin"
 	domainevent "relay/internal/domain/event"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -122,7 +123,8 @@ type eventStatsResponse struct {
 // import of old events lands in old periods, and answering "what arrived
 // today" would need an ingestion timestamp the schema does not record.
 // Everything that renders this is worded accordingly.
-func newEventStatsHandler(cfg Config, events application.EventService) http.HandlerFunc {
+func newEventStatsHandler(cfg Config, events application.EventService, admins application.AdminService) http.HandlerFunc {
+	authorizer := newOperatorAuthorizer(cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds, admins)
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
@@ -132,15 +134,9 @@ func newEventStatsHandler(cfg Config, events application.EventService) http.Hand
 			return
 		}
 
-		if _, err := authorizeOperator(r, body, cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds); err != nil {
+		if _, _, err := authorizer.authorize(r, body, admin.RoleAdmin); err != nil {
 			logRejectedOperatorRequest("events-stats", err)
-			w.WriteHeader(http.StatusUnauthorized)
-
-			refusal := map[string]string{"error": "unauthorized"}
-			if reason := publicReasonFor(err); reason != "" {
-				refusal["reason"] = reason
-			}
-			json.NewEncoder(w).Encode(refusal)
+			writeOperatorRefusal(w, err)
 			return
 		}
 

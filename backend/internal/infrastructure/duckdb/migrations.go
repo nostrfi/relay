@@ -119,6 +119,23 @@ var migrations = []migration{
 		description: "purge stored ephemeral events (kinds 20000-29999)",
 		up:          purgeEphemeralEvents,
 	},
+	{
+		version:     7,
+		description: "store administrators granted by the owner",
+		up: func(ctx context.Context, tx *sql.Tx) error {
+			// granted_at is Unix seconds, like the moderation tables. The
+			// owner is never a row here: it comes from configuration.
+			_, err := tx.ExecContext(ctx, `
+				CREATE TABLE IF NOT EXISTS admins (
+					pubkey TEXT PRIMARY KEY,
+					label TEXT,
+					granted_by TEXT NOT NULL,
+					granted_at INTEGER NOT NULL
+				);
+			`)
+			return err
+		},
+	},
 }
 
 // purgeEphemeralEvents removes the ephemeral events (NIP-01, 20000 <= kind

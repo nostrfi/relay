@@ -61,11 +61,12 @@ type AuthConfig struct {
 	MaxEventAgeSeconds int    `mapstructure:"max_event_age_seconds"`
 }
 
-// ModerationConfig authorizes NIP-86 relay-management API requests, which
-// must be signed (via NIP-98) by AdminPubkey. AdminPubkey defaults to
-// RelayInfo.Pubkey — the already-public operator identity — when unset;
-// operators who want a separate moderation credential can set it
-// explicitly.
+// ModerationConfig authorizes the operator APIs. AdminPubkey is the relay's
+// owner: it signs (via NIP-98) for every operator endpoint, and is the only
+// key that may grant administrators (nostrfi/relay#55) or read the
+// configuration. AdminPubkey defaults to RelayInfo.Pubkey — the
+// already-public operator identity — when unset; operators who want a
+// separate moderation credential can set it explicitly.
 type ModerationConfig struct {
 	AdminPubkey        string `mapstructure:"admin_pubkey"`
 	MaxEventAgeSeconds int    `mapstructure:"max_event_age_seconds"`
