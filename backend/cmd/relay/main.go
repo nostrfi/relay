@@ -68,14 +68,23 @@ func main() {
 	// 4. Initialize Services
 	eventService := application.NewEventService(repo)
 	moderationService := application.NewModerationService(repo)
+	// The owner is moderation.admin_pubkey, which config loading has
+	// already defaulted to the NIP-11 pubkey. Administrators are the grants
+	// the owner has made (nostrfi/relay#55).
+	adminService, err := application.NewAdminService(context.Background(), cfg.Moderation.AdminPubkey, repo)
+	if err != nil {
+		slog.Error("failed to load administrators", "error", err)
+		os.Exit(1)
+	}
 
 	// 5. Initialize Handler
-	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, version)
+	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, version).
+		UseAdministrators(adminService)
 
 	// 6. Setup Server
 	server := &http.Server{
 		Addr:    cfg.Server.ListenAddr,
-		Handler: ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(*cfg), ws.WithEventsAPI(*cfg, eventService)),
+		Handler: ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(*cfg, adminService), ws.WithEventsAPI(*cfg, eventService, adminService)),
 	}
 
 	// The metrics listener is a second server rather than another route on

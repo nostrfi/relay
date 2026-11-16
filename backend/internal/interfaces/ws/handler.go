@@ -35,9 +35,13 @@ type RelayHandler struct {
 	auth              AuthConfig
 	moderation        ModerationConfig
 	websocket         WebsocketConfig
-	upgrader          websocket.Upgrader
-	connCount         atomic.Int64
-	subCount          atomic.Int64
+	// admins is nil unless UseAdministrators was called, and then only the
+	// owner is admitted and the role methods are not offered.
+	admins    application.AdminService
+	operators operatorAuthorizer
+	upgrader  websocket.Upgrader
+	connCount atomic.Int64
+	subCount  atomic.Int64
 }
 
 func NewRelayHandler(events application.EventService, moderationSvc application.ModerationService, info RelayInfo, buildVersion string) *RelayHandler {
@@ -91,7 +95,21 @@ func NewRelayHandlerFull(events application.EventService, moderationSvc applicat
 		moderation:        moderationCfg,
 		websocket:         ws,
 	}
+	h.operators = newOperatorAuthorizer(moderationCfg.AdminPubkey, moderationCfg.MaxEventAgeSeconds, nil)
 	h.upgrader = websocket.Upgrader{CheckOrigin: h.checkOrigin}
+	return h
+}
+
+// UseAdministrators lets the owner grant administrators through NIP-86
+// (nostrfi/relay#55), and admits them on the management API. Without it
+// the handler admits the configured owner alone, as every release before
+// 0.3.0 did.
+//
+// A setter rather than another constructor argument, so the many existing
+// NewRelayHandlerFull call sites keep their meaning unchanged.
+func (h *RelayHandler) UseAdministrators(admins application.AdminService) *RelayHandler {
+	h.admins = admins
+	h.operators = newOperatorAuthorizer(h.moderation.AdminPubkey, h.moderation.MaxEventAgeSeconds, admins)
 	return h
 }
 

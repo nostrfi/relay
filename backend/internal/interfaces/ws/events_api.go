@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"relay/internal/application"
+	"relay/internal/domain/admin"
 	domainevent "relay/internal/domain/event"
 
 	"github.com/nbd-wtf/go-nostr"
@@ -82,7 +83,8 @@ type eventQueryResponse struct {
 // POST, like the configuration endpoint, so verifyNip98 applies unchanged:
 // it requires the payload tag, which needs a body to hash. A GET with query
 // parameters could not be signed the same way.
-func newEventsQueryHandler(cfg Config, events application.EventService) http.HandlerFunc {
+func newEventsQueryHandler(cfg Config, events application.EventService, admins application.AdminService) http.HandlerFunc {
+	authorizer := newOperatorAuthorizer(cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds, admins)
 	maxLimit := fallbackMaxEventQueryLimit
 	if cfg.RelayInfo.Limitation != nil && cfg.RelayInfo.Limitation.MaxLimit > 0 {
 		maxLimit = cfg.RelayInfo.Limitation.MaxLimit
@@ -97,17 +99,9 @@ func newEventsQueryHandler(cfg Config, events application.EventService) http.Han
 			return
 		}
 
-		if _, err := authorizeOperator(r, body, cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds); err != nil {
+		if _, _, err := authorizer.authorize(r, body, admin.RoleAdmin); err != nil {
 			logRejectedOperatorRequest("events", err)
-			w.WriteHeader(http.StatusUnauthorized)
-
-			refusal := map[string]string{"error": "unauthorized"}
-			// A verification failure is safe to explain and expensive to
-			// withhold; an identity failure is not. See authorizeOperator.
-			if reason := publicReasonFor(err); reason != "" {
-				refusal["reason"] = reason
-			}
-			json.NewEncoder(w).Encode(refusal)
+			writeOperatorRefusal(w, err)
 			return
 		}
 

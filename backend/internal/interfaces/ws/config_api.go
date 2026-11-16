@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+
+	"relay/internal/application"
+	"relay/internal/domain/admin"
 )
 
 // maxConfigBodyBytes bounds how much of a configuration request body is
@@ -121,8 +124,11 @@ func NewConfigSnapshot(cfg Config) ConfigSnapshot {
 // POST rather than GET so verifyNip98 applies unchanged: it requires the
 // payload tag, which needs a body to hash. The body carries nothing; it
 // exists only to be signed over.
-func newConfigHandler(cfg Config) http.HandlerFunc {
+// The configuration is the owner's alone: administrators moderate, but what
+// the relay enforces stays with the key that runs it (nostrfi/relay#55, D3).
+func newConfigHandler(cfg Config, admins application.AdminService) http.HandlerFunc {
 	snapshot := NewConfigSnapshot(cfg)
+	authorizer := newOperatorAuthorizer(cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds, admins)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -133,17 +139,9 @@ func newConfigHandler(cfg Config) http.HandlerFunc {
 			return
 		}
 
-		if _, err := authorizeOperator(r, body, cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds); err != nil {
+		if _, _, err := authorizer.authorize(r, body, admin.RoleOwner); err != nil {
 			logRejectedOperatorRequest("config", err)
-			w.WriteHeader(http.StatusUnauthorized)
-
-			refusal := map[string]string{"error": "unauthorized"}
-			// A verification failure is safe to explain and expensive to
-			// withhold; an identity failure is not. See authorizeOperator.
-			if reason := publicReasonFor(err); reason != "" {
-				refusal["reason"] = reason
-			}
-			json.NewEncoder(w).Encode(refusal)
+			writeOperatorRefusal(w, err)
 			return
 		}
 

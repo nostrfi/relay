@@ -23,13 +23,16 @@ type MuxOption func(*http.ServeMux)
 // configuration: the relay handler holds only the sections it enforces, so
 // retention, server, and storage reach this layer no other way.
 //
-// Every route it registers authenticates with NIP-98 as the configured
-// operator. They are reachable from the public internet — the reverse proxy
-// routes everything outside /admin to the relay — so none of them may rely
-// on network position.
-func WithAdminAPI(cfg Config) MuxOption {
+// Every route it registers authenticates with NIP-98 as the owner. They are
+// reachable from the public internet — the reverse proxy routes everything
+// outside /admin to the relay — so none of them may rely on network
+// position.
+//
+// admins resolves owner and administrator roles (nostrfi/relay#55); nil
+// admits the configured owner alone.
+func WithAdminAPI(cfg Config, admins application.AdminService) MuxOption {
 	return func(mux *http.ServeMux) {
-		mux.HandleFunc("POST /api/config", newConfigHandler(cfg))
+		mux.HandleFunc("POST /api/config", newConfigHandler(cfg, admins))
 	}
 }
 
@@ -38,12 +41,13 @@ func WithAdminAPI(cfg Config) MuxOption {
 // event service as well as the configuration, and the configuration
 // endpoint has no business holding a repository.
 //
-// Authenticated as the operator, exactly as WithAdminAPI's routes are, and
-// for the same reason: it is reachable from the public internet.
-func WithEventsAPI(cfg Config, events application.EventService) MuxOption {
+// Authenticated with NIP-98, as WithAdminAPI's routes are, and for the same
+// reason: it is reachable from the public internet. Administrators as well
+// as the owner may use it; admins may be nil, admitting the owner alone.
+func WithEventsAPI(cfg Config, events application.EventService, admins application.AdminService) MuxOption {
 	return func(mux *http.ServeMux) {
-		mux.HandleFunc("POST /api/events/query", newEventsQueryHandler(cfg, events))
-		mux.HandleFunc("POST /api/events/stats", newEventStatsHandler(cfg, events))
+		mux.HandleFunc("POST /api/events/query", newEventsQueryHandler(cfg, events, admins))
+		mux.HandleFunc("POST /api/events/stats", newEventStatsHandler(cfg, events, admins))
 	}
 }
 

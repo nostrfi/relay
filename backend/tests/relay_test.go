@@ -4372,21 +4372,37 @@ func startTestRelayWithOperatorAPIs(t *testing.T, cfg ws.Config) (*httptest.Serv
 
 	tmpDir, err := os.MkdirTemp("", "relay-config-api-*")
 	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 
-	repo, err := duckdb.NewRepository(filepath.Join(tmpDir, "test.db"))
+	server, repo, stop := startOperatorRelayAt(t, cfg, filepath.Join(tmpDir, "test.db"))
+	t.Cleanup(stop)
+	return server, repo
+}
+
+// startOperatorRelayAt builds the production wiring — NewMux with both
+// operator APIs, and administrators on the relay handler — over the
+// database at dbPath. stop closes the server and the database but leaves
+// the file, so a test can start the relay again on the same data, as a
+// restart would (nostrfi/relay#55).
+func startOperatorRelayAt(t *testing.T, cfg ws.Config, dbPath string) (*httptest.Server, *duckdb.Repository, func()) {
+	t.Helper()
+
+	repo, err := duckdb.NewRepository(dbPath)
 	require.NoError(t, err)
 
 	eventService := application.NewEventService(repo)
 	moderationService := application.NewModerationService(repo)
-	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, "test")
+	adminService, err := application.NewAdminService(t.Context(), cfg.Moderation.AdminPubkey, repo)
+	require.NoError(t, err)
+	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, "test").
+		UseAdministrators(adminService)
 
-	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg), ws.WithEventsAPI(cfg, eventService)))
-	t.Cleanup(func() {
+	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg, adminService), ws.WithEventsAPI(cfg, eventService, adminService)))
+	stop := func() {
 		server.Close()
 		repo.Close()
-		os.RemoveAll(tmpDir)
-	})
-	return server, repo
+	}
+	return server, repo, stop
 }
 
 func callConfigAPI(t *testing.T, server *httptest.Server, sk string) (map[string]any, int) {
@@ -5262,4 +5278,185 @@ func TestEventStatsAPIBoundsAndExclusions(t *testing.T) {
 		assert.Equal(t, float64(1), out["total"], "the banned event must not be counted, as it is not served")
 		assert.Equal(t, float64(2), out["stored_total"], "but it is still on disk, and stored_total says so")
 	})
+}
+
+// adminTestRelay starts the production operator wiring for an owner key and
+// returns the owner's secret key alongside the server.
+func adminTestRelay(t *testing.T) (*httptest.Server, string, string) {
+	t.Helper()
+	ownerSk := nostr.GeneratePrivateKey()
+	ownerPk, _ := nostr.GetPublicKey(ownerSk)
+	cfg := ws.Config{RelayInfo: ws.RelayInfo{Pubkey: ownerPk}, Moderation: ws.ModerationConfig{AdminPubkey: ownerPk, MaxEventAgeSeconds: 60}}
+	server, _ := startTestRelayWithOperatorAPIs(t, cfg)
+	return server, ownerSk, ownerPk
+}
+
+func TestNip86AssignRoleGrantsAndRevokesAdministrators(t *testing.T) {
+	server, ownerSk, ownerPk := adminTestRelay(t)
+	adminSk := nostr.GeneratePrivateKey()
+	adminPk, _ := nostr.GetPublicKey(adminSk)
+	spammerPk, _ := nostr.GetPublicKey(nostr.GeneratePrivateKey())
+
+	// Before the grant the key is a stranger: the generic refusal, no reason.
+	out, status := callEventsAPI(t, server, adminSk, map[string]any{})
+	require.Equal(t, http.StatusUnauthorized, status)
+	assert.Equal(t, "unauthorized", out["error"])
+	assert.Nil(t, out["reason"], "a stranger must not be told why")
+
+	out, status = callManagement(t, server, ownerSk, "assignrole", []any{adminPk, "admin", "Ada, weekend moderator"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, true, out["result"], "assignrole: %v", out)
+
+	t.Run("an administrator can browse events and moderate", func(t *testing.T) {
+		_, status := callEventsAPI(t, server, adminSk, map[string]any{})
+		assert.Equal(t, http.StatusOK, status)
+
+		out, status := callManagement(t, server, adminSk, "banpubkey", []any{spammerPk, "spam"})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, true, out["result"])
+
+		out, status = callManagement(t, server, adminSk, "whoami", []any{})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, map[string]any{"pubkey": adminPk, "role": "admin"}, out["result"])
+	})
+
+	t.Run("an administrator cannot do what only the owner may", func(t *testing.T) {
+		otherPk, _ := nostr.GetPublicKey(nostr.GeneratePrivateKey())
+		for _, call := range []struct {
+			method string
+			params []any
+		}{
+			{"assignrole", []any{otherPk, "admin"}},
+			{"unassignrole", []any{adminPk, "admin"}},
+			{"listroleassignments", []any{}},
+		} {
+			out, status := callManagement(t, server, adminSk, call.method, call.params)
+			assert.Equal(t, http.StatusForbidden, status, call.method)
+			assert.Equal(t, "forbidden", out["error"], call.method)
+			assert.Equal(t, "owner only", out["reason"], call.method)
+		}
+
+		out, status := callConfigAPI(t, server, adminSk)
+		assert.Equal(t, http.StatusForbidden, status)
+		assert.Equal(t, "owner only", out["reason"])
+		assert.Nil(t, out["storage"], "a refused administrator must not see the configuration")
+	})
+
+	t.Run("the owner lists the assignments, owner first", func(t *testing.T) {
+		out, status := callManagement(t, server, ownerSk, "listroleassignments", []any{})
+		require.Equal(t, http.StatusOK, status)
+		list, ok := out["result"].([]any)
+		require.True(t, ok, "result: %v", out)
+		require.Len(t, list, 2)
+		assert.Equal(t, map[string]any{"pubkey": ownerPk, "role": "owner"}, list[0])
+		grant := list[1].(map[string]any)
+		assert.Equal(t, adminPk, grant["pubkey"])
+		assert.Equal(t, "admin", grant["role"])
+		assert.Equal(t, "Ada, weekend moderator", grant["label"])
+		assert.Equal(t, ownerPk, grant["granted_by"])
+		assert.NotZero(t, grant["granted_at"])
+	})
+
+	t.Run("revocation takes effect on the next request", func(t *testing.T) {
+		out, status := callManagement(t, server, ownerSk, "unassignrole", []any{adminPk, "admin"})
+		require.Equal(t, http.StatusOK, status)
+		assert.Equal(t, true, out["result"])
+
+		out, status = callEventsAPI(t, server, adminSk, map[string]any{})
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Nil(t, out["reason"])
+
+		out, status = callManagement(t, server, adminSk, "whoami", []any{})
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Equal(t, "unauthorized", out["error"])
+	})
+}
+
+func TestNip86AssignRoleRefusals(t *testing.T) {
+	server, ownerSk, ownerPk := adminTestRelay(t)
+	somePk, _ := nostr.GetPublicKey(nostr.GeneratePrivateKey())
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		params []any
+		want   string
+	}{
+		{"the owner cannot be granted", "assignrole", []any{ownerPk, "admin"}, "cannot be changed"},
+		{"the owner cannot be removed", "unassignrole", []any{ownerPk, "admin"}, "cannot be changed"},
+		{"an npub is not a hex pubkey", "assignrole", []any{"npub1" + strings.Repeat("q", 58), "admin"}, "hex"},
+		{"uppercase hex is refused", "assignrole", []any{strings.ToUpper(somePk), "admin"}, "lowercase"},
+		{"only the admin role exists", "assignrole", []any{somePk, "moderator"}, "unsupported role"},
+		{"the role id is required", "assignrole", []any{somePk}, "expected [pubkey, role]"},
+		{"labels are bounded", "assignrole", []any{somePk, "admin", strings.Repeat("x", 101)}, "100 characters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, status := callManagement(t, server, ownerSk, tc.method, tc.params)
+			require.Equal(t, http.StatusOK, status, "NIP-86 reports method errors in the envelope")
+			errMsg, _ := out["error"].(string)
+			assert.Contains(t, errMsg, tc.want)
+		})
+	}
+
+	out, status := callManagement(t, server, ownerSk, "listroleassignments", []any{})
+	require.Equal(t, http.StatusOK, status)
+	assert.Len(t, out["result"], 1, "no refused call may have stored a grant")
+}
+
+func TestNip86WhoamiAndSupportedMethods(t *testing.T) {
+	server, ownerSk, ownerPk := adminTestRelay(t)
+
+	out, status := callManagement(t, server, ownerSk, "whoami", []any{})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, map[string]any{"pubkey": ownerPk, "role": "owner"}, out["result"])
+
+	out, status = callManagement(t, server, nostr.GeneratePrivateKey(), "whoami", []any{})
+	assert.Equal(t, http.StatusUnauthorized, status)
+	assert.Nil(t, out["reason"], "whoami must not become an oracle for who is an administrator")
+
+	out, status = callManagement(t, server, ownerSk, "supportedmethods", []any{})
+	require.Equal(t, http.StatusOK, status)
+	methods, _ := out["result"].([]any)
+	for _, m := range []string{"assignrole", "unassignrole", "listroleassignments", "whoami", "banpubkey"} {
+		assert.Contains(t, methods, m)
+	}
+	assert.NotContains(t, methods, "createrole", "custom roles are not implemented")
+}
+
+func TestAdministratorsSurviveRestart(t *testing.T) {
+	ownerSk := nostr.GeneratePrivateKey()
+	ownerPk, _ := nostr.GetPublicKey(ownerSk)
+	adminSk := nostr.GeneratePrivateKey()
+	adminPk, _ := nostr.GetPublicKey(adminSk)
+	cfg := ws.Config{RelayInfo: ws.RelayInfo{Pubkey: ownerPk}, Moderation: ws.ModerationConfig{AdminPubkey: ownerPk, MaxEventAgeSeconds: 60}}
+	dbPath := filepath.Join(t.TempDir(), "relay.db")
+
+	server, _, stop := startOperatorRelayAt(t, cfg, dbPath)
+	out, status := callManagement(t, server, ownerSk, "assignrole", []any{adminPk, "admin"})
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, true, out["result"])
+	stop()
+
+	server, _, stop = startOperatorRelayAt(t, cfg, dbPath)
+	defer stop()
+	out, status = callManagement(t, server, adminSk, "whoami", []any{})
+	require.Equal(t, http.StatusOK, status)
+	assert.Equal(t, "admin", out["result"].(map[string]any)["role"])
+}
+
+func TestRelayWithoutAdministratorsAdmitsOnlyTheOwner(t *testing.T) {
+	// startTestRelayFull builds the handler without UseAdministrators, as
+	// every caller did before 0.3.0: owner only, no role methods.
+	ownerSk := nostr.GeneratePrivateKey()
+	ownerPk, _ := nostr.GetPublicKey(ownerSk)
+	server, _, cleanup := startTestRelayFull(t, ws.RelayInfo{Pubkey: ownerPk}, ws.ResourceLimits{}, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
+	defer cleanup()
+
+	out, status := callManagement(t, server, ownerSk, "supportedmethods", []any{})
+	require.Equal(t, http.StatusOK, status)
+	assert.NotContains(t, out["result"], "assignrole")
+
+	out, status = callManagement(t, server, ownerSk, "assignrole", []any{ownerPk, "admin"})
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, out["error"], "unsupported method")
 }

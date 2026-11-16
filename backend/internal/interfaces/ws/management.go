@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
+	"relay/internal/domain/admin"
 	"relay/internal/domain/moderation"
 )
 
@@ -42,13 +44,49 @@ type nip86Response struct {
 // supportedManagementMethods answers the "supportedmethods" call. Only the
 // ban-list subset of NIP-86 is implemented: the allow-list methods
 // (allowpubkey/listallowedpubkeys) are skipped because operating-model.md
-// rules out an admission allow-list for this relay, and roles/kind-filter/
+// rules out an admission allow-list for this relay, and kind-filter/
 // relay-metadata methods are unrelated to moderation.
 var supportedManagementMethods = []string{
 	"supportedmethods",
 	"banpubkey", "unbanpubkey", "listbannedpubkeys",
 	"banevent", "allowevent", "listbannedevents",
 	"blockip", "unblockip", "listblockedips",
+}
+
+// roleManagementMethods are offered only when the handler has
+// administrators (UseAdministrators). assignrole and unassignrole are
+// NIP-86's, used with the single built-in role id "admin"; createrole and
+// its siblings are not implemented. NIP-86 has no way to list assignments
+// or to ask who the caller is, so listroleassignments and whoami are this
+// relay's own (nostrfi/relay#55).
+var roleManagementMethods = []string{
+	"assignrole", "unassignrole", "listroleassignments", "whoami",
+}
+
+// ownerOnlyManagementMethods need the owner. Every other method an
+// administrator may call: moderation is what administrators are for, while
+// deciding who moderates stays with the owner, so one compromised
+// administrator key cannot add others or lock the owner out (D2).
+var ownerOnlyManagementMethods = map[string]bool{
+	"assignrole":          true,
+	"unassignrole":        true,
+	"listroleassignments": true,
+}
+
+// managementMethodMinRole is the role a caller needs for method. Unknown
+// methods need only an administrator, so they are answered "unsupported
+// method" as before rather than with a role refusal.
+func managementMethodMinRole(method string) admin.Role {
+	if ownerOnlyManagementMethods[method] {
+		return admin.RoleOwner
+	}
+	return admin.RoleAdmin
+}
+
+// managementCaller is who signed a management request.
+type managementCaller struct {
+	pubkey string
+	role   admin.Role
 }
 
 // managementError marks an error as safe to return verbatim to the client
@@ -81,18 +119,13 @@ func (h *RelayHandler) handleManagementRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	pubkey, err := authorizeOperator(r, body, h.moderation.AdminPubkey, h.moderation.MaxEventAgeSeconds)
+	// "unauthorized" stays the error a stranger sees, so existing callers
+	// parsing the NIP-86 envelope are unaffected; the reason rides
+	// alongside it when it is safe to give.
+	pubkey, role, err := h.operators.authorize(r, body, admin.RoleAdmin)
 	if err != nil {
 		logRejectedOperatorRequest("nip86", err)
-		w.WriteHeader(http.StatusUnauthorized)
-
-		// "unauthorized" stays the error, so existing callers parsing the
-		// NIP-86 envelope are unaffected; the reason rides alongside it.
-		response := nip86Response{Error: "unauthorized"}
-		if reason := publicReasonFor(err); reason != "" {
-			response.Reason = reason
-		}
-		json.NewEncoder(w).Encode(response)
+		writeOperatorRefusal(w, err)
 		return
 	}
 
@@ -102,7 +135,15 @@ func (h *RelayHandler) handleManagementRequest(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	result, err := h.dispatchManagementMethod(r.Context(), req.Method, req.Params)
+	if minimum := managementMethodMinRole(req.Method); !role.Satisfies(minimum) {
+		err := &insufficientRoleError{pubkey: pubkey, role: role, minimum: minimum}
+		logRejectedOperatorRequest("nip86", fmt.Errorf("method %s: %w", req.Method, err))
+		writeOperatorRefusal(w, err)
+		return
+	}
+
+	caller := managementCaller{pubkey: pubkey, role: role}
+	result, err := h.dispatchManagementMethod(r.Context(), caller, req.Method, req.Params)
 	if err != nil {
 		var mgmtErr *managementError
 		if errors.As(err, &mgmtErr) {
@@ -116,8 +157,18 @@ func (h *RelayHandler) handleManagementRequest(w http.ResponseWriter, r *http.Re
 
 	// Every successful moderation action is logged for accountability, but
 	// never with event content, private keys, or anything beyond the
-	// identifiers the operator themselves supplied in params.
-	slog.Info("NIP-86 management call applied", "method", req.Method, "operator_pubkey", pubkey)
+	// identifiers the operator themselves supplied in params. whoami
+	// changes nothing and runs at every dashboard sign-in, so it is not an
+	// action worth a line.
+	if req.Method != "whoami" {
+		attrs := []any{"method", req.Method, "operator_pubkey", pubkey, "operator_role", role.String()}
+		if req.Method == "assignrole" || req.Method == "unassignrole" {
+			if target, err := parseRoleParams(req.Params); err == nil {
+				attrs = append(attrs, "target_pubkey", target.pubkey)
+			}
+		}
+		slog.Info("NIP-86 management call applied", attrs...)
+	}
 	json.NewEncoder(w).Encode(nip86Response{Result: result})
 }
 
@@ -174,10 +225,20 @@ func validateReason(reason string) error {
 	return nil
 }
 
-func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, method string, params []json.RawMessage) (any, error) {
+func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, caller managementCaller, method string, params []json.RawMessage) (any, error) {
+	if slices.Contains(roleManagementMethods, method) {
+		if h.admins == nil {
+			return nil, newManagementError("unsupported method %q", method)
+		}
+		return h.dispatchRoleMethod(ctx, caller, method, params)
+	}
+
 	switch method {
 	case "supportedmethods":
-		return supportedManagementMethods, nil
+		if h.admins == nil {
+			return supportedManagementMethods, nil
+		}
+		return append(slices.Clone(supportedManagementMethods), roleManagementMethods...), nil
 
 	case "banpubkey":
 		pubkey, reason, err := parseValueReasonParams(params)
@@ -317,4 +378,97 @@ func moderationEntriesToList(key string, entries []moderation.ModerationEntry) [
 		out[i] = m
 	}
 	return out
+}
+
+// roleParams is the parsed ["<pubkey>", "<role-id>", "<label>"?] of
+// assignrole and unassignrole. The label is this relay's own extension:
+// NIP-86 defines only the first two, and a client that sends just those is
+// answered the same way.
+type roleParams struct {
+	pubkey string
+	roleID string
+	label  string
+}
+
+func parseRoleParams(params []json.RawMessage) (roleParams, error) {
+	var p roleParams
+	if len(params) < 2 {
+		return p, newManagementError("expected [pubkey, role] parameters")
+	}
+	if err := json.Unmarshal(params[0], &p.pubkey); err != nil || p.pubkey == "" {
+		return p, newManagementError("first parameter must be a non-empty pubkey string")
+	}
+	if err := json.Unmarshal(params[1], &p.roleID); err != nil || p.roleID == "" {
+		return p, newManagementError("second parameter must be a non-empty role id string")
+	}
+	if len(params) > 2 {
+		if err := json.Unmarshal(params[2], &p.label); err != nil {
+			return p, newManagementError("third parameter, the label, must be a string")
+		}
+	}
+	return p, nil
+}
+
+// dispatchRoleMethod answers the role methods. The caller's role has already
+// been checked against managementMethodMinRole.
+func (h *RelayHandler) dispatchRoleMethod(ctx context.Context, caller managementCaller, method string, params []json.RawMessage) (any, error) {
+	switch method {
+	case "whoami":
+		return map[string]string{"pubkey": caller.pubkey, "role": caller.role.String()}, nil
+
+	case "assignrole", "unassignrole":
+		p, err := parseRoleParams(params)
+		if err != nil {
+			return nil, err
+		}
+		if err := admin.ValidatePubkey(p.pubkey); err != nil {
+			return nil, newManagementError("%s", err.Error())
+		}
+		if p.roleID != admin.GrantableRoleID {
+			return nil, newManagementError("unsupported role %q; the only role is %q", p.roleID, admin.GrantableRoleID)
+		}
+		if p.pubkey == h.admins.Owner() {
+			return nil, newManagementError("%s", admin.ErrOwnerNotGrantable.Error())
+		}
+		if method == "unassignrole" {
+			if err := h.admins.Revoke(ctx, p.pubkey); err != nil {
+				return nil, err
+			}
+			return true, nil
+		}
+		if err := admin.ValidateLabel(p.label); err != nil {
+			return nil, newManagementError("%s", err.Error())
+		}
+		if err := h.admins.Grant(ctx, p.pubkey, p.label, caller.pubkey); err != nil {
+			return nil, err
+		}
+		return true, nil
+
+	case "listroleassignments":
+		admins, err := h.admins.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		// The owner first, from configuration: it holds every right an
+		// administrator has, but was never granted, so it has no grant
+		// fields.
+		out := make([]map[string]any, 0, len(admins)+1)
+		out = append(out, map[string]any{"pubkey": h.admins.Owner(), "role": admin.RoleOwner.String()})
+		for _, a := range admins {
+			m := map[string]any{
+				"pubkey":     a.Pubkey,
+				"role":       admin.GrantableRoleID,
+				"granted_by": a.GrantedBy,
+				"granted_at": a.GrantedAt,
+			}
+			if a.Label != "" {
+				m["label"] = a.Label
+			}
+			out = append(out, m)
+		}
+		return out, nil
+
+	default:
+		return nil, newManagementError("unsupported method %q", method)
+	}
 }
