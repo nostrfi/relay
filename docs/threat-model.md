@@ -182,6 +182,7 @@ threat to exactly one disposition:
 
 | Threat | Disposition |
 | --- | --- |
+| Ephemeral-event metadata (presence heartbeats, typing indicators, NIP-46 signer traffic) accumulating as a record of user activity | **Mitigated** — NIP-01 ephemeral events (kinds 20000–29999) are broadcast to open subscriptions and never written to DuckDB, so they reach neither the database nor backups. Kind `22242` NIP-42 AUTH events sent as `EVENT` are refused, never broadcast (NIP-42). Ephemeral rows stored by releases before 0.3.0 are deleted by schema migration 6; copies may persist in older backups until those backups rotate. |
 | Deleted/expired content lingering | **Mitigated** — NIP-09 deletions and NIP-40 expiration are honored; the purge worker reclaims expired rows and checkpoints on an interval (workspace #5). Deleted rows may persist in older backups until those backups rotate — **accepted residual**, deployment-layer rotation. |
 | Abuse reports with no intake path | **Mitigated** — NIP-11 contact address, operator triage runbook, and NIP-86 enforcement with logged, authenticated management calls (workspace #9). |
 | Moderation-key compromise | **Accepted residual** — `moderation.admin_pubkey` grants ban/unban control (not data read-out); calls are NIP-98-signed with a 60-second freshness window and logged. Key custody is an operator responsibility. |

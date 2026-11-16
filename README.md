@@ -11,7 +11,7 @@ The relay's threat model (assets, trust boundaries, every identified threat and 
 
 ## Supported NIPs
 
-- **NIP-01**: Basic protocol flow
+- **NIP-01**: Basic protocol flow (ephemeral events, kinds 20000–29999, are delivered to open subscriptions but never stored)
 - **NIP-02**: Contact List and Follows
 - **NIP-09**: Event Deletion
 - **NIP-11**: Relay Information Document
@@ -247,6 +247,7 @@ The relay's own metrics:
 | `relay_query_duration_seconds` | Histogram | `query` (`req`/`negentropy`) | Repository query duration |
 | `relay_events_stored_total` | Counter | — | Events successfully persisted |
 | `relay_save_failures_total` | Counter | — | Event save failures |
+| `relay_events_ephemeral_total` | Counter | — | Ephemeral events (kinds 20000–29999) accepted and broadcast without being stored; not counted in `relay_events_stored_total` |
 
 The `type` and `reason` labels are bounded to the relay's known protocol message types and NIP-01 rejection prefixes — anything else is reported as `unknown` rather than the raw client-supplied string, so a client can't inflate the metrics' cardinality by sending arbitrary garbage values. No metric or label ever includes event content, pubkeys, or other high-cardinality/sensitive values.
 
@@ -580,6 +581,8 @@ The relay uses **DuckDB** for high-performance event storage and querying. The d
 
 Schema changes are applied by a versioned migration runner (`backend/internal/infrastructure/duckdb/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
 
+Migration 6 (0.3.0) **deletes data**: it removes every stored ephemeral event (kinds 20000–29999, mostly kind 20001 presence heartbeats) and its tag rows, since the relay no longer stores them. It runs once, on the first start of a 0.3.0 binary, and logs how many events it removed. To keep them, back up **before** upgrading, either with the pre-0.3.0 binary's `-backup` or by copying `db/relay.db` while the relay is stopped. Don't take this backup with the 0.3.0 binary: `-backup` applies pending migrations before it exports, so it would delete the ephemeral rows first. The database file shrinks after the next checkpoint.
+
 ### Retention and maintenance
 
 ```yaml
@@ -600,7 +603,7 @@ go run ./cmd/relay -backup /path/to/backup-dir
 go run ./cmd/relay -restore /path/to/backup-dir
 ```
 
-Both flags run the requested operation and exit — they do not start the server. `-backup` writes a `backup-manifest.json` (event and tag row counts) alongside the DuckDB export; `-restore` reads that manifest back, imports the backup, and fails loudly if the restored row counts don't match or a smoke-test query fails. `-restore` refuses to run if `db/relay.db` already exists, so it never silently merges with or overwrites a live database — move or remove the existing file first.
+Both flags run the requested operation and exit — they do not start the server. `-backup` writes a `backup-manifest.json` (event and tag row counts) alongside the DuckDB export; `-restore` reads that manifest back, imports the backup, and fails loudly if the restored row counts don't match or a smoke-test query fails. `-backup` applies any pending schema migrations before exporting, so a backup taken with a newer binary reflects that binary's migrations — including destructive ones such as migration 6. `-restore` refuses to run if `db/relay.db` already exists, so it never silently merges with or overwrites a live database — move or remove the existing file first.
 
 This tool is deliberately not scheduled or triggered automatically by the relay itself: running it on a schedule, storing backups off-host, and defining a recovery point objective around that cadence are deployment-layer responsibilities. **Recovery time objective**: restart time plus however long `-restore` takes against your data volume — measure this for your own dataset size as part of your runbook, since it scales with database size and has not been benchmarked at production scale here.
 

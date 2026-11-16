@@ -59,8 +59,15 @@ func (r *Repository) CountEvents(ctx context.Context) (int64, error) {
 // branch that deletes or replaces an event also removes that event's tag
 // rows in the same transaction, so a failure partway through never leaves
 // orphaned tags or a half-applied replace/delete.
+//
+// Ephemeral events (NIP-01, kinds 20000–29999) are refused with
+// domainevent.ErrEphemeral: the publish path broadcasts them without
+// saving, and this guard keeps any other caller from persisting them.
 func (r *Repository) SaveEvent(ctx context.Context, ev *domainevent.Event) (bool, error) {
 	event := ev.Event
+	if domainevent.IsEphemeral(event.Kind) {
+		return false, domainevent.ErrEphemeral
+	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -198,18 +205,13 @@ func saveEventTx(ctx context.Context, tx *sql.Tx, event *nostr.Event) (bool, err
 			if tag[0] == "d" {
 				dTag.String = tag[1]
 				dTag.Valid = true
-			} else if tag[0] == "expiration" {
-				var ts int64
-				if _, err := fmt.Sscanf(tag[1], "%d", &ts); err == nil {
-					expiration.Int64 = ts
-					expiration.Valid = true
-				}
 			}
 		}
 	}
+	expiration.Int64, expiration.Valid = domainevent.Expiration(event)
 
 	// NIP-40: Relays SHOULD drop any events that are published to them if they are expired.
-	if expiration.Valid && expiration.Int64 < int64(event.CreatedAt) {
+	if domainevent.ExpiredOnArrival(event) {
 		return false, fmt.Errorf("event already expired")
 	}
 

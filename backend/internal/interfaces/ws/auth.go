@@ -10,6 +10,9 @@ import (
 	"github.com/nbd-wtf/go-nostr"
 )
 
+// nip42AuthKind is the kind of a NIP-42 AUTH event.
+const nip42AuthKind = 22242
+
 // handleAuth answers every AUTH with an OK, as NIP-42 requires: true on
 // success, false with an invalid: or restricted: reason otherwise. Clients
 // such as go-nostr's Relay.Auth block on that reply, so a silent success
@@ -19,7 +22,7 @@ func (h *RelayHandler) handleAuth(c *Client, ev *nostr.Event) {
 		h.sendOK(c, ev.ID, false, prefixInvalid+": AUTH event signature verification failed")
 		return
 	}
-	if ev.Kind != 22242 {
+	if ev.Kind != nip42AuthKind {
 		h.sendOK(c, ev.ID, false, prefixInvalid+": invalid AUTH event kind")
 		return
 	}

@@ -45,6 +45,11 @@ var (
 		Name: "relay_save_failures_total",
 		Help: "Total event save failures.",
 	})
+
+	EventsEphemeralTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "relay_events_ephemeral_total",
+		Help: "Total ephemeral events (kinds 20000-29999) accepted and broadcast without being stored.",
+	})
 )
 
 func init() {
@@ -56,6 +61,7 @@ func init() {
 		QueryDuration,
 		EventsStoredTotal,
 		SaveFailuresTotal,
+		EventsEphemeralTotal,
 	)
 }
 

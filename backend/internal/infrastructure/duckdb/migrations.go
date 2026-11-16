@@ -114,6 +114,35 @@ var migrations = []migration{
 		description: "index the operator's allowlisted multi-letter and value-less tags",
 		up:          backfillExtendedTagRows,
 	},
+	{
+		version:     6,
+		description: "purge stored ephemeral events (kinds 20000-29999)",
+		up:          purgeEphemeralEvents,
+	},
+}
+
+// purgeEphemeralEvents removes the ephemeral events (NIP-01, 20000 <= kind
+// < 30000) that releases before 0.3.0 stored, with their tag rows. The
+// relay no longer stores them, so these rows were never meant to persist;
+// kind 20001 presence heartbeats were most of them.
+//
+// Idempotent: a second run finds nothing to delete. Tags go first, in the
+// same transaction, so a failure leaves neither orphaned tags nor a
+// half-purged database. The file shrinks only once DuckDB checkpoints,
+// which the maintenance worker does on its interval.
+func purgeEphemeralEvents(ctx context.Context, tx *sql.Tx) error {
+	const ephemeral = "kind >= 20000 AND kind < 30000"
+	if _, err := tx.ExecContext(ctx, "DELETE FROM tags WHERE event_id IN (SELECT id FROM events WHERE "+ephemeral+")"); err != nil {
+		return fmt.Errorf("delete ephemeral tag rows: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, "DELETE FROM events WHERE "+ephemeral)
+	if err != nil {
+		return fmt.Errorf("delete ephemeral events: %w", err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		slog.Info("purged stored ephemeral events", "count", n)
+	}
+	return nil
 }
 
 // backfillTagsPageSize bounds how many events migration 5 holds in memory
