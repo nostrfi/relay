@@ -108,6 +108,13 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 			h.sendOK(c, ev.ID, false, prefixInvalid+": kind 22242 is sent with AUTH, not EVENT")
 			return
 		}
+		// NIP-40: the repository drops events that expire before they were
+		// created; ephemeral events never reach it, so the same rule is
+		// applied here before they are broadcast.
+		if domainevent.ExpiredOnArrival(ev) {
+			h.sendOK(c, ev.ID, false, prefixInvalid+": event already expired")
+			return
+		}
 		metrics.EventsEphemeralTotal.Inc()
 		h.sendOK(c, ev.ID, true, "")
 		h.broadcast(ev)

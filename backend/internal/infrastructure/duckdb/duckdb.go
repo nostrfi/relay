@@ -205,18 +205,13 @@ func saveEventTx(ctx context.Context, tx *sql.Tx, event *nostr.Event) (bool, err
 			if tag[0] == "d" {
 				dTag.String = tag[1]
 				dTag.Valid = true
-			} else if tag[0] == "expiration" {
-				var ts int64
-				if _, err := fmt.Sscanf(tag[1], "%d", &ts); err == nil {
-					expiration.Int64 = ts
-					expiration.Valid = true
-				}
 			}
 		}
 	}
+	expiration.Int64, expiration.Valid = domainevent.Expiration(event)
 
 	// NIP-40: Relays SHOULD drop any events that are published to them if they are expired.
-	if expiration.Valid && expiration.Int64 < int64(event.CreatedAt) {
+	if domainevent.ExpiredOnArrival(event) {
 		return false, fmt.Errorf("event already expired")
 	}
 

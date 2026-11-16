@@ -782,6 +782,39 @@ func TestNip01EphemeralEventsStillModerated(t *testing.T) {
 	assert.Error(t, err, "a banned pubkey's ephemeral event must not be broadcast, got %s", raw)
 }
 
+// TestNip01EphemeralEventsExpiredOnArrival: ephemeral events skip the
+// repository, so the NIP-40 "already expired" rejection the repository
+// applies must still be applied to them before they are broadcast.
+func TestNip01EphemeralEventsExpiredOnArrival(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	subscriber := connectTestRelay(t, server)
+	defer subscriber.Close()
+	req, _ := json.Marshal([]any{"REQ", "live", nostr.Filter{Kinds: []int{20001}}})
+	require.NoError(t, subscriber.WriteMessage(websocket.TextMessage, req))
+	subscriber.readMessageType(t, "EOSE")
+
+	publisher := connectTestRelay(t, server)
+	defer publisher.Close()
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	now := nostr.Now()
+	ev := nostr.Event{PubKey: pk, CreatedAt: now, Kind: 20001, Content: "online",
+		Tags: nostr.Tags{{"expiration", fmt.Sprintf("%d", int64(now)-60)}}}
+	require.NoError(t, ev.Sign(sk))
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	require.NoError(t, publisher.WriteMessage(websocket.TextMessage, msg))
+	okMsg := publisher.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "invalid: event already expired", okMsg[3])
+
+	subscriber.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, raw, err := subscriber.ReadMessage()
+	subscriber.SetReadDeadline(time.Time{})
+	assert.Error(t, err, "an already-expired ephemeral event must not be broadcast, got %s", raw)
+}
+
 // TestNip42AuthEventNotBroadcast: NIP-42 says relays MUST NOT broadcast
 // kind 22242. Sent as an EVENT it is refused, so it is neither broadcast
 // nor stored.
