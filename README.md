@@ -316,7 +316,7 @@ The relay exposes the ban-list subset of the [NIP-86 relay management API](https
 {"method": "banpubkey", "params": ["<32-byte-hex-pubkey>", "spam"]}
 ```
 
-Every request must carry an `Authorization: Nostr <base64>` header containing a signed [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) kind-`27235` event, with the `payload` tag set (NIP-86 requires it; generic NIP-98 only recommends it) to the hex-encoded SHA-256 of the exact request body. A request is rejected with `401` if the signature, `u`/`method`/`payload` tags, or freshness check fails, or if the signing pubkey is neither the owner (`moderation.admin_pubkey`) nor an [administrator](#administrators). An administrator calling an owner-only method gets `403` with `{"error": "forbidden", "reason": "owner only"}`. Any NIP-98-capable client or tool (e.g. [`nak`](https://github.com/fiatjaf/nak)) can construct this header; the relay does not provide a browser UI for it.
+Every request must carry an `Authorization: Nostr <base64>` header containing a signed [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) kind-`27235` event, with the `payload` tag set (NIP-86 requires it; generic NIP-98 only recommends it) to the hex-encoded SHA-256 of the exact request body. A request is rejected with `401` if the signature, `u`/`method`/`payload` tags, or freshness check fails, or if the signing pubkey is neither the owner (`moderation.admin_pubkey`) nor an [administrator](#administrators). An administrator calling an owner-only method gets `403` with `{"error": "forbidden", "reason": "owner only"}`. Any NIP-98-capable client or tool (e.g. [`nak`](https://github.com/fiatjaf/nak)) can construct this header. The admin dashboard is one such client: see [Admin dashboard moderation](#admin-dashboard-moderation) and [Admin dashboard administrators](#admin-dashboard-administrators).
 
 Two checks bind a signature to this relay and to one request (nostrfi/relay#60):
 
@@ -372,6 +372,9 @@ methods are also this relay's own, because NIP-86 has no equivalent:
   `[{"pubkey": "...", "role": "owner"}, {"pubkey": "...", "role": "admin", "label": "...", "granted_by": "...", "granted_at": 1700000000}]`.
 - **`whoami`** returns the caller's own `{"pubkey": "...", "role": "owner" | "admin"}`. A key that
   is neither gets the usual generic `401`, so it cannot be used to learn who the administrators are.
+
+The owner can also grant and revoke administrators from the dashboard, without building these
+calls by hand: see [Admin dashboard administrators](#admin-dashboard-administrators).
 
 Grants are stored in the relay's database (the `admins` table), so they survive restarts and are
 included in `-backup`/`-restore`. The relay keeps them in memory as well, so a revocation takes
@@ -561,6 +564,30 @@ so the relay authorizes every call exactly as it would from `nak` or curl.
 Because each call carries its own signature, the page needs the operator's signer present, not just
 a dashboard session. With the signer unavailable the page says so rather than showing an empty list.
 
+### Admin dashboard administrators
+
+The dashboard's `/admin/dashboard/administrators` page lets the owner manage
+[administrators](#administrators) (nostrfi/relay#57). Like the moderation page, it is a client of
+the NIP-86 role methods: it calls `listroleassignments`, `assignrole` and `unassignrole` through the
+same signed proxy and holds no list of its own.
+
+- **Owner only.** The page and its sidebar link are shown only to the owner. An administrator who
+  opens the address directly is sent back to the overview, and the relay refuses the role methods
+  to them with `403` in any case. Letting administrators manage administrators would turn one
+  compromised admin key into a full takeover.
+- **Adding.** Enter the administrator's `npub` or 64-character lowercase hex pubkey, and an
+  optional label of up to 100 characters. The page checks the key before asking for a signature:
+  an `nsec` is refused with a warning that it is a private key, and so are other bech32 forms,
+  uppercase hex, and the owner's own key. Adding a key that is already an administrator replaces
+  its label.
+- **Removing.** Each administrator has a **Remove** action, behind a confirmation. The relay refuses
+  the removed key's very next request, and that refusal ends its dashboard session.
+- **The owner** is listed first, marked as coming from configuration, with no remove action. It
+  can only be changed through `moderation.admin_pubkey`.
+
+Each list, add and remove is a separate signed request, so adding or removing asks the signer twice:
+once for the change and once to reload the list from the relay.
+
 ### Admin dashboard metrics
 
 The dashboard reads the relay's `/metrics` endpoint through its own server and renders it on
@@ -595,14 +622,14 @@ Query-latency `p50` and `p95` are estimated from the histogram buckets by interp
 
 `/admin` itself is public: it renders the relay's NIP-11 information, the same document the relay
 serves to any anonymous caller. Everything else lives under `/admin/dashboard` — the overview, plus
-`/moderation` and `/configuration` beneath it — and requires a pubkey login by the relay's
+`/moderation`, `/administrators` and `/configuration` beneath it — and requires a pubkey login by the relay's
 **owner** or one of its [administrators](#administrators). The operator signs with a browser
 extension (NIP-07) or a remote signer (NIP-46 bunker), and the dashboard's Nuxt server opens a
 session for them once the relay has said which role their key holds. The dashboard keeps no list
 of administrators: the relay is the only authority on who may sign in.
 
-Administrators see every page except **Configuration**, which is owner only, as the relay's
-configuration API is. The sidebar shows the signed-in role next to the npub.
+Administrators see every page except **Administrators** and **Configuration**, which are owner
+only, as the relay's role methods and configuration API are. The sidebar shows the signed-in role next to the npub.
 
 Sign-in is a **Sign in** action in the public page's header, which opens a modal with both
 options; the signed-in pages carry the identity and a **Sign out** in their sidebar instead.
