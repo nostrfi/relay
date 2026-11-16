@@ -59,8 +59,15 @@ func (r *Repository) CountEvents(ctx context.Context) (int64, error) {
 // branch that deletes or replaces an event also removes that event's tag
 // rows in the same transaction, so a failure partway through never leaves
 // orphaned tags or a half-applied replace/delete.
+//
+// Ephemeral events (NIP-01, kinds 20000–29999) are refused with
+// domainevent.ErrEphemeral: the publish path broadcasts them without
+// saving, and this guard keeps any other caller from persisting them.
 func (r *Repository) SaveEvent(ctx context.Context, ev *domainevent.Event) (bool, error) {
 	event := ev.Event
+	if domainevent.IsEphemeral(event.Kind) {
+		return false, domainevent.ErrEphemeral
+	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {

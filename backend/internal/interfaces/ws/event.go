@@ -95,6 +95,25 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 		}
 	}
 
+	// NIP-01: ephemeral events (20000 <= kind < 30000) are "not expected to
+	// be stored". Every check above — ban, signature, rate limit, resource
+	// limits, NIP-70 — still applies; only the save is skipped, so they are
+	// delivered to open subscriptions and then forgotten. Kind 20001
+	// presence heartbeats were a large share of stored rows before this.
+	if domainevent.IsEphemeral(ev.Kind) {
+		// NIP-42: "Relays MUST exclude kind: 22242 events from being
+		// broadcasted to any client." They belong in an AUTH message;
+		// arriving as EVENT they are refused rather than silently dropped.
+		if ev.Kind == nip42AuthKind {
+			h.sendOK(c, ev.ID, false, prefixInvalid+": kind 22242 is sent with AUTH, not EVENT")
+			return
+		}
+		metrics.EventsEphemeralTotal.Inc()
+		h.sendOK(c, ev.ID, true, "")
+		h.broadcast(ev)
+		return
+	}
+
 	success, err := h.eventService.SaveEvent(ctx, wrapped)
 	if err != nil {
 		slog.Error("save event failed", "event_id", ev.ID, "error", err)

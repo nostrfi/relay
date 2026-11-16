@@ -11,7 +11,7 @@ The relay's threat model (assets, trust boundaries, every identified threat and 
 
 ## Supported NIPs
 
-- **NIP-01**: Basic protocol flow
+- **NIP-01**: Basic protocol flow (ephemeral events, kinds 20000–29999, are delivered to open subscriptions but never stored)
 - **NIP-02**: Contact List and Follows
 - **NIP-09**: Event Deletion
 - **NIP-11**: Relay Information Document
@@ -247,6 +247,7 @@ The relay's own metrics:
 | `relay_query_duration_seconds` | Histogram | `query` (`req`/`negentropy`) | Repository query duration |
 | `relay_events_stored_total` | Counter | — | Events successfully persisted |
 | `relay_save_failures_total` | Counter | — | Event save failures |
+| `relay_events_ephemeral_total` | Counter | — | Ephemeral events (kinds 20000–29999) accepted and broadcast without being stored; not counted in `relay_events_stored_total` |
 
 The `type` and `reason` labels are bounded to the relay's known protocol message types and NIP-01 rejection prefixes — anything else is reported as `unknown` rather than the raw client-supplied string, so a client can't inflate the metrics' cardinality by sending arbitrary garbage values. No metric or label ever includes event content, pubkeys, or other high-cardinality/sensitive values.
 
@@ -579,6 +580,8 @@ The relay uses **DuckDB** for high-performance event storage and querying. The d
 ### Schema migrations
 
 Schema changes are applied by a versioned migration runner (`backend/internal/infrastructure/duckdb/migrations.go`) instead of ad hoc startup checks. Applied versions are recorded in a `schema_migrations` table. A migration failure aborts startup with a clear error rather than serving traffic against a partially-migrated schema; it does not mark itself applied, so a subsequent start retries it. Every migration is written to be idempotent, so a database created before this runner existed is bootstrapped safely on first start with the new binary.
+
+Migration 6 (0.3.0) **deletes data**: it removes every stored ephemeral event (kinds 20000–29999, mostly kind 20001 presence heartbeats) and its tag rows, since the relay no longer stores them. It runs once, on the first start of a 0.3.0 binary, and logs how many events it removed. Take a backup (see below) before upgrading if you want to keep them. The database file shrinks after the next checkpoint.
 
 ### Retention and maintenance
 
