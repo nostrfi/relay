@@ -56,6 +56,9 @@ type AuthView struct {
 type ModerationView struct {
 	AdminPubkey        string `json:"admin_pubkey"`
 	MaxEventAgeSeconds int    `json:"max_event_age_seconds"`
+	// APIOrigin is the origin operator requests are verified against: the
+	// configured moderation.api_origin, or the one auth.relay_url implies.
+	APIOrigin string `json:"api_origin"`
 }
 
 type WebsocketView struct {
@@ -100,6 +103,7 @@ func NewConfigSnapshot(cfg Config) ConfigSnapshot {
 		Moderation: ModerationView{
 			AdminPubkey:        cfg.Moderation.AdminPubkey,
 			MaxEventAgeSeconds: cfg.Moderation.MaxEventAgeSeconds,
+			APIOrigin:          canonicalOrigin(cfg.Moderation.APIOrigin, cfg.Auth.RelayURL),
 		},
 		Websocket: WebsocketView{
 			Mode:           cfg.Websocket.Mode,
@@ -128,7 +132,7 @@ func NewConfigSnapshot(cfg Config) ConfigSnapshot {
 // the relay enforces stays with the key that runs it (nostrfi/relay#55, D3).
 func newConfigHandler(cfg Config, admins application.AdminService) http.HandlerFunc {
 	snapshot := NewConfigSnapshot(cfg)
-	authorizer := newOperatorAuthorizer(cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds, admins)
+	authorizer := operatorAuthorizerFor(cfg.Auth, cfg.Moderation, admins)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

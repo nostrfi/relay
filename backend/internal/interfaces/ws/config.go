@@ -67,9 +67,16 @@ type AuthConfig struct {
 // configuration. AdminPubkey defaults to RelayInfo.Pubkey — the
 // already-public operator identity — when unset; operators who want a
 // separate moderation credential can set it explicitly.
+//
+// APIOrigin is the origin operator requests must be signed for, e.g.
+// "https://relay.example.com". Empty means the one auth.relay_url implies;
+// set it when the operator APIs are signed for a different origin, such as
+// a dashboard dev server on http://localhost:3000. With neither set, every
+// operator request is refused (nostrfi/relay#60).
 type ModerationConfig struct {
 	AdminPubkey        string `mapstructure:"admin_pubkey"`
 	MaxEventAgeSeconds int    `mapstructure:"max_event_age_seconds"`
+	APIOrigin          string `mapstructure:"api_origin"`
 }
 
 const (
@@ -161,6 +168,12 @@ const ConfigFileEnv = "RELAY_CONFIG_FILE"
 // is less machinery than shipping it a second configuration file.
 const MetricsListenAddrEnv = "RELAY_METRICS_LISTEN_ADDR"
 
+// RelayURLEnv overrides auth.relay_url, which also gives the operator APIs
+// their canonical origin (nostrfi/relay#60). docker-compose.tls.yml sets it
+// to the address Caddy serves, so the shipped deployment signs and verifies
+// for the same origin without editing config.yaml.
+const RelayURLEnv = "RELAY_AUTH_RELAY_URL"
+
 // defaultMetricsListenAddr keeps the metrics listener on loopback unless the
 // operator says otherwise, so a relay upgraded with no configuration change
 // stops serving metrics publicly rather than serving them on a new port.
@@ -216,6 +229,7 @@ func configSearchPaths() []string {
 // bound is a false alarm during routine administration (caught in review on
 // nostrfi/relay#35).
 func (cfg *Config) WarnOnPermissivePublicListener() {
+	cfg.warnOnUnboundOperatorAPIs()
 	if cfg.Websocket.Mode == websocketModeDevelopment && !isLoopbackListenAddr(cfg.Server.ListenAddr) {
 		slog.Warn("websocket.mode is \"development\" on a non-loopback listener; every browser Origin will be accepted",
 			"listen_addr", cfg.Server.ListenAddr,
@@ -242,6 +256,9 @@ func LoadConfig() (*Config, error) {
 	// loopback is container-local, and the dashboard is a different
 	// container.
 	if err := viper.BindEnv("server.metrics_listen_addr", MetricsListenAddrEnv); err != nil {
+		return nil, err
+	}
+	if err := viper.BindEnv("auth.relay_url", RelayURLEnv); err != nil {
 		return nil, err
 	}
 	// See defaultSearchTimeoutSeconds: a config that never mentions the key
@@ -340,4 +357,22 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// warnOnUnboundOperatorAPIs says, once at startup, that every operator
+// request will be refused: there is no canonical origin to bind NIP-98
+// signatures to (nostrfi/relay#60). Each refusal explains itself too, but
+// the operator should not have to make one to find out.
+func (cfg *Config) warnOnUnboundOperatorAPIs() {
+	if canonicalOrigin(cfg.Moderation.APIOrigin, cfg.Auth.RelayURL) != "" {
+		return
+	}
+	if cfg.Moderation.APIOrigin != "" || cfg.Auth.RelayURL != "" {
+		slog.Warn("the operator APIs' canonical URL cannot be parsed; every operator request will be refused",
+			"auth.relay_url", cfg.Auth.RelayURL, "moderation.api_origin", cfg.Moderation.APIOrigin,
+			"expected", "an absolute ws://, wss://, http:// or https:// URL")
+		return
+	}
+	slog.Warn("auth.relay_url is not set; every operator request (NIP-86, /api/config, /api/events) will be refused",
+		"to_enable", "set auth.relay_url to this relay's public wss:// URL, or "+RelayURLEnv)
 }

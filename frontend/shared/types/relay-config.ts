@@ -22,6 +22,8 @@ export interface RelayConfig {
   moderation: {
     admin_pubkey: string
     max_event_age_seconds: number
+    /** The origin operator requests must be signed for; "" refuses them all. */
+    api_origin: string
   }
   websocket: {
     mode: string

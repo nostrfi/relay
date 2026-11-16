@@ -51,7 +51,16 @@ func startTestRelayWithLimits(t *testing.T, info ws.RelayInfo, limits ws.Resourc
 	return startTestRelayFull(t, info, limits, ws.AuthConfig{}, ws.ModerationConfig{}, ws.WebsocketConfig{})
 }
 
+// startTestRelayFull binds the operator APIs to the test server's own origin
+// unless the test configures one itself (auth.relay_url or
+// moderation.api_origin), so a request signed for server.URL is accepted
+// as it would be on a configured relay (nostrfi/relay#60).
 func startTestRelayFull(t *testing.T, info ws.RelayInfo, limits ws.ResourceLimits, auth ws.AuthConfig, moderation ws.ModerationConfig, wsCfg ws.WebsocketConfig) (*httptest.Server, *duckdb.Repository, func()) {
+	t.Helper()
+	return startTestRelayBound(t, info, limits, auth, moderation, wsCfg, auth.RelayURL == "" && moderation.APIOrigin == "")
+}
+
+func startTestRelayBound(t *testing.T, info ws.RelayInfo, limits ws.ResourceLimits, auth ws.AuthConfig, moderation ws.ModerationConfig, wsCfg ws.WebsocketConfig, bindToServer bool) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "relay-test-*")
@@ -68,8 +77,13 @@ func startTestRelayFull(t *testing.T, info ws.RelayInfo, limits ws.ResourceLimit
 
 	eventService := application.NewEventService(repo)
 	moderationService := application.NewModerationService(repo)
+	server := httptest.NewUnstartedServer(nil)
+	if bindToServer {
+		moderation.APIOrigin = "http://" + server.Listener.Addr().String()
+	}
 	h := ws.NewRelayHandlerFull(eventService, moderationService, info, limits, auth, moderation, wsCfg, "test")
-	server := httptest.NewServer(h)
+	server.Config.Handler = h
+	server.Start()
 
 	cleanup := func() {
 		server.Close()
@@ -3926,6 +3940,9 @@ func nip98AuthHeaderAt(t *testing.T, sk, rawURL string, body []byte, createdAt n
 			{"u", rawURL},
 			{"method", http.MethodPost},
 			{"payload", hex.EncodeToString(sum[:])},
+			// Two identical calls in the same second would otherwise be one
+			// event ID, and the relay refuses a reused one (nostrfi/relay#60).
+			{"nonce", nostr.GeneratePrivateKey()[:32]},
 		},
 		Content: "",
 	}
@@ -4386,9 +4403,21 @@ func startTestRelayWithOperatorAPIs(t *testing.T, cfg ws.Config) (*httptest.Serv
 // restart would (nostrfi/relay#55).
 func startOperatorRelayAt(t *testing.T, cfg ws.Config, dbPath string) (*httptest.Server, *duckdb.Repository, func()) {
 	t.Helper()
+	return startOperatorRelayBound(t, cfg, dbPath, true)
+}
+
+func startOperatorRelayBound(t *testing.T, cfg ws.Config, dbPath string, bindToServer bool) (*httptest.Server, *duckdb.Repository, func()) {
+	t.Helper()
 
 	repo, err := duckdb.NewRepository(dbPath)
 	require.NoError(t, err)
+
+	// Bound to the test server's own origin unless the test configured one,
+	// as startTestRelayFull does.
+	server := httptest.NewUnstartedServer(nil)
+	if bindToServer && cfg.Auth.RelayURL == "" && cfg.Moderation.APIOrigin == "" {
+		cfg.Moderation.APIOrigin = "http://" + server.Listener.Addr().String()
+	}
 
 	eventService := application.NewEventService(repo)
 	moderationService := application.NewModerationService(repo)
@@ -4397,7 +4426,8 @@ func startOperatorRelayAt(t *testing.T, cfg ws.Config, dbPath string) (*httptest
 	relayHandler := ws.NewRelayHandlerFull(eventService, moderationService, cfg.RelayInfo, cfg.ResourceLimits, cfg.Auth, cfg.Moderation, cfg.Websocket, "test").
 		UseAdministrators(adminService)
 
-	server := httptest.NewServer(ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg, adminService), ws.WithEventsAPI(cfg, eventService, adminService)))
+	server.Config.Handler = ws.NewMux(relayHandler, repo.Ping, ws.WithAdminAPI(cfg, adminService), ws.WithEventsAPI(cfg, eventService, adminService))
+	server.Start()
 	stop := func() {
 		server.Close()
 		repo.Close()
@@ -4466,7 +4496,9 @@ func TestConfigAPIReportsEffectiveValues(t *testing.T) {
 	}
 	server := startTestRelayWithAdminAPI(t, cfg)
 
-	out, status := callConfigAPI(t, server, operatorSk)
+	// Signed for the public origin auth.relay_url implies, and posted to the
+	// test server's own address, as a TLS-terminating proxy would forward it.
+	out, status, _ := callOperatorAPI(t, server, operatorSk, "/api/config", []byte("{}"), "https://relay.example.com", "")
 	require.Equal(t, http.StatusOK, status)
 
 	section := func(name string) map[string]any {
@@ -4478,6 +4510,7 @@ func TestConfigAPIReportsEffectiveValues(t *testing.T) {
 	assert.Equal(t, float64(1000), section("resource_limits")["max_connections"])
 	assert.Equal(t, "wss://relay.example.com", section("auth")["relay_url"])
 	assert.Equal(t, operatorPk, section("moderation")["admin_pubkey"])
+	assert.Equal(t, "https://relay.example.com", section("moderation")["api_origin"])
 	assert.Equal(t, "production", section("websocket")["mode"])
 	assert.Equal(t, []any{"https://relay.example.com"}, section("websocket")["allowed_origins"])
 	assert.Equal(t, float64(3600), section("retention")["purge_interval_seconds"])
@@ -5459,4 +5492,177 @@ func TestRelayWithoutAdministratorsAdmitsOnlyTheOwner(t *testing.T) {
 	out, status = callManagement(t, server, ownerSk, "assignrole", []any{ownerPk, "admin"})
 	require.Equal(t, http.StatusOK, status)
 	assert.Contains(t, out["error"], "unsupported method")
+}
+
+// callOperatorAPI posts body to server at path, signed by sk for
+// signedOrigin+path, and returns the decoded answer, the status and the
+// Authorization header it sent. A non-empty authorization is sent instead
+// of a fresh signature, to replay one.
+func callOperatorAPI(t *testing.T, server *httptest.Server, sk, path string, body []byte, signedOrigin, authorization string) (map[string]any, int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, server.URL+path, bytes.NewReader(body))
+	require.NoError(t, err)
+	contentType := "application/json"
+	if path == "/" {
+		contentType = "application/nostr+json+rpc"
+	}
+	req.Header.Set("Content-Type", contentType)
+	if authorization == "" {
+		authorization = nip98AuthHeader(t, sk, signedOrigin+path, body)
+	}
+	req.Header.Set("Authorization", authorization)
+
+	resp, err := server.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	var out map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	return out, resp.StatusCode, authorization
+}
+
+// operatorEndpoints are the four endpoints NIP-98 authorizes, with a body
+// each accepts from the owner (nostrfi/relay#60).
+var operatorEndpoints = []struct {
+	name string
+	path string
+	body []byte
+}{
+	{"NIP-86", "/", []byte(`{"method":"supportedmethods","params":[]}`)},
+	{"configuration", "/api/config", []byte(`{}`)},
+	{"events query", "/api/events/query", []byte(`{}`)},
+	{"events stats", "/api/events/stats", []byte(`{}`)},
+}
+
+func operatorConfig(operatorPk string) ws.Config {
+	return ws.Config{
+		RelayInfo:  ws.RelayInfo{Pubkey: operatorPk},
+		Moderation: ws.ModerationConfig{AdminPubkey: operatorPk, MaxEventAgeSeconds: 60},
+	}
+}
+
+// TestNip98RefusesASignatureForAnotherHost covers nostrfi/relay#60: a
+// signature a NIP-07 extension made for another website, at a path that
+// matches one of the relay's, must not be accepted here. It is refused as
+// a verification failure, so the reason is given.
+func TestNip98RefusesASignatureForAnotherHost(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _ := startTestRelayWithOperatorAPIs(t, operatorConfig(operatorPk))
+
+	for _, endpoint := range operatorEndpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			out, status, _ := callOperatorAPI(t, server, operatorSk, endpoint.path, endpoint.body, "https://evil.example", "")
+			require.Equal(t, http.StatusUnauthorized, status)
+			assert.Equal(t, "unauthorized", out["error"])
+			assert.Contains(t, out["reason"], "different host")
+		})
+	}
+
+	t.Run("the attack in the issue grants nothing", func(t *testing.T) {
+		attackerSk := nostr.GeneratePrivateKey()
+		attackerPk, _ := nostr.GetPublicKey(attackerSk)
+		grant := []byte(`{"method":"assignrole","params":["` + attackerPk + `","admin"]}`)
+		_, status, _ := callOperatorAPI(t, server, operatorSk, "/", grant, "https://evil.example", "")
+		require.Equal(t, http.StatusUnauthorized, status)
+
+		_, status = callManagement(t, server, attackerSk, "whoami", []any{})
+		assert.Equal(t, http.StatusUnauthorized, status, "the attacker's key must not have become an administrator")
+	})
+}
+
+// TestNip98AcceptsTheRelaysOriginBehindAProxy covers the shipped topology:
+// Caddy, or the dashboard's server, forwards a request signed for the
+// public https origin to the relay's internal http address.
+func TestNip98AcceptsTheRelaysOriginBehindAProxy(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	cfg := operatorConfig(operatorPk)
+	cfg.Auth.RelayURL = "wss://relay.example.com"
+	server, _ := startTestRelayWithOperatorAPIs(t, cfg)
+
+	for _, endpoint := range operatorEndpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			out, status, _ := callOperatorAPI(t, server, operatorSk, endpoint.path, endpoint.body, "https://relay.example.com", "")
+			assert.Equal(t, http.StatusOK, status, "%v", out)
+		})
+	}
+
+	t.Run("moderation.api_origin overrides it", func(t *testing.T) {
+		cfg := operatorConfig(operatorPk)
+		cfg.Auth.RelayURL = "wss://relay.example.com"
+		cfg.Moderation.APIOrigin = "http://localhost:3000"
+		server, _ := startTestRelayWithOperatorAPIs(t, cfg)
+
+		_, status, _ := callOperatorAPI(t, server, operatorSk, "/api/config", []byte("{}"), "http://localhost:3000", "")
+		assert.Equal(t, http.StatusOK, status)
+		out, status, _ := callOperatorAPI(t, server, operatorSk, "/api/config", []byte("{}"), "https://relay.example.com", "")
+		assert.Equal(t, http.StatusUnauthorized, status)
+		assert.Contains(t, out["reason"], "different host")
+	})
+}
+
+// TestNip98RefusesAReplayedEvent: a valid signature is good for one request,
+// and a replay is answered exactly as an unknown key is.
+func TestNip98RefusesAReplayedEvent(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	server, _ := startTestRelayWithOperatorAPIs(t, operatorConfig(operatorPk))
+
+	for _, endpoint := range operatorEndpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			_, status, authorization := callOperatorAPI(t, server, operatorSk, endpoint.path, endpoint.body, server.URL, "")
+			require.Equal(t, http.StatusOK, status)
+
+			out, status, _ := callOperatorAPI(t, server, operatorSk, endpoint.path, endpoint.body, server.URL, authorization)
+			require.Equal(t, http.StatusUnauthorized, status)
+			// Refused like an unknown key, so a replayer cannot learn the
+			// signer holds a role.
+			assert.Equal(t, map[string]any{"error": "unauthorized"}, out)
+		})
+	}
+}
+
+// TestNip98FailsClosedWithoutACanonicalURL pins the decision for a relay
+// with neither auth.relay_url nor moderation.api_origin: every operator
+// request is refused, and the refusal says what to set.
+func TestNip98FailsClosedWithoutACanonicalURL(t *testing.T) {
+	operatorSk := nostr.GeneratePrivateKey()
+	operatorPk, _ := nostr.GetPublicKey(operatorSk)
+	tmpDir := t.TempDir()
+	server, _, stop := startOperatorRelayBound(t, operatorConfig(operatorPk), filepath.Join(tmpDir, "test.db"), false)
+	t.Cleanup(stop)
+
+	for _, endpoint := range operatorEndpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			out, status, _ := callOperatorAPI(t, server, operatorSk, endpoint.path, endpoint.body, server.URL, "")
+			require.Equal(t, http.StatusUnauthorized, status)
+			assert.Contains(t, out["reason"], "auth.relay_url")
+		})
+	}
+}
+
+// TestNip01RejectsAnEventWhoseIDIsNotItsHash: the signature covers the
+// content, not the claimed id, so an event can keep a valid signature
+// under any id. Found in review of nostrfi/relay#65. Storage keys on the
+// id, so such an event could pose as another (an id a deletion or a ban
+// names, say).
+func TestNip01RejectsAnEventWhoseIDIsNotItsHash(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	ev := nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "forged id"}
+	require.NoError(t, ev.Sign(sk))
+	ok, err := ev.CheckSignature()
+	require.NoError(t, err)
+	require.True(t, ok)
+	ev.ID = strings.Repeat("ab", 32)
+
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "invalid: event id or signature verification failed", okMsg[3])
 }

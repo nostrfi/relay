@@ -124,7 +124,7 @@ type eventStatsResponse struct {
 // today" would need an ingestion timestamp the schema does not record.
 // Everything that renders this is worded accordingly.
 func newEventStatsHandler(cfg Config, events application.EventService, admins application.AdminService) http.HandlerFunc {
-	authorizer := newOperatorAuthorizer(cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds, admins)
+	authorizer := operatorAuthorizerFor(cfg.Auth, cfg.Moderation, admins)
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 

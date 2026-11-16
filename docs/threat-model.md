@@ -114,12 +114,17 @@ threat to exactly one disposition:
    browse and statistics).** Authenticated by NIP-98 signatures from the
    owner (`moderation.admin_pubkey`) or a stored administrator, with a
    freshness window and a bounded request-body reader; every NIP-86 call is
-   logged with the operator's pubkey and role. Administrators are refused
-   (`403`) the configuration API and the role methods, so only the owner can
-   grant or revoke administrators, whether through the API or the dashboard's
-   Administrators page (nostrfi/relay#57). A revocation takes effect on the
-   revoked key's next request. The owner always comes from configuration and
-   cannot be granted, revoked or removed through the API.
+   logged with the operator's pubkey and role. A signature counts only if its
+   `u` tag names this relay's configured origin (`moderation.api_origin`, or
+   the one `auth.relay_url` implies), and only once: the boundary is "signed
+   for this relay, for this request", not "signed by this key". With no
+   origin configured, the API refuses every request (nostrfi/relay#60).
+   Administrators are refused (`403`) the configuration API and the role
+   methods, so only the owner can grant or revoke administrators, whether
+   through the API or the dashboard's Administrators page
+   (nostrfi/relay#57). A revocation takes effect on the revoked key's next
+   request. The owner always comes from configuration and cannot be granted,
+   revoked or removed through the API.
 
 ## Threats and dispositions
 
@@ -203,7 +208,9 @@ threat to exactly one disposition:
 | Ephemeral-event metadata (presence heartbeats, typing indicators, NIP-46 signer traffic) accumulating as a record of user activity | **Mitigated** — NIP-01 ephemeral events (kinds 20000–29999) are broadcast to open subscriptions and never written to DuckDB, so they reach neither the database nor backups. Kind `22242` NIP-42 AUTH events sent as `EVENT` are refused, never broadcast (NIP-42). Ephemeral rows stored by releases before 0.3.0 are deleted by schema migration 6; copies may persist in older backups until those backups rotate. |
 | Deleted/expired content lingering | **Mitigated** — NIP-09 deletions and NIP-40 expiration are honored; the purge worker reclaims expired rows and checkpoints on an interval (workspace #5). Deleted rows may persist in older backups until those backups rotate — **accepted residual**, deployment-layer rotation. |
 | Abuse reports with no intake path | **Mitigated** — NIP-11 contact address, operator triage runbook, and NIP-86 enforcement with logged, authenticated management calls (workspace #9). |
-| Operator-key compromise (owner or administrator) | **Accepted residual, mitigated.** Every administrator is another signing key that can be stolen, so granting administrators makes the compromise surface larger. A stolen administrator key can ban any pubkey, ban any event, block any IP range, and read every stored event through the browse API (only the ciphertext of encrypted messages). It cannot grant or revoke administrators, read or change configuration, or lock the owner out, because bans and IP blocks never apply to the operator APIs. Mitigations: only the owner manages administrators (D2); revocation is immediate; grants and every management call are logged with the operator's pubkey and role; the owner can undo any ban or block. A stolen owner key is a full takeover of the operator APIs. Recovery is to rotate `moderation.admin_pubkey`, then review `listroleassignments` and revoke any grant the operator did not make (README §Administrators). All calls are NIP-98-signed with a 60-second freshness window. Key custody is each operator's responsibility. |
+| Cross-site NIP-98 signature replay | **Mitigated** — nostrfi/relay#60. The relay compared only the `u` tag's path, so a signature a NIP-07 extension made for any website with a matching path (`/`, `/api/config`, …) was accepted: a malicious page could have the owner sign an `assignrole` for itself and replay it, granting a permanent administrator. The `u` tag's origin must now match configuration, and an owner's or administrator's event is refused a second time for its freshness window. A replay is refused exactly as an unknown key is, so it does not reveal that the signer holds a role. Strangers' events are not recorded, so they cannot fill the record, and a live record is never evicted: at 100,000 the relay refuses new operator requests instead, which only role holders can cause. Event IDs are checked against the event's hash, so an edited ID is not a fresh event. The record is lost on restart. Residual: a signature made for this relay's own origin and captured before use can still be used once within 60 seconds. |
+| Events whose ID is not their hash | **Mitigated** — found in review of nostrfi/relay#65. go-nostr's `CheckSignature` verifies the signature over the recomputed content hash and never compares it with the event's own `id`, so an event with a valid signature could claim any ID and be stored under it. `domainevent.NewEvent` now refuses an event whose `id` is not its hash, which covers publishing, NIP-42 `AUTH` and NIP-98. |
+| Operator-key compromise (owner or administrator) | **Accepted residual, mitigated.** Every administrator is another signing key that can be stolen, so granting administrators makes the compromise surface larger. A stolen administrator key can ban any pubkey, ban any event, block any IP range, and read every stored event through the browse API (only the ciphertext of encrypted messages). It cannot grant or revoke administrators, read or change configuration, or lock the owner out, because bans and IP blocks never apply to the operator APIs. Mitigations: only the owner manages administrators (D2); revocation is immediate; grants and every management call are logged with the operator's pubkey and role; the owner can undo any ban or block. A stolen owner key is a full takeover of the operator APIs. Recovery is to rotate `moderation.admin_pubkey`, then review `listroleassignments` and revoke any grant the operator did not make (README §Administrators). All calls are NIP-98-signed with a 60-second freshness window, bound to this relay's origin, and accepted once (nostrfi/relay#60). Key custody is each operator's responsibility. |
 
 ## Accepted-risks register
 
