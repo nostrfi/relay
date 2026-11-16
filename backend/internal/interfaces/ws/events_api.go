@@ -84,7 +84,7 @@ type eventQueryResponse struct {
 // it requires the payload tag, which needs a body to hash. A GET with query
 // parameters could not be signed the same way.
 func newEventsQueryHandler(cfg Config, events application.EventService, admins application.AdminService) http.HandlerFunc {
-	authorizer := newOperatorAuthorizer(cfg.Moderation.AdminPubkey, cfg.Moderation.MaxEventAgeSeconds, admins)
+	authorizer := operatorAuthorizerFor(cfg.Auth, cfg.Moderation, admins)
 	maxLimit := fallbackMaxEventQueryLimit
 	if cfg.RelayInfo.Limitation != nil && cfg.RelayInfo.Limitation.MaxLimit > 0 {
 		maxLimit = cfg.RelayInfo.Limitation.MaxLimit

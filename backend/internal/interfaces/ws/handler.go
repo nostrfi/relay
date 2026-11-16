@@ -95,7 +95,7 @@ func NewRelayHandlerFull(events application.EventService, moderationSvc applicat
 		moderation:        moderationCfg,
 		websocket:         ws,
 	}
-	h.operators = newOperatorAuthorizer(moderationCfg.AdminPubkey, moderationCfg.MaxEventAgeSeconds, nil)
+	h.operators = operatorAuthorizerFor(auth, moderationCfg, nil)
 	h.upgrader = websocket.Upgrader{CheckOrigin: h.checkOrigin}
 	return h
 }
@@ -109,7 +109,7 @@ func NewRelayHandlerFull(events application.EventService, moderationSvc applicat
 // NewRelayHandlerFull call sites keep their meaning unchanged.
 func (h *RelayHandler) UseAdministrators(admins application.AdminService) *RelayHandler {
 	h.admins = admins
-	h.operators = newOperatorAuthorizer(h.moderation.AdminPubkey, h.moderation.MaxEventAgeSeconds, admins)
+	h.operators = operatorAuthorizerFor(h.auth, h.moderation, admins)
 	return h
 }
 

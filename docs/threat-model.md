@@ -100,8 +100,13 @@ threat to exactly one disposition:
    can read every stored envelope, ciphertext, and backup. Controls are
    procedural (`operating-model.md`'s operator-access responsibilities).
 5. **Operator ↔ NIP-86 management API.** Authenticated by NIP-98 signatures
-   from `moderation.admin_pubkey`, with a freshness window and a bounded
-   request-body reader; every call is logged.
+   from the owner (`moderation.admin_pubkey`) or an administrator, with a
+   freshness window and a bounded request-body reader; every call is logged.
+   A signature counts only if its `u` tag names this relay's configured
+   origin (`moderation.api_origin`, or the one `auth.relay_url` implies), and
+   only once: the boundary is "signed for this relay, for this request", not
+   "signed by this key". With no origin configured, the API refuses every
+   request (nostrfi/relay#60).
 
 ## Threats and dispositions
 
@@ -185,6 +190,8 @@ threat to exactly one disposition:
 | Ephemeral-event metadata (presence heartbeats, typing indicators, NIP-46 signer traffic) accumulating as a record of user activity | **Mitigated** — NIP-01 ephemeral events (kinds 20000–29999) are broadcast to open subscriptions and never written to DuckDB, so they reach neither the database nor backups. Kind `22242` NIP-42 AUTH events sent as `EVENT` are refused, never broadcast (NIP-42). Ephemeral rows stored by releases before 0.3.0 are deleted by schema migration 6; copies may persist in older backups until those backups rotate. |
 | Deleted/expired content lingering | **Mitigated** — NIP-09 deletions and NIP-40 expiration are honored; the purge worker reclaims expired rows and checkpoints on an interval (workspace #5). Deleted rows may persist in older backups until those backups rotate — **accepted residual**, deployment-layer rotation. |
 | Abuse reports with no intake path | **Mitigated** — NIP-11 contact address, operator triage runbook, and NIP-86 enforcement with logged, authenticated management calls (workspace #9). |
+| Cross-site NIP-98 signature replay | **Mitigated** — nostrfi/relay#60. The relay compared only the `u` tag's path, so a signature a NIP-07 extension made for any website with a matching path (`/`, `/api/config`, …) was accepted: a malicious page could have the owner sign an `assignrole` for itself and replay it, granting a permanent administrator. The `u` tag's origin must now match configuration, and an owner's or administrator's event is refused a second time for its freshness window. A replay is refused exactly as an unknown key is, so it does not reveal that the signer holds a role. Strangers' events are not recorded, so they cannot fill the record, and a live record is never evicted: at 100,000 the relay refuses new operator requests instead, which only role holders can cause. Event IDs are checked against the event's hash, so an edited ID is not a fresh event. The record is lost on restart. Residual: a signature made for this relay's own origin and captured before use can still be used once within 60 seconds. |
+| Events whose ID is not their hash | **Mitigated** — found in review of nostrfi/relay#65. go-nostr's `CheckSignature` verifies the signature over the recomputed content hash and never compares it with the event's own `id`, so an event with a valid signature could claim any ID and be stored under it. `domainevent.NewEvent` now refuses an event whose `id` is not its hash, which covers publishing, NIP-42 `AUTH` and NIP-98. |
 | Moderation-key compromise | **Accepted residual** — `moderation.admin_pubkey` grants ban/unban control (not data read-out); calls are NIP-98-signed with a 60-second freshness window and logged. Key custody is an operator responsibility. |
 
 ## Accepted-risks register

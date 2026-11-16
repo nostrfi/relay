@@ -27,12 +27,21 @@ resource_limits:
   search_timeout_seconds: 5 # a NIP-50 search past this budget is cancelled and answered with CLOSED; 0 disables
 
 auth:
-  relay_url: "" # set to this relay's canonical wss:// URL to enable NIP-42 endpoint binding
+  # This relay's public wss:// URL. Binds NIP-42 AUTH to it, and gives the
+  # operator APIs (NIP-86, /api/config, /api/events) the origin their NIP-98
+  # signatures must name. When neither this nor moderation.api_origin gives
+  # a usable origin, every operator request is refused (nostrfi/relay#60).
+  # Overridden by RELAY_AUTH_RELAY_URL.
+  relay_url: ""
   max_event_age_seconds: 600 # NIP-42 AUTH events older or further in the future than this are rejected
 
 moderation:
   admin_pubkey: "" # NIP-86 management API caller must sign as this pubkey (NIP-98); defaults to relay_info.pubkey when empty
   max_event_age_seconds: 60 # NIP-98 auth events older or further in the future than this are rejected
+  # The origin operator requests are signed for, when it is not the one
+  # auth.relay_url implies, e.g. "http://localhost:3000" for the dashboard's
+  # dev server. Empty uses auth.relay_url.
+  api_origin: ""
 
 websocket:
   # "development" accepts a browser connection from any Origin — the right

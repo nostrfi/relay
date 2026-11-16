@@ -19,7 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const authTestURL = "http://relay.test/api/config"
+const (
+	authTestURL    = "http://relay.test/api/config"
+	authTestOrigin = "http://relay.test"
+)
 
 // signedOperatorRequest is a POST to authTestURL carrying a NIP-98 header
 // signed by sk over body.
@@ -79,14 +82,14 @@ func TestOperatorAuthorizer(t *testing.T) {
 		wantStatus int // 0 when admitted
 		wantReason string
 	}{
-		{"owner at owner level", newOperatorAuthorizer("", 60, roles), ownerSk, admin.RoleOwner, admin.RoleOwner, 0, ""},
-		{"owner at admin level", newOperatorAuthorizer("", 60, roles), ownerSk, admin.RoleAdmin, admin.RoleOwner, 0, ""},
-		{"administrator at admin level", newOperatorAuthorizer("", 60, roles), adminSk, admin.RoleAdmin, admin.RoleAdmin, 0, ""},
-		{"administrator at owner level", newOperatorAuthorizer("", 60, roles), adminSk, admin.RoleOwner, admin.RoleAdmin, http.StatusForbidden, "owner only"},
-		{"stranger is refused without a reason", newOperatorAuthorizer("", 60, roles), strangerSk, admin.RoleAdmin, admin.RoleNone, http.StatusUnauthorized, ""},
-		{"no roles service admits the owner", newOperatorAuthorizer(ownerPk, 60, nil), ownerSk, admin.RoleOwner, admin.RoleOwner, 0, ""},
-		{"no roles service refuses an administrator", newOperatorAuthorizer(ownerPk, 60, nil), adminSk, admin.RoleAdmin, admin.RoleNone, http.StatusUnauthorized, ""},
-		{"no owner configured is explained", newOperatorAuthorizer("", 60, stubRoles{admins: map[string]bool{adminPk: true}}), adminSk, admin.RoleAdmin, admin.RoleNone, http.StatusUnauthorized, "no operator pubkey configured"},
+		{"owner at owner level", newOperatorAuthorizer("", 60, authTestOrigin, roles), ownerSk, admin.RoleOwner, admin.RoleOwner, 0, ""},
+		{"owner at admin level", newOperatorAuthorizer("", 60, authTestOrigin, roles), ownerSk, admin.RoleAdmin, admin.RoleOwner, 0, ""},
+		{"administrator at admin level", newOperatorAuthorizer("", 60, authTestOrigin, roles), adminSk, admin.RoleAdmin, admin.RoleAdmin, 0, ""},
+		{"administrator at owner level", newOperatorAuthorizer("", 60, authTestOrigin, roles), adminSk, admin.RoleOwner, admin.RoleAdmin, http.StatusForbidden, "owner only"},
+		{"stranger is refused without a reason", newOperatorAuthorizer("", 60, authTestOrigin, roles), strangerSk, admin.RoleAdmin, admin.RoleNone, http.StatusUnauthorized, ""},
+		{"no roles service admits the owner", newOperatorAuthorizer(ownerPk, 60, authTestOrigin, nil), ownerSk, admin.RoleOwner, admin.RoleOwner, 0, ""},
+		{"no roles service refuses an administrator", newOperatorAuthorizer(ownerPk, 60, authTestOrigin, nil), adminSk, admin.RoleAdmin, admin.RoleNone, http.StatusUnauthorized, ""},
+		{"no owner configured is explained", newOperatorAuthorizer("", 60, authTestOrigin, stubRoles{admins: map[string]bool{adminPk: true}}), adminSk, admin.RoleAdmin, admin.RoleNone, http.StatusUnauthorized, "no operator pubkey configured"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, role, err := tc.authorizer.authorize(signedOperatorRequest(t, tc.sk, body), body, tc.minimum)
@@ -115,7 +118,7 @@ func TestOperatorAuthorizer(t *testing.T) {
 func TestOperatorAuthorizerExplainsVerificationFailures(t *testing.T) {
 	ownerSk := nostr.GeneratePrivateKey()
 	ownerPk, _ := nostr.GetPublicKey(ownerSk)
-	authorizer := newOperatorAuthorizer(ownerPk, 60, nil)
+	authorizer := newOperatorAuthorizer(ownerPk, 60, authTestOrigin, nil)
 
 	// Signed over a different body: the payload hash cannot match.
 	r := signedOperatorRequest(t, ownerSk, []byte("{}"))

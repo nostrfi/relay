@@ -73,6 +73,16 @@ describe('buildRelayAuthTemplate', () => {
     expect(payloadOf(spaced)).not.toBe(payloadOf(original)) // …but any byte difference shows
   })
 
+  it('makes identical calls distinct events, since the relay accepts each once', async () => {
+    // nostrfi/relay#60: the same body signed twice in one second would
+    // otherwise be one event ID, and the second call a refused replay.
+    const nonceOf = (t: { tags: string[][] }) => t.tags.find(x => x[0] === 'nonce')?.[1]
+    const first = await buildRelayAuthTemplate({ path: '/', origin: ORIGIN, body, createdAt: 1_700_000_000 })
+    const second = await buildRelayAuthTemplate({ path: '/', origin: ORIGIN, body, createdAt: 1_700_000_000 })
+    expect(nonceOf(first)).toMatch(/^[0-9a-f]{32}$/)
+    expect(nonceOf(first)).not.toBe(nonceOf(second))
+  })
+
   it('signs into an event the relay can verify', async () => {
     const template = await buildRelayAuthTemplate({ path: '/', origin: ORIGIN, body })
     const signed = finalizeEvent(template, generateSecretKey())

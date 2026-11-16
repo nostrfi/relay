@@ -12,6 +12,12 @@
 services:
   relay:
     ports: !override []
+    environment:
+      # The address Caddy serves, which is what browsers and the dashboard
+      # sign for. The relay refuses operator requests signed for any other
+      # host (nostrfi/relay#60). Change it with your domain, e.g.
+      # RELAY_URL=wss://relay.example.com, and keep the Caddyfile in step.
+      - RELAY_AUTH_RELAY_URL=${RELAY_URL:-wss://localhost:8443}
 
   caddy:
     image: caddy:2-alpine

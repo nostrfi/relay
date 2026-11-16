@@ -8,6 +8,20 @@ import {
 const PUBKEY = 'ec642f38bfef46ab7bcdb5aea1dcdc98ca20cbb4cec7fa1066cafbb5a8b07008'
 
 describe('describeRelayRefusal', () => {
+  it('explains a signature for another host, which only the address bar can fix', () => {
+    // nostrfi/relay#60: the relay accepts only its configured origin.
+    const refusal = describeRelayRefusal({
+      relayReason: 'u tag "https://localhost:3000/" names a different host than this relay (https://relay.example.com)'
+    })
+    expect(refusal.headline).toContain('https://relay.example.com')
+    expect(refusal.causes).toHaveLength(1)
+    expect(refusal.causes[0]).toContain('auth.relay_url')
+  })
+
+  it('adds no cause to other relay reasons', () => {
+    expect(describeRelayRefusal({ relayReason: 'payload tag does not match request body hash' }).causes).toEqual([])
+  })
+
   it('names a slow approval precisely, because that one is knowable', () => {
     // The client measured it, so this is not a guess. A stale signature is
     // the most likely cause when a human had to approve a prompt.

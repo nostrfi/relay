@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"relay/internal/application"
 	"relay/internal/domain/admin"
@@ -52,18 +53,41 @@ func (f *operatorAuthFailure) Unwrap() error { return f.err }
 // roles may be nil, in which case only the owner is admitted: the behaviour
 // every release before 0.3.0 had, and what a handler built without an
 // AdminService still gets.
+//
+// origin is the canonical origin requests must be signed for (see
+// canonicalOrigin). When it is "", every request is refused with an
+// explanation: an unbound NIP-98 check accepts signatures made for other
+// websites (nostrfi/relay#60).
 type operatorAuthorizer struct {
 	owner              string
 	roles              application.AdminService
 	maxEventAgeSeconds int
+	origin             string
+	replays            *nip98ReplayGuard
 }
 
-func newOperatorAuthorizer(owner string, maxEventAgeSeconds int, roles application.AdminService) operatorAuthorizer {
+func newOperatorAuthorizer(owner string, maxEventAgeSeconds int, origin string, roles application.AdminService) operatorAuthorizer {
 	if roles != nil {
 		owner = roles.Owner()
 	}
-	return operatorAuthorizer{owner: owner, roles: roles, maxEventAgeSeconds: maxEventAgeSeconds}
+	return operatorAuthorizer{
+		owner:              owner,
+		roles:              roles,
+		maxEventAgeSeconds: maxEventAgeSeconds,
+		origin:             origin,
+		replays:            newNip98ReplayGuard(defaultNip98ReplayCapacity),
+	}
 }
+
+// operatorAuthorizerFor builds the authorizer from the relay's configuration.
+func operatorAuthorizerFor(auth AuthConfig, moderation ModerationConfig, roles application.AdminService) operatorAuthorizer {
+	return newOperatorAuthorizer(moderation.AdminPubkey, moderation.MaxEventAgeSeconds, canonicalOrigin(moderation.APIOrigin, auth.RelayURL), roles)
+}
+
+// noOriginReason is what a caller is told when the relay has no canonical
+// origin. Safe to say, like a missing owner key: it is configuration, and
+// says nothing about anyone's key.
+const noOriginReason = "this relay has no canonical URL for its operator APIs; set auth.relay_url (or moderation.api_origin) in its config.yaml"
 
 func (a operatorAuthorizer) roleOf(pubkey string) admin.Role {
 	if a.roles != nil {
@@ -83,11 +107,18 @@ func (a operatorAuthorizer) roleOf(pubkey string) admin.Role {
 // (errInsufficientRole, a 403): they have already proved who they are, and
 // "owner only" tells them nothing about anyone else's key.
 func (a operatorAuthorizer) authorize(r *http.Request, body []byte, minimum admin.Role) (string, admin.Role, error) {
-	pubkey, err := verifyNip98(r, body, a.maxEventAgeSeconds)
+	if a.origin == "" {
+		return "", admin.RoleNone, &operatorAuthFailure{
+			PublicReason: noOriginReason,
+			err:          fmt.Errorf("no canonical origin is configured (auth.relay_url, moderation.api_origin)"),
+		}
+	}
+	verified, err := verifyNip98(r, body, a.maxEventAgeSeconds, a.origin)
 	if err != nil {
 		wrapped := fmt.Errorf("NIP-98 verification failed: %w", err)
 		return "", admin.RoleNone, &operatorAuthFailure{PublicReason: err.Error(), err: wrapped}
 	}
+	pubkey := verified.PubKey
 	if a.owner == "" {
 		// Not an identity failure, and safe to say: there is no operator
 		// identity here to confirm or deny. The relay is misconfigured, and
@@ -104,6 +135,25 @@ func (a operatorAuthorizer) authorize(r *http.Request, body []byte, minimum admi
 	role := a.roleOf(pubkey)
 	if role == admin.RoleNone {
 		return "", admin.RoleNone, &operatorAuthFailure{err: fmt.Errorf("pubkey %s is neither the owner nor an administrator", pubkey)}
+	}
+	// Only now, for a key that holds a role, is the event recorded: a
+	// stranger's events are refused anyway, so they need no record and must
+	// not fill one (see nip98ReplayGuard).
+	//
+	// A replay is refused exactly like an unknown key, without a reason.
+	// Explaining it would tell whoever replayed a captured signature that
+	// its signer holds a role, since a stranger's replay never gets here.
+	expiresAt := time.Unix(int64(verified.CreatedAt)+int64(a.maxEventAgeSeconds)+1, 0)
+	switch a.replays.claim(verified.ID, expiresAt) {
+	case claimReplayed:
+		return "", admin.RoleNone, &operatorAuthFailure{err: fmt.Errorf("NIP-98 event %s from %s replayed", verified.ID, pubkey)}
+	case claimFull:
+		// Reachable only by the owner and administrators themselves: tens of
+		// thousands of signed requests within one freshness window.
+		return "", admin.RoleNone, &operatorAuthFailure{
+			PublicReason: "too many operator requests in the last minute; try again shortly",
+			err:          fmt.Errorf("NIP-98 replay record is full"),
+		}
 	}
 	if !role.Satisfies(minimum) {
 		return pubkey, role, &insufficientRoleError{pubkey: pubkey, role: role, minimum: minimum}
