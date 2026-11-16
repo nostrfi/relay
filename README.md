@@ -9,6 +9,89 @@ This is a two-part monorepo:
 
 The relay's threat model (assets, trust boundaries, every identified threat and its disposition, and the accepted risks) is in [`docs/threat-model.md`](docs/threat-model.md).
 
+## Running in development
+
+Run the relay and the dashboard as two local processes. The dashboard's dev server reloads on every
+change and calls the relay at `http://localhost:8080`.
+
+### Prerequisites
+
+- **Go**, at the version in [`backend/go.mod`](backend/go.mod) or newer, and a **C compiler**
+  (`gcc` or `clang`). The DuckDB driver uses cgo.
+- **Node.js 22** and **pnpm** at the version pinned in `frontend/package.json`'s `packageManager`
+  field. `corepack enable` installs it.
+- A Nostr signer to sign in to the dashboard: a NIP-07 browser extension or a NIP-46 bunker.
+
+### 1. Make a local relay config
+
+`backend/config.local.yaml` is git-ignored, so start from a copy of the default:
+
+```bash
+cp backend/config.yaml backend/config.local.yaml
+```
+
+In the copy, set two values under `moderation`:
+
+```yaml
+moderation:
+  admin_pubkey: "<your 64-character hex pubkey>" # you are the owner of your local relay
+  api_origin: "http://localhost:3000"            # the dashboard dev server's address
+```
+
+- **`admin_pubkey`** makes your key the owner. Left empty, it falls back to `relay_info.pubkey`, which
+  is not your key, so you could not sign in.
+- **`api_origin`** is required. Operator signatures must name this relay's origin, and with no
+  origin configured the relay refuses every operator request
+  (see [Moderation](#moderation-nip-86--nip-98)). The dashboard signs for the address your browser
+  sees, `http://localhost:3000`.
+
+The relay accepts one origin at a time. To call the operator APIs with `nak` or `curl` against
+`http://localhost:8080` instead, set `api_origin: "http://localhost:8080"` and restart the relay.
+
+### 2. Start the relay
+
+```bash
+cd backend
+RELAY_CONFIG_FILE=config.local.yaml go run ./cmd/relay
+```
+
+It listens on `:8080` for WebSocket and HTTP, and serves metrics on `127.0.0.1:2112`. The database is
+`backend/db/relay.db`. Check it is up with `curl http://localhost:8080/readyz`, which answers `ready`.
+The startup warning about `websocket.mode` being `development` is expected locally.
+
+### 3. Start the dashboard
+
+In a second terminal:
+
+```bash
+cd frontend
+pnpm install
+printf 'NUXT_SESSION_PASSWORD=%s\n' "$(openssl rand -base64 48)" > .env
+pnpm dev
+```
+
+`frontend/.env` is git-ignored. The dashboard refuses to open a session without
+`NUXT_SESSION_PASSWORD`. It reaches the relay at `http://localhost:8080` and its metrics at
+`http://localhost:2112` by default; override them with `NUXT_RELAY_API_BASE` and
+`NUXT_RELAY_METRICS_BASE`.
+
+Open <http://localhost:3000/admin> and sign in with the key you set as `admin_pubkey`.
+
+### Checks before a pull request
+
+CI runs the same checks (see [Continuous integration](#continuous-integration)), so run them
+locally first:
+
+```bash
+cd backend && go vet ./... && go test -race ./...
+```
+
+```bash
+cd frontend && pnpm lint && pnpm typecheck && pnpm test && pnpm build
+```
+
+To run the published images instead of the dev servers, see [Deployment](#deployment).
+
 ## Supported NIPs
 
 - **NIP-01**: Basic protocol flow (ephemeral events, kinds 20000–29999, are delivered to open subscriptions but never stored)
