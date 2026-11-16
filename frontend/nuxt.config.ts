@@ -36,14 +36,7 @@ export default defineNuxtConfig({
     // Server-only: seals the admin session cookie. There is deliberately no
     // fallback value — server/utils/session.ts fails closed when this is
     // unset or too short, rather than sealing sessions with a known secret.
-    sessionPassword: process.env.NUXT_SESSION_PASSWORD || '',
-
-    // Server-only: the pubkey allowed to open a dashboard session. Defaults
-    // to the relay's NIP-11 pubkey when unset, mirroring how the relay
-    // defaults moderation.admin_pubkey to relay_info.pubkey. It must match
-    // the relay's moderation.admin_pubkey: the relay, not this value, is
-    // what authorizes privileged actions.
-    adminPubkey: process.env.NUXT_ADMIN_PUBKEY || ''
+    sessionPassword: process.env.NUXT_SESSION_PASSWORD || ''
   },
 
   // Unovis ships untranspiled ESM that Nitro will not consume as-is.

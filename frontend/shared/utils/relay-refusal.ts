@@ -103,23 +103,19 @@ export function describeRelayRefusal(context: RelayRefusalContext = {}): RelayRe
     }
   }
 
-  // Strong, from public information: the relay publishes its operator
-  // identity, and moderation.admin_pubkey defaults to it.
-  if (context.relayPubkey && context.signingPubkey && context.relayPubkey !== context.signingPubkey) {
-    return {
-      headline: `You signed as ${context.signingPubkey}, but the relay publishes ${context.relayPubkey} as its operator. Unless moderation.admin_pubkey is set to your key, the relay will refuse every privileged call.`,
-      causes: []
-    }
-  }
+  // The relay's published NIP-11 pubkey is deliberately not compared with
+  // the signer here. It names the owner, and administrators sign with keys
+  // of their own (nostrfi/relay#55), so a difference is no evidence of
+  // anything.
 
   const causes = [
     `The signature expired before it arrived — the relay rejects any older than ${maxAge} seconds, so a slow approval or a clock more than ${maxAge} seconds out will fail.`,
-    'The key you signed with is not the relay\'s configured operator. The dashboard\'s NUXT_ADMIN_PUBKEY and the relay\'s moderation.admin_pubkey are set separately and must name the same key.',
+    'The key you signed with is not the relay\'s owner or one of its administrators — it may have been revoked since you signed in.',
     'The relay is reached at a different path than the one signed, which a reverse proxy that rewrites paths would cause.'
   ]
 
   if (context.signedInPubkey) {
-    causes[1] = `The key you signed with is not the relay's configured operator. You signed in as ${context.signedInPubkey}; the dashboard's NUXT_ADMIN_PUBKEY and the relay's moderation.admin_pubkey are set separately and must name the same key.`
+    causes[1] = `The key you signed with is not the relay's owner or one of its administrators. You signed in as ${context.signedInPubkey}; if you are an administrator, the owner may have revoked that grant since.`
   }
 
   return {

@@ -146,8 +146,8 @@ describe('operatorKeysMatch', () => {
   })
 
   it('is false when they have drifted apart', () => {
-    // NUXT_ADMIN_PUBKEY and moderation.admin_pubkey are set separately;
-    // this is the only place an operator learns they disagree.
+    // Ownership moved in config.yaml after this session opened; this is
+    // where the owner learns it before the next role re-check does.
     expect(operatorKeysMatch('a'.repeat(64), 'b'.repeat(64))).toBe(false)
   })
 

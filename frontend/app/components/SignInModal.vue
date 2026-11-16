@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { refusalDiagnosticsFrom } from '~~/shared/utils/relay-refusal'
+
 /**
  * The dashboard's only sign-in surface. Triggered from the header, so a
  * visitor reading the public relay page can sign in without leaving it.
@@ -61,8 +63,17 @@ async function signIn(create: () => Promise<Signer>, kind: Pending) {
 
 function messageFor(cause: unknown): string {
   const status = (cause as { statusCode?: number })?.statusCode
+  // The relay explains a refused signature (a clock out of step, a path a
+  // proxy rewrote) but never whether a key holds a role.
+  const relayReason = refusalDiagnosticsFrom(cause).relayReason
+  if (status === 401 && relayReason) {
+    return `The relay rejected the signature: ${relayReason}`
+  }
   if (status === 401) {
-    return 'That key is not this relay\'s configured operator.'
+    return 'That key is not this relay\'s owner or one of its administrators.'
+  }
+  if (status === 502 || status === 504) {
+    return 'The relay could not be reached to confirm your role. Try again shortly.'
   }
   if (status === 429) {
     return 'Too many attempts. Wait a minute and try again.'
@@ -75,7 +86,7 @@ function messageFor(cause: unknown): string {
   <UModal
     v-model:open="open"
     title="Sign in"
-    description="Prove ownership of the relay operator key to reach the dashboard."
+    description="Sign with the relay owner's key or an administrator's. Your signer asks twice: once to prove the key is yours, once to ask the relay what it may do."
   >
     <slot />
 

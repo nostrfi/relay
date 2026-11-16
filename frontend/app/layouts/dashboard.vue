@@ -18,15 +18,25 @@ import { npubEncode } from 'nostr-tools/nip19'
  * takes the Sovereign hero treatment. See CODINGSTANDARDS.md, "Styling and
  * brand".
  */
-const links = [
+const allLinks = [
   { label: 'Overview', icon: 'i-lucide-layout-dashboard', to: '/dashboard' },
   { label: 'Events', icon: 'i-lucide-list', to: '/dashboard/events' },
   { label: 'Moderation', icon: 'i-lucide-shield-ban', to: '/dashboard/moderation' },
   { label: 'Metrics', icon: 'i-lucide-activity', to: '/dashboard/metrics' },
-  { label: 'Configuration', icon: 'i-lucide-settings', to: '/dashboard/configuration' }
+  // Owner only (D3): the relay refuses /api/config to administrators.
+  { label: 'Configuration', icon: 'i-lucide-settings', to: '/dashboard/configuration', ownerOnly: true }
 ]
 
 const { state, logout } = useAdminSession()
+
+// Hidden rather than disabled: an administrator has no use for a link to a
+// page the relay will not serve them. The page's own ownerOnly meta and the
+// server route back this up; this is only the menu.
+const links = computed(() => allLinks
+  .filter(link => !link.ownerOnly || state.value?.role === 'owner')
+  .map(({ ownerOnly: _ownerOnly, ...link }) => link))
+
+const roleLabel = computed(() => state.value?.role === 'owner' ? 'Owner' : state.value?.role === 'admin' ? 'Administrator' : null)
 
 // Truncated with the full value kept accessible, per the brand rule for
 // protocol identifiers.
@@ -78,11 +88,22 @@ async function signOut() {
           Signing *in* stays on the public shell's modal — one sign-in
           surface, per CODINGSTANDARDS.md, "Authentication and sessions".
         -->
-        <span
+        <div
           v-if="npub && !collapsed"
-          class="nf-npub font-mono truncate"
-          :title="npub.full"
-        >{{ npub.short }}</span>
+          class="nf-identity"
+        >
+          <span
+            class="nf-npub font-mono truncate"
+            :title="npub.full"
+          >{{ npub.short }}</span>
+          <UBadge
+            v-if="roleLabel"
+            :label="roleLabel"
+            size="sm"
+            variant="subtle"
+            color="neutral"
+          />
+        </div>
 
         <!--
           The theme control lives here rather than in a header, because the
@@ -128,6 +149,13 @@ async function signOut() {
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--ui-text-highlighted);
+}
+
+.nf-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
 }
 
 .nf-npub {

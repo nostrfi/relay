@@ -13,6 +13,16 @@
  * The session is re-read on every navigation rather than cached, so an
  * expired or externally cleared cookie is noticed immediately instead of
  * leaving the operator in a signed-in UI whose requests all fail.
+ *
+ * A page that sets `definePageMeta({ ownerOnly: true })` sends an
+ * administrator back to the overview (nostrfi/relay#56). The server route
+ * behind it refuses them anyway; this only spares them a page that cannot
+ * load.
+ *
+ * Navigation does not itself re-check the role. Every page's own signed
+ * relay call already does that, at no extra prompt (see
+ * server/utils/relay-forward.ts); the one view without a signed call,
+ * Metrics, re-checks on its own when the server asks it to.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
   const { refresh } = useAdminSession()
@@ -26,5 +36,9 @@ export default defineNuxtRouteMiddleware(async (to) => {
     // Back to the public page with the sign-in modal open, rather than to a
     // second sign-in surface that would drift from the modal.
     return navigateTo({ path: '/', query: { signin: '1' } })
+  }
+
+  if (to.meta.ownerOnly && session.role !== 'owner') {
+    return navigateTo('/dashboard')
   }
 })
