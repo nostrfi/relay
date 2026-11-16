@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0](https://github.com/nostrfi/relay/compare/v0.2.0...v0.3.0) (2026-11-16)
+
+
+### Features
+
+* **admin:** store administrators and authorize them on operator endpoints ([#55](https://github.com/nostrfi/relay/issues/55)) ([#59](https://github.com/nostrfi/relay/issues/59)) ([936fbb6](https://github.com/nostrfi/relay/commit/936fbb6d9f086b174cc0a8f2ec2fec75a46f60a9))
+* **dashboard:** manage administrators ([#57](https://github.com/nostrfi/relay/issues/57)) ([#66](https://github.com/nostrfi/relay/issues/66)) ([48e3f34](https://github.com/nostrfi/relay/commit/48e3f3409f5538ff73891a9e4eb961c9c410d1ae))
+* **dashboard:** sign in administrators by relay role ([#56](https://github.com/nostrfi/relay/issues/56)) ([#62](https://github.com/nostrfi/relay/issues/62)) ([1e02e36](https://github.com/nostrfi/relay/commit/1e02e3677f6c0d28180a7eba2563a01df90e83fc))
+* **nip01:** broadcast ephemeral events without storing them ([#53](https://github.com/nostrfi/relay/issues/53)) ([adb6654](https://github.com/nostrfi/relay/commit/adb66543b5dd6e58b555edca069b54692c0e84ba))
+
+
+### Bug Fixes
+
+* **admin:** address security review of administrator grants ([#61](https://github.com/nostrfi/relay/issues/61)) ([f07fa65](https://github.com/nostrfi/relay/commit/f07fa6558b38d725100aecd40834407e15a4d2a0))
+* **dashboard:** address review of relay-role sign-in ([#56](https://github.com/nostrfi/relay/issues/56)) ([#63](https://github.com/nostrfi/relay/issues/63)) ([a88bdf9](https://github.com/nostrfi/relay/commit/a88bdf9c554504541eb31e2662457e7855160824))
+* **dashboard:** revoke sessions on re-login and restart ([#56](https://github.com/nostrfi/relay/issues/56)) ([#64](https://github.com/nostrfi/relay/issues/64)) ([771f07e](https://github.com/nostrfi/relay/commit/771f07e15a5920ba94cdc5b67dfc5eab41f1f9e1))
+* **nip98:** bind operator auth to this relay's origin and refuse replays ([#60](https://github.com/nostrfi/relay/issues/60)) ([#65](https://github.com/nostrfi/relay/issues/65)) ([8ef5fca](https://github.com/nostrfi/relay/commit/8ef5fca414edd0926a7b90c8391f6aa6a092aaff))
+
 ## [0.2.0](https://github.com/nostrfi/relay/compare/v0.1.0...v0.2.0) (2026-11-12)
 
 
