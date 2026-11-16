@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { H3Event } from 'h3'
 import type { DashboardRole } from '~~/shared/types/session'
 import { isDashboardRole, roleRecheckDue, roleSatisfies } from '~~/shared/utils/session-role'
@@ -22,6 +23,8 @@ const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
 const MIN_PASSWORD_LENGTH = 32
 
 export interface AdminSessionData {
+  /** Issued fresh at each sign-in; what logout revokes (see endedSessions). */
+  sid?: string
   pubkey?: string
   /** What the relay's `whoami` answered at sign-in or at the last re-check. */
   role?: DashboardRole
@@ -35,6 +38,34 @@ export interface ActiveAdminSession {
   pubkey: string
   role: DashboardRole
   roleCheckedAt?: number
+}
+
+/**
+ * Sessions logged out before their cookie expired, by sid, with the time
+ * their cookie would have expired.
+ *
+ * A sealed cookie cannot be withdrawn from the browser: clearing it only
+ * works if no later response sets it again. A re-check that was waiting on
+ * the relay when the operator logged out answers afterwards, with a fresh
+ * cookie for the same session. Remembering the sid here makes that cookie —
+ * and any other copy of it — useless.
+ *
+ * Held in process memory, like the login challenges (server/utils/challenge.ts):
+ * the dashboard runs as one Node process. A restart forgets it, which reopens
+ * only the narrow window of a re-check racing a logout.
+ */
+const endedSessions = new Map<string, number>()
+
+function pruneEndedSessions(now: number): void {
+  for (const [sid, expiresAt] of endedSessions) {
+    if (expiresAt <= now) {
+      endedSessions.delete(sid)
+    }
+  }
+}
+
+function sessionWasEnded(sid: string | undefined): boolean {
+  return sid === undefined || endedSessions.has(sid)
 }
 
 function sessionConfig(event: H3Event) {
@@ -78,11 +109,11 @@ export async function getAdminSession(event: H3Event): Promise<AdminSessionData>
  * A cookie sealed before sessions carried a role (dashboards before
  * nostrfi/relay#56) has a pubkey but no role. It is treated as signed out:
  * the relay never said what that key may do, and one more sign-in costs
- * less than guessing.
+ * less than guessing. So is one without a sid, or whose sid was logged out.
  */
 export async function getActiveAdminSession(event: H3Event): Promise<ActiveAdminSession | null> {
   const data = await getAdminSession(event)
-  if (!data.pubkey || !isDashboardRole(data.role)) {
+  if (!data.pubkey || !isDashboardRole(data.role) || sessionWasEnded(data.sid)) {
     return null
   }
   return { pubkey: data.pubkey, role: data.role, roleCheckedAt: data.roleCheckedAt }
@@ -124,22 +155,34 @@ export async function requireAdminSession(event: H3Event, options: RequireAdminS
 export async function startAdminSession(event: H3Event, pubkey: string, role: DashboardRole): Promise<void> {
   const session = await useSession<AdminSessionData>(event, sessionConfig(event))
   const now = Math.floor(Date.now() / 1000)
-  await session.update({ pubkey, role, loggedInAt: now, roleCheckedAt: now })
+  await session.update({ sid: randomUUID(), pubkey, role, loggedInAt: now, roleCheckedAt: now })
 }
 
-/** Records that the relay has just confirmed the session's role. */
-export async function confirmAdminRole(event: H3Event, role?: DashboardRole): Promise<void> {
+/**
+ * Records that the relay has just confirmed the session's role.
+ *
+ * Returns false, writing nothing, when there is no session to confirm — in
+ * particular one logged out while the relay was being asked.
+ */
+export async function confirmAdminRole(event: H3Event, role?: DashboardRole): Promise<boolean> {
   const session = await useSession<AdminSessionData>(event, sessionConfig(event))
-  if (!session.data.pubkey) {
-    return
+  if (!session.data.pubkey || sessionWasEnded(session.data.sid)) {
+    return false
   }
   await session.update({
     ...(role ? { role } : {}),
     roleCheckedAt: Math.floor(Date.now() / 1000)
   })
+  return true
 }
 
 export async function endAdminSession(event: H3Event): Promise<void> {
   const session = await useSession<AdminSessionData>(event, sessionConfig(event))
+  const { sid, loggedInAt } = session.data
+  if (sid && loggedInAt) {
+    const now = Date.now()
+    pruneEndedSessions(now)
+    endedSessions.set(sid, (loggedInAt + SESSION_MAX_AGE_SECONDS) * 1000)
+  }
   await session.clear()
 }

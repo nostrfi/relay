@@ -61,7 +61,9 @@ export function useAdminSession() {
     }
 
     // The dashboard's half first: the relay's half has the tighter freshness
-    // window (60 seconds), so it is signed last, closest to being sent.
+    // window (60 seconds from its own signature), so it is signed last,
+    // closest to being sent. The dashboard's half waits out the second
+    // approval, so login allows it as long as the challenge lives.
     const signed = await signer.signEvent(template)
     const whoami = await sign(signer, '/', WHOAMI_REQUEST)
 
@@ -91,16 +93,23 @@ export function useAdminSession() {
    */
   function recheck(): Promise<SessionState> {
     recheckInFlight ??= (async () => {
+      let signingPubkey: string | undefined
       try {
-        const { authorization, body } = await withSigner(state.value?.pubkey, signer => sign(signer, '/', WHOAMI_REQUEST))
-        state.value = await $fetch<SessionState>('/api/session/recheck', {
+        const signed = await withSigner(state.value?.pubkey, signer => sign(signer, '/', WHOAMI_REQUEST))
+        signingPubkey = signed.pubkey
+        const session = await $fetch<SessionState>('/api/session/recheck', {
           method: 'POST',
-          body,
-          headers: { 'Content-Type': 'application/json', 'Authorization': authorization }
+          body: signed.body,
+          headers: { 'Content-Type': 'application/json', 'Authorization': signed.authorization }
         })
-        return state.value
+        // Logged out, or signed in as someone else, while this was in flight.
+        if (state.value?.pubkey !== signingPubkey) {
+          throw new Error('The session changed during the role re-check')
+        }
+        state.value = session
+        return session
       } catch (cause) {
-        await signOutIfSessionEnded(cause)
+        await signOutIfSessionEnded(cause, signingPubkey)
         throw cause
       } finally {
         recheckInFlight = null
@@ -114,9 +123,14 @@ export function useAdminSession() {
    * recognises this key — an administrator revoked while signed in. The
    * server has already cleared the session; logging out here also drops the
    * stored signer pairing and sends the browser to sign in again.
+   *
+   * `signingPubkey` is the key the failed request was signed with. A request
+   * that outlived its session — the operator logged out, or another
+   * administrator signed in, while it was in flight — must not end the
+   * session that replaced it.
    */
-  async function signOutIfSessionEnded(cause: unknown): Promise<boolean> {
-    if (!sessionEndedBy(cause)) {
+  async function signOutIfSessionEnded(cause: unknown, signingPubkey: string | undefined): Promise<boolean> {
+    if (!sessionEndedBy(cause) || !signingPubkey || state.value?.pubkey !== signingPubkey) {
       return false
     }
     await logout().catch(() => {})

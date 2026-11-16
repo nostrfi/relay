@@ -1,4 +1,5 @@
 import type { SessionState } from '~~/shared/types/session'
+import { signerPubkeyOf } from '~~/shared/utils/session-role'
 
 /**
  * Re-confirms the session's role with a `whoami` the browser signed (D5,
@@ -20,19 +21,26 @@ export default defineEventHandler(async (event): Promise<SessionState> => {
     throw createError({ statusCode: 429, statusMessage: 'Too many re-check attempts' })
   }
 
+  const authorization = getRequestHeader(event, 'authorization')
   const outcome = await askRelayWhoami(
     event,
     session.pubkey,
-    getRequestHeader(event, 'authorization'),
+    authorization,
     await readRawBody(event, 'utf8')
   )
 
   if (outcome.kind === 'role') {
-    await confirmAdminRole(event, outcome.role)
+    // False when the session was logged out while the relay was answering:
+    // the re-check must not bring it back.
+    if (!await confirmAdminRole(event, outcome.role)) {
+      throw createError({ statusCode: 401, statusMessage: 'Not authenticated', data: { sessionEnded: true } })
+    }
     return { authenticated: true, pubkey: session.pubkey, role: outcome.role, roleRecheckDue: false }
   }
 
-  if (outcome.evidence === 'revoked') {
+  // Only a refusal of the session's own key says anything about the session,
+  // as in forwardSignedRequest.
+  if (outcome.evidence === 'revoked' && signerPubkeyOf(authorization) === session.pubkey) {
     console.warn('dashboard session ended at re-check: the relay no longer recognises the signed-in key', session.pubkey)
     await endAdminSession(event)
     throw createError({ statusCode: 401, statusMessage: 'Unauthorized', data: { sessionEnded: true } })
@@ -40,6 +48,11 @@ export default defineEventHandler(async (event): Promise<SessionState> => {
 
   // A verification failure or a malformed request says nothing about the
   // role, so the session stays and the browser can try again.
+  if (outcome.answer?.response.ok) {
+    // The relay answered, but not about this session's key (another key
+    // signed the whoami). Passing its 200 through would read as success.
+    throw createError({ statusCode: 403, statusMessage: 'The relay did not confirm the signed-in key' })
+  }
   if (outcome.answer) {
     throw await relayRefusal(event, outcome.answer, '/')
   }
