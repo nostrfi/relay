@@ -15,7 +15,10 @@ import { randomBytes } from 'node:crypto'
  * dashboard could be scaled to more than one replica.
  */
 
-const CHALLENGE_TTL_MS = 5 * 60 * 1000
+/** How long an issued challenge can be redeemed. */
+export const CHALLENGE_TTL_SECONDS = 5 * 60
+
+const CHALLENGE_TTL_MS = CHALLENGE_TTL_SECONDS * 1000
 
 /**
  * Bounds memory if the unauthenticated challenge endpoint is hammered.

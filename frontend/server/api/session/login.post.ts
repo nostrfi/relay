@@ -18,8 +18,16 @@ import type { SessionState } from '~~/shared/types/session'
  * is no endpoint that answers "is X an admin?" without both.
  */
 
-/** The signed event must be recent, matching the relay's NIP-98 default. */
-const MAX_EVENT_AGE_SECONDS = 60
+/**
+ * How old the signed login event may be.
+ *
+ * Longer than the relay's 60-second NIP-98 window on purpose: the browser
+ * signs this event first and the relay's `whoami` second, so this one waits
+ * out the operator's second approval too. Replay is already bounded by the
+ * challenge it carries, which is redeemable once and only within its own
+ * lifetime, so allowing that same lifetime here widens nothing.
+ */
+const MAX_EVENT_AGE_SECONDS = CHALLENGE_TTL_SECONDS
 
 /** Attempts per address before login refuses; signature checks cost CPU. */
 const LOGIN_RATE_LIMIT = { limit: 10, windowMs: 60_000 }
@@ -64,7 +72,7 @@ export default defineEventHandler(async (event): Promise<SessionState> => {
 
   if (outcome.kind !== 'role') {
     const relayReason = (outcome.answer?.parsed as { reason?: unknown } | null)?.reason
-    if (outcome.answer && typeof relayReason === 'string' && relayReason !== '') {
+    if (outcome.answer && !outcome.answer.response.ok && typeof relayReason === 'string' && relayReason !== '') {
       // A verification failure of the relay-bound signature (clock skew, a
       // path a proxy rewrote): safe to explain, as the relay itself judged,
       // and otherwise undiagnosable from the browser.

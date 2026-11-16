@@ -31,7 +31,7 @@ export function useRelayConfig() {
     } catch (cause) {
       // The relay no longer recognises this key (a revoked administrator):
       // the server has ended the session, so leave the signed-in UI.
-      if (await signOutIfSessionEnded(cause)) {
+      if (await signOutIfSessionEnded(cause, pubkey)) {
         throw cause
       }
       if ((cause as { statusCode?: number })?.statusCode !== 401) {

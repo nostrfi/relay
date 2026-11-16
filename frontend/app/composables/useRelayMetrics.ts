@@ -124,6 +124,11 @@ export function useRelayMetrics() {
       stop()
       return
     }
+    // A declined re-check stays declined: only refresh() may prompt the
+    // signer again, or returning to the tab would ask every time.
+    if (recheckBlocked) {
+      return
+    }
     paused.value = false
     start()
   }
