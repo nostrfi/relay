@@ -11,7 +11,9 @@ import {
 useSeoMeta({ title: 'Configuration' })
 
 // Private by default — see app/middleware/auth.global.ts.
-definePageMeta({ layout: 'dashboard' })
+// Owner only (D3, nostrfi/relay#56): the relay refuses /api/config to
+// administrators, and the middleware sends them back to the overview.
+definePageMeta({ layout: 'dashboard', ownerOnly: true })
 
 const { state } = useAdminSession()
 const { fetchConfig } = useRelayConfig()
@@ -62,10 +64,10 @@ const sections = computed(() => (config.value ? configSections(config.value) : [
 const noResourceLimits = computed(() => hasNoResourceLimits(config.value))
 
 /**
- * The relay's operator key against the one signed into the dashboard. These
- * are configured separately — the relay's `moderation.admin_pubkey` and the
- * dashboard's `NUXT_ADMIN_PUBKEY` — and nothing showed you when they had
- * drifted apart.
+ * The relay's owner key against the one signed into the dashboard. Sign-in
+ * asks the relay, so the two agree when the session opens; they can drift
+ * only if `moderation.admin_pubkey` changes while the session is open, which
+ * the next role re-check settles.
  */
 const operatorMatch = computed(() => operatorKeysMatch(config.value?.moderation.admin_pubkey, state.value?.pubkey))
 </script>
@@ -160,10 +162,9 @@ const operatorMatch = computed(() => operatorKeysMatch(config.value?.moderation.
           class="mb-6 rounded-(--ui-radius) border border-(--ui-warning) px-4 py-3 text-sm text-(--ui-warning)"
           role="status"
         >
-          The relay's admin pubkey is not the key you signed in with. The dashboard's
-          <code class="font-mono">NUXT_ADMIN_PUBKEY</code> and the relay's
-          <code class="font-mono">moderation.admin_pubkey</code> should name the same operator —
-          privileged relay calls will be refused until they do.
+          The relay's owner key, <code class="font-mono">moderation.admin_pubkey</code>, is no
+          longer the key you signed in with — it changed after this session opened. Sign out and
+          sign in again with the key that now owns the relay.
         </p>
 
         <UCard

@@ -547,7 +547,9 @@ dashboard makes, this one carries **no NIP-98 signature**: what stands in for on
 `/metrics` is served on the relay's separate metrics listener, which the deployment does not
 publish, so the dashboard's server can read it over the internal network and nobody outside can —
 and the operator driving it is authenticated by their dashboard session. That is what makes a live
-view possible; a signed endpoint would cost one signer prompt per poll.
+view possible; a signed endpoint would cost one signer prompt per poll. Because the session is the
+only check on this route, it needs a role the relay has confirmed recently — see the re-check under
+[Admin dashboard sign-in](#admin-dashboard-sign-in).
 
 The dashboard is told where that listener is with `NUXT_RELAY_METRICS_BASE` (default
 `http://localhost:2112`, matching the relay's own default). `docker-compose.yml` sets it to
@@ -571,35 +573,65 @@ Query-latency `p50` and `p95` are estimated from the histogram buckets by interp
 
 `/admin` itself is public: it renders the relay's NIP-11 information, the same document the relay
 serves to any anonymous caller. Everything else lives under `/admin/dashboard` — the overview, plus
-`/moderation` and `/configuration` beneath it — and requires a pubkey login. The operator proves ownership of a key by signing a NIP-98 kind-`27235` event over
-the login endpoint, with a browser extension (NIP-07) or a remote signer (NIP-46 bunker), and the
-dashboard's Nuxt server opens a session for them.
+`/moderation` and `/configuration` beneath it — and requires a pubkey login by the relay's
+**owner** or one of its [administrators](#administrators). The operator signs with a browser
+extension (NIP-07) or a remote signer (NIP-46 bunker), and the dashboard's Nuxt server opens a
+session for them once the relay has said which role their key holds. The dashboard keeps no list
+of administrators: the relay is the only authority on who may sign in.
+
+Administrators see every page except **Configuration**, which is owner only, as the relay's
+configuration API is. The sidebar shows the signed-in role next to the npub.
 
 Sign-in is a **Sign in** action in the public page's header, which opens a modal with both
 options; the signed-in pages carry the identity and a **Sign out** in their sidebar instead.
 Reaching a private page while signed out returns to `/admin` with that modal open.
 
-Two environment variables configure it on the `dashboard` service:
+One environment variable configures it on the `dashboard` service:
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `NUXT_SESSION_PASSWORD` | yes | Seals the session cookie. At least 32 characters; generate per deployment with `openssl rand -base64 48`. The dashboard refuses to open a session when it is unset or too short rather than falling back to a known secret. |
-| `NUXT_ADMIN_PUBKEY` | no | Hex pubkey allowed to sign in. Defaults to the relay's NIP-11 `pubkey`, mirroring how `moderation.admin_pubkey` defaults. Set it when `moderation.admin_pubkey` differs, and keep the two in step. |
 
-The session is an **identity assertion, not a capability**. It records which pubkey signed in and
-gates the dashboard UI; it is not a credential the relay accepts. Privileged relay operations
-continue to require their own per-request NIP-98 signature checked against
-`moderation.admin_pubkey`, exactly as described above — so a stolen session cookie yields dashboard
-access, never the ability to mutate relay state.
+**Upgrading from 0.2:** `NUXT_ADMIN_PUBKEY` is no longer read. The owner is
+`moderation.admin_pubkey` in the relay's `config.yaml`, as before; the dashboard now asks the relay
+instead of keeping its own copy, so the two can no longer drift apart. A dashboard that still has the
+variable set logs one warning at startup and otherwise ignores it. Sessions opened before the
+upgrade carry no role and ask you to sign in once more.
+
+The session is an **identity assertion, not a capability**. It records which pubkey signed in, and
+the role the relay last confirmed for it, and gates the dashboard UI; it is not a credential the
+relay accepts. Privileged relay operations continue to require their own per-request NIP-98
+signature, which the relay checks against the owner and its administrators, exactly as described
+above — so a stolen session cookie yields dashboard access, never the ability to mutate relay state.
 
 The login flow itself:
 
 1. The browser requests a one-time challenge from the dashboard.
 2. It signs a kind-`27235` event tagged with `u` (the login URL), `method`, and that `challenge`.
-3. It sends the event in an `Authorization: Nostr <base64>` header with an empty body — the same
-   header convention the NIP-86 API uses.
-4. The server verifies the signature, freshness, tags, and challenge, checks the pubkey against the
-   admin pubkey, and sets an httpOnly, `Secure`, `SameSite=Lax` cookie scoped to `/admin`.
+3. It signs a NIP-86 [`whoami`](#administrators) for the relay — a second signer prompt, by design.
+4. It sends the login event in an `Authorization: Nostr <base64>` header — the same header
+   convention the NIP-86 API uses — with the relay-bound event in `X-Relay-Authorization` and the
+   `whoami` call as the body.
+5. The server verifies the login event's signature, freshness, tags, and challenge. Only then does it
+   forward the `whoami`, unchanged, to the relay, which verifies that signature itself and answers
+   with the key's role.
+6. A session opens only when the relay names `owner` or `admin` **for the same key** that signed the
+   challenge. The server sets an httpOnly, `Secure`, `SameSite=Lax` cookie scoped to `/admin`.
+
+A key that is neither owner nor administrator gets the same generic refusal as ever, and the
+dashboard has no unsigned way to ask whether a key is an administrator. If the relay rejects the
+`whoami` signature itself — a clock out of step, a path a proxy rewrote — the sign-in dialog shows
+the relay's reason, as the other pages do.
+
+**Revoking an administrator** ends their dashboard access as well as their relay access:
+
+- The relay refuses the revoked key's next signed request. When the dashboard forwards that refusal
+  for the session's own key, it ends the session and returns the browser to sign-in.
+- Every signed request the relay accepts confirms the role. When none has done so for 15 minutes,
+  the next Metrics poll — `/metrics` is the one view the relay does not authorize itself — asks the
+  signer to approve one more `whoami`. A revoked key is signed out
+  there; a declined prompt pauses Metrics until you refresh it. At most 15 minutes of metrics are
+  therefore visible to a key after it is revoked, and nothing else is.
 
 Sessions last 8 hours. Signing out clears the cookie and any stored bunker pairing, and returns to
 the public page. Login and challenge requests are rate-limited per client address.

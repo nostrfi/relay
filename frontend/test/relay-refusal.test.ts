@@ -35,7 +35,7 @@ describe('describeRelayRefusal', () => {
     // mismatched u tag all answer with an identical bare 401.
     const causes = describeRelayRefusal({ signingMs: 500 }).causes.join(' ')
     expect(causes).toContain('expired')
-    expect(causes).toContain('operator')
+    expect(causes).toContain('administrator')
     expect(causes).toContain('path')
   })
 
@@ -43,8 +43,9 @@ describe('describeRelayRefusal', () => {
     const refusal = describeRelayRefusal({ signingMs: 500, signedInPubkey: PUBKEY })
     const keyCause = refusal.causes.find(c => c.includes(PUBKEY))
     expect(keyCause).toBeDefined()
-    expect(keyCause).toContain('NUXT_ADMIN_PUBKEY')
-    expect(keyCause).toContain('moderation.admin_pubkey')
+    expect(keyCause).toContain('administrator')
+    expect(keyCause).toContain('revoked')
+    expect(keyCause).not.toContain('NUXT_ADMIN_PUBKEY')
   })
 
   it('copes with an unmeasured signature', () => {
@@ -138,16 +139,16 @@ describe('describeRelayRefusal with observed facts', () => {
     expect(refusal.headline).not.toContain('signed for')
   })
 
-  it('names a key mismatch from the relay\'s public identity', () => {
+  it('does not treat a signer other than the published owner as the cause', () => {
+    // An administrator signs with their own key, never the NIP-11 one
+    // (nostrfi/relay#56), so the difference proves nothing.
     const refusal = describeRelayRefusal({
       signingPubkey: 'a'.repeat(64),
       relayPubkey: 'b'.repeat(64),
       browserTimeSeconds: NOW
     })
-    expect(refusal.headline).toContain('a'.repeat(64))
-    expect(refusal.headline).toContain('b'.repeat(64))
-    expect(refusal.headline).toContain('moderation.admin_pubkey')
-    expect(refusal.causes).toEqual([])
+    expect(refusal.headline).not.toContain('publishes')
+    expect(refusal.causes.length).toBe(3)
   })
 
   it('stays quiet when the signing key matches the published operator', () => {
@@ -266,7 +267,7 @@ describe('the relay\'s own account of a refusal', () => {
       relayPubkey: 'b'.repeat(64),
       browserTimeSeconds: 1_800_000_000
     })
-    expect(refusal.headline).toContain('publishes')
+    expect(refusal.causes.length).toBe(3)
   })
 
   it('is carried through the thrown error body', async () => {

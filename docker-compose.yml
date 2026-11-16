@@ -57,10 +57,8 @@ services:
       # open a session without it, rather than falling back to a known
       # secret. Generate one per deployment: `openssl rand -base64 48`.
       - NUXT_SESSION_PASSWORD=${NUXT_SESSION_PASSWORD:?set NUXT_SESSION_PASSWORD, e.g. in a .env file}
-      # Which pubkey may sign in. Defaults to the relay's NIP-11 pubkey when
-      # empty; set it when the relay's moderation.admin_pubkey differs, and
-      # keep the two in step.
-      - NUXT_ADMIN_PUBKEY=${NUXT_ADMIN_PUBKEY:-}
+      # Who may sign in is the relay's to say — its owner and administrators
+      # (nostrfi/relay#56) — so NUXT_ADMIN_PUBKEY is gone.
     healthcheck:
       # node:22-bookworm-slim has no wget; healthcheck.js uses Node's
       # built-in fetch instead, avoiding an apt-get layer just for this.

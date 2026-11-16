@@ -1,10 +1,13 @@
 import type { H3Event } from 'h3'
+import type { DashboardRole } from '~~/shared/types/session'
+import { isDashboardRole, roleRecheckDue, roleSatisfies } from '~~/shared/utils/session-role'
 
 /**
  * Sealed-cookie session for the admin dashboard, via h3's built-in
  * useSession — no session store and no extra dependency. The cookie holds
- * only the authenticated pubkey; it is not a bearer credential for the
- * relay, which continues to demand a signature per privileged action.
+ * the authenticated pubkey and the role the relay last confirmed for it; it
+ * is not a bearer credential for the relay, which continues to demand a
+ * signature per privileged action.
  */
 
 const SESSION_NAME = 'nf-admin-session'
@@ -20,7 +23,18 @@ const MIN_PASSWORD_LENGTH = 32
 
 export interface AdminSessionData {
   pubkey?: string
+  /** What the relay's `whoami` answered at sign-in or at the last re-check. */
+  role?: DashboardRole
   loggedInAt?: number
+  /** Unix seconds when the relay last confirmed the role. */
+  roleCheckedAt?: number
+}
+
+/** A session that can be acted on: signed in, with a role the relay named. */
+export interface ActiveAdminSession {
+  pubkey: string
+  role: DashboardRole
+  roleCheckedAt?: number
 }
 
 function sessionConfig(event: H3Event) {
@@ -59,21 +73,70 @@ export async function getAdminSession(event: H3Event): Promise<AdminSessionData>
 }
 
 /**
+ * The session as something to act on, or null.
+ *
+ * A cookie sealed before sessions carried a role (dashboards before
+ * nostrfi/relay#56) has a pubkey but no role. It is treated as signed out:
+ * the relay never said what that key may do, and one more sign-in costs
+ * less than guessing.
+ */
+export async function getActiveAdminSession(event: H3Event): Promise<ActiveAdminSession | null> {
+  const data = await getAdminSession(event)
+  if (!data.pubkey || !isDashboardRole(data.role)) {
+    return null
+  }
+  return { pubkey: data.pubkey, role: data.role, roleCheckedAt: data.roleCheckedAt }
+}
+
+export interface RequireAdminSessionOptions {
+  /** The least role the route needs; any signed-in role when absent. */
+  minimum?: DashboardRole
+  /**
+   * Refuse once the role confirmation has lapsed. For routes the relay does
+   * not authorize itself, where the session is the only check there is.
+   */
+  freshRole?: boolean
+}
+
+/**
  * Guard for every server route that returns relay data or proxies an action.
  * Route middleware in the Nuxt app only redirects the browser; it is not a
  * security boundary, so protected handlers call this themselves.
  */
-export async function requireAdminSession(event: H3Event): Promise<string> {
-  const data = await getAdminSession(event)
-  if (!data.pubkey) {
+export async function requireAdminSession(event: H3Event, options: RequireAdminSessionOptions = {}): Promise<ActiveAdminSession> {
+  const session = await getActiveAdminSession(event)
+  if (!session) {
     throw createError({ statusCode: 401, statusMessage: 'Not authenticated' })
   }
-  return data.pubkey
+  if (options.minimum && !roleSatisfies(session.role, options.minimum)) {
+    throw createError({ statusCode: 403, statusMessage: `${options.minimum === 'owner' ? 'Owner' : 'Administrator'} only` })
+  }
+  if (options.freshRole && roleRecheckDue(session.roleCheckedAt)) {
+    throw createError({
+      statusCode: 401,
+      statusMessage: 'Role re-check required',
+      data: { roleRecheckRequired: true }
+    })
+  }
+  return session
 }
 
-export async function startAdminSession(event: H3Event, pubkey: string): Promise<void> {
+export async function startAdminSession(event: H3Event, pubkey: string, role: DashboardRole): Promise<void> {
   const session = await useSession<AdminSessionData>(event, sessionConfig(event))
-  await session.update({ pubkey, loggedInAt: Math.floor(Date.now() / 1000) })
+  const now = Math.floor(Date.now() / 1000)
+  await session.update({ pubkey, role, loggedInAt: now, roleCheckedAt: now })
+}
+
+/** Records that the relay has just confirmed the session's role. */
+export async function confirmAdminRole(event: H3Event, role?: DashboardRole): Promise<void> {
+  const session = await useSession<AdminSessionData>(event, sessionConfig(event))
+  if (!session.data.pubkey) {
+    return
+  }
+  await session.update({
+    ...(role ? { role } : {}),
+    roleCheckedAt: Math.floor(Date.now() / 1000)
+  })
 }
 
 export async function endAdminSession(event: H3Event): Promise<void> {

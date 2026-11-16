@@ -9,7 +9,7 @@ import { createRelayRefusalError, refusalDiagnosticsFrom } from '~~/shared/utils
  */
 export function useRelayConfig() {
   const { sign } = useRelayRequest()
-  const { state } = useAdminSession()
+  const { state, signOutIfSessionEnded } = useAdminSession()
 
   async function fetchConfig(): Promise<RelayConfig> {
     // Signed through the shared signer queue, so this cannot collide with a
@@ -29,6 +29,11 @@ export function useRelayConfig() {
         }
       })
     } catch (cause) {
+      // The relay no longer recognises this key (a revoked administrator):
+      // the server has ended the session, so leave the signed-in UI.
+      if (await signOutIfSessionEnded(cause)) {
+        throw cause
+      }
       if ((cause as { statusCode?: number })?.statusCode !== 401) {
         throw cause
       }

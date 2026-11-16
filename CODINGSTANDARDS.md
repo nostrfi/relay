@@ -113,8 +113,19 @@ Authentication and sessions:
 
 - **The session is an identity assertion, not a capability.** It records which pubkey signed in and
   gates the UI. It is not a credential the relay accepts — every privileged relay operation carries
-  its own per-request NIP-98 signature, checked by the relay against `moderation.admin_pubkey`. Do
-  not add a server-issued token that stands in for a signature.
+  its own per-request NIP-98 signature, checked by the relay against its owner and administrators.
+  Do not add a server-issued token that stands in for a signature.
+- **The relay decides roles; the dashboard records them.** Sign-in and the role re-check forward a
+  browser-signed NIP-86 `whoami` and store what the relay answered. Never keep a list of
+  administrators in the dashboard, and never add an unsigned way to ask whether a key holds a role.
+- **Gate owner-only work in three places.** An owner-only page sets
+  `definePageMeta({ ownerOnly: true })`, its link in `layouts/dashboard.vue` sets `ownerOnly: true`,
+  and its server route calls `requireAdminSession(event, { minimum: 'owner' })`. The relay still
+  enforces the role itself; these keep administrators off pages that cannot load.
+- **Proxy signed relay calls through `forwardSignedRequest`** (`server/utils/relay-forward.ts`). It
+  keeps the body byte-for-byte, and it is how a revoked administrator's session ends at their next
+  refused call. A route the relay does not authorize itself (metrics) passes `freshRole: true` to
+  `requireAdminSession` instead.
 - **Route middleware is not a security boundary.** `app/middleware/auth.global.ts` only redirects
   the browser. Every `server/api/*` route that returns operational state or proxies an action must
   call `requireAdminSession(event)` itself.

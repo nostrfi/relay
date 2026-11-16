@@ -1,11 +1,21 @@
 import type { SessionState } from '~~/shared/types/session'
 
 /**
- * Opens a dashboard session for a pubkey that proves key ownership by
- * signing a NIP-98 event over this endpoint, carrying a server-issued
- * challenge. The signed event travels in the Authorization header, exactly
- * as the relay's NIP-86 API expects one, so the whole codebase has a single
- * convention for pubkey-authenticated HTTP.
+ * Opens a dashboard session for the relay's owner or one of its
+ * administrators.
+ *
+ * Two signatures arrive together, from the same key:
+ *
+ *   - Authorization: a NIP-98 event over this endpoint carrying a
+ *     server-issued challenge, which proves the caller holds the key now;
+ *   - X-Relay-Authorization, with the body: a NIP-86 `whoami` signed for
+ *     the relay, forwarded verbatim, whose answer says what that key may do.
+ *
+ * The relay decides the role (D4, nostrfi/relay#56); this route holds no
+ * list of administrators. The `whoami` goes through here rather than the
+ * moderation proxy because that proxy needs a session, and this keeps the
+ * rate limit and the one-time challenge in front of the relay call — there
+ * is no endpoint that answers "is X an admin?" without both.
  */
 
 /** The signed event must be recent, matching the relay's NIP-98 default. */
@@ -44,14 +54,31 @@ export default defineEventHandler(async (event): Promise<SessionState> => {
     throw unauthorized
   }
 
-  const adminPubkey = await resolveAdminPubkey(event)
-  if (!adminPubkey || verified.pubkey !== adminPubkey) {
-    console.warn('dashboard login rejected: pubkey is not the configured operator', verified.pubkey)
+  // Only now, with the challenge spent, is the relay asked anything.
+  const outcome = await askRelayWhoami(
+    event,
+    verified.pubkey,
+    getRequestHeader(event, 'x-relay-authorization'),
+    await readRawBody(event, 'utf8')
+  )
+
+  if (outcome.kind !== 'role') {
+    const relayReason = (outcome.answer?.parsed as { reason?: unknown } | null)?.reason
+    if (outcome.answer && typeof relayReason === 'string' && relayReason !== '') {
+      // A verification failure of the relay-bound signature (clock skew, a
+      // path a proxy rewrote): safe to explain, as the relay itself judged,
+      // and otherwise undiagnosable from the browser.
+      console.warn('dashboard login rejected: the relay refused the whoami signature:', relayReason)
+      throw await relayRefusal(event, outcome.answer, '/')
+    }
+    // Identity stays generic, exactly as before administrators existed: a
+    // stranger learns nothing about which keys matter.
+    console.warn('dashboard login rejected: the relay names no role for pubkey', verified.pubkey)
     throw unauthorized
   }
 
-  await startAdminSession(event, verified.pubkey)
-  console.info('dashboard session opened', verified.pubkey)
+  await startAdminSession(event, verified.pubkey, outcome.role)
+  console.info('dashboard session opened', verified.pubkey, outcome.role)
 
-  return { authenticated: true, pubkey: verified.pubkey }
+  return { authenticated: true, pubkey: verified.pubkey, role: outcome.role, roleRecheckDue: false }
 })

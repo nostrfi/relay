@@ -14,7 +14,7 @@ import { createRelayRefusalError, refusalDiagnosticsFrom } from '~~/shared/utils
  */
 export function useModeration() {
   const { sign } = useRelayRequest()
-  const { state } = useAdminSession()
+  const { state, signOutIfSessionEnded } = useAdminSession()
 
   async function call<T>(method: string, params: unknown[]): Promise<Nip86Response<T>> {
     // Signing waits its turn — the page loads three lists at once and a
@@ -35,6 +35,11 @@ export function useModeration() {
         }
       })
     } catch (cause) {
+      // The relay no longer recognises this key (a revoked administrator):
+      // the server has ended the session, so leave the signed-in UI.
+      if (await signOutIfSessionEnded(cause)) {
+        throw cause
+      }
       if ((cause as { statusCode?: number })?.statusCode !== 401) {
         throw cause
       }

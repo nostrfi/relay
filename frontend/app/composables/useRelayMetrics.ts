@@ -19,6 +19,7 @@ const MAX_SAMPLES = 60
  * rate were computed from the nominal period rather than the timestamps.
  */
 export function useRelayMetrics() {
+  const { recheck } = useAdminSession()
   const samples = ref<MetricsSnapshot[]>([])
   const ready = ref<boolean | null>(null)
   const error = ref('')
@@ -27,6 +28,8 @@ export function useRelayMetrics() {
 
   let timer: ReturnType<typeof setTimeout> | null = null
   let inFlight = false
+  /** Set when a role re-check failed; polling waits for the operator. */
+  let recheckBlocked = false
 
   async function sample() {
     // One at a time. With setInterval, a sample slower than the interval
@@ -39,7 +42,7 @@ export function useRelayMetrics() {
     inFlight = true
     polling.value = true
     try {
-      const response = await $fetch<MetricsResponse>('/api/metrics')
+      const response = await fetchMetrics()
       samples.value = [...samples.value, response.snapshot].slice(-MAX_SAMPLES)
       ready.value = response.ready
       error.value = ''
@@ -52,9 +55,40 @@ export function useRelayMetrics() {
       // And readiness becomes unknown rather than staying green: the last
       // "ready" is a statement about a relay this page can no longer reach.
       ready.value = null
+      if (recheckBlocked) {
+        error.value = `Metrics need your signer to re-confirm your role: ${error.value}`
+        paused.value = true
+        stop()
+      }
     } finally {
       inFlight = false
       polling.value = false
+    }
+  }
+
+  /**
+   * Reads one snapshot. Metrics are the one view the relay does not
+   * authorize itself, so the dashboard asks for a recent role confirmation
+   * first (D5, nostrfi/relay#56). When it has lapsed, one signed `whoami`
+   * renews it and the read is retried; a revoked key is signed out instead.
+   */
+  async function fetchMetrics(): Promise<MetricsResponse> {
+    try {
+      return await $fetch<MetricsResponse>('/api/metrics')
+    } catch (cause) {
+      const body = (cause as { data?: { data?: { roleRecheckRequired?: unknown } } })?.data
+      if (body?.data?.roleRecheckRequired !== true) {
+        throw cause
+      }
+      try {
+        await recheck()
+      } catch (recheckCause) {
+        // Declined or unreachable signer. Polling on would ask again every
+        // five seconds, so stop until the operator asks for a sample.
+        recheckBlocked = true
+        throw recheckCause
+      }
+      return await $fetch<MetricsResponse>('/api/metrics')
     }
   }
 
@@ -63,7 +97,7 @@ export function useRelayMetrics() {
     stop()
     timer = setTimeout(async () => {
       await sample()
-      if (!paused.value) {
+      if (!paused.value && !recheckBlocked) {
         scheduleNext()
       }
     }, POLL_INTERVAL_MS)
@@ -77,8 +111,11 @@ export function useRelayMetrics() {
   }
 
   async function start() {
+    recheckBlocked = false
     await sample()
-    scheduleNext()
+    if (!recheckBlocked) {
+      scheduleNext()
+    }
   }
 
   function onVisibilityChange() {
@@ -111,5 +148,12 @@ export function useRelayMetrics() {
   const latest = computed(() => samples.value.at(-1) ?? null)
   const previous = computed(() => samples.value.at(-2) ?? undefined)
 
-  return { samples, latest, previous, ready, error, polling, paused, refresh: sample }
+  // A manual refresh is the operator asking: it may prompt the signer again,
+  // and resumes polling if that succeeds.
+  async function refresh() {
+    paused.value = false
+    await start()
+  }
+
+  return { samples, latest, previous, ready, error, polling, paused, refresh }
 }

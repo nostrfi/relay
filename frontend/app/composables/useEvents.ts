@@ -15,7 +15,7 @@ import { createRelayRefusalError, refusalDiagnosticsFrom } from '~~/shared/utils
  */
 export function useEvents() {
   const { sign } = useRelayRequest()
-  const { state } = useAdminSession()
+  const { state, signOutIfSessionEnded } = useAdminSession()
 
   async function query(request: EventQueryRequest): Promise<EventQueryResponse> {
     // The relay serves this at /api/events/query, which is the path signed
@@ -33,6 +33,11 @@ export function useEvents() {
         }
       })
     } catch (cause) {
+      // The relay no longer recognises this key (a revoked administrator):
+      // the server has ended the session, so leave the signed-in UI.
+      if (await signOutIfSessionEnded(cause)) {
+        throw cause
+      }
       if ((cause as { statusCode?: number })?.statusCode !== 401) {
         throw cause
       }

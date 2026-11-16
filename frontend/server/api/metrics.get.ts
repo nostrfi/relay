@@ -9,7 +9,8 @@ import type { MetricsResponse } from '~~/shared/types/metrics'
  * the address: /metrics is served on its own listener, bound to loopback by
  * default and never published by the deployment, so reaching it at all means
  * being inside the network (nostrfi/workspace#53). This server is; the
- * operator driving it is authenticated by session. A signed endpoint would
+ * operator driving it is authenticated by session, whose role the relay
+ * re-confirms at least every ROLE_RECHECK_SECONDS. A signed endpoint would
  * cost one signer prompt per poll (nostrfi/workspace#39).
  *
  * The text is parsed here rather than in the browser: the page then receives
@@ -19,7 +20,10 @@ import type { MetricsResponse } from '~~/shared/types/metrics'
 const RELAY_METRICS_TIMEOUT_MS = 5_000
 
 export default defineEventHandler(async (event): Promise<MetricsResponse> => {
-  await requireAdminSession(event)
+  // The session is the only check this route has, so it must be a recent
+  // one: a revoked administrator loses it at the next re-check rather than
+  // when the cookie expires (D5, nostrfi/relay#56).
+  await requireAdminSession(event, { freshRole: true })
 
   const { relayApiBase, relayMetricsBase } = useRuntimeConfig(event)
   const base = relayApiBase.replace(/\/$/, '')
