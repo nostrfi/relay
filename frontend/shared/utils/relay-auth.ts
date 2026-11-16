@@ -44,6 +44,13 @@ export interface RelayAuthInput {
   body: string
   /** Unix seconds; injectable so the template is testable. */
   createdAt?: number
+  /** Injectable so the template is testable; random otherwise. */
+  nonce?: string
+}
+
+function randomNonce(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 export async function buildRelayAuthTemplate(input: RelayAuthInput): Promise<EventTemplate> {
@@ -53,7 +60,11 @@ export async function buildRelayAuthTemplate(input: RelayAuthInput): Promise<Eve
     tags: [
       ['u', relayUrlFor(input.path, input.origin)],
       ['method', 'POST'],
-      ['payload', await sha256Hex(input.body)]
+      ['payload', await sha256Hex(input.body)],
+      // The relay accepts each NIP-98 event once (nostrfi/relay#60). Two
+      // identical calls in the same second would otherwise be the same
+      // event, and the second would be refused as a replay.
+      ['nonce', input.nonce ?? randomNonce()]
     ],
     content: ''
   }

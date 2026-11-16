@@ -57,7 +57,11 @@ export function describeRelayRefusal(context: RelayRefusalContext = {}): RelayRe
   if (context.relayReason) {
     return {
       headline: `The relay rejected the request: ${context.relayReason}`,
-      causes: []
+      causes: context.relayReason.includes('different host than this relay')
+        ? [
+            'The dashboard signs for the address in your browser\'s address bar, and the relay accepts only the address it is configured for (shown in brackets). Open the dashboard at that address, or set auth.relay_url, or moderation.api_origin, to the one you use.'
+          ]
+        : []
     }
   }
   const signingSeconds = context.signingMs === undefined ? undefined : Math.round(context.signingMs / 1000)

@@ -14,7 +14,7 @@ import {
 const configured: RelayConfig = {
   resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5, search_timeout_seconds: 5 },
   auth: { relay_url: 'wss://relay.example.com', max_event_age_seconds: 600 },
-  moderation: { admin_pubkey: 'a'.repeat(64), max_event_age_seconds: 60 },
+  moderation: { admin_pubkey: 'a'.repeat(64), max_event_age_seconds: 60, api_origin: 'https://relay.example.com' },
   websocket: { mode: 'production', allowed_origins: ['https://relay.example.com'] },
   retention: { purge_interval_seconds: 3600 },
   server: { listen_addr: ':8080', metrics_listen_addr: '127.0.0.1:2112', shutdown_timeout_seconds: 5 },

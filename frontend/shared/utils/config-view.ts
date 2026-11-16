@@ -79,6 +79,7 @@ export function configSections(config: RelayConfig): ConfigSection[] {
       title: 'Moderation (NIP-86)',
       rows: [
         { label: 'Admin pubkey', value: formatText(config.moderation.admin_pubkey), mono: true },
+        { label: 'Signed for', value: formatText(config.moderation.api_origin), mono: true },
         { label: 'Max event age', value: formatSeconds(config.moderation.max_event_age_seconds), tabular: true }
       ]
     },
