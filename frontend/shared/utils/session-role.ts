@@ -99,6 +99,23 @@ export function signerPubkeyOf(header: string | undefined): string | null {
 }
 
 /**
+ * True when a failed dashboard request should sign the browser out: the
+ * server flagged `sessionEnded`, and the session it ended is the one still
+ * signed in.
+ *
+ * `signingPubkey` is the key the request was signed with. A request that
+ * outlived its session must not end the session that replaced it. That
+ * happens when the operator logs out, or another administrator signs in,
+ * while the request is in flight.
+ */
+export function sessionEndedFor(cause: unknown, signingPubkey: string | undefined, signedInPubkey: string | undefined): boolean {
+  // $fetch puts the whole error body at `data`, and createError's own
+  // `data` one level further down (see refusalDiagnosticsFrom).
+  const body = (cause as { data?: { data?: { sessionEnded?: unknown } } } | null)?.data
+  return body?.data?.sessionEnded === true && signingPubkey !== undefined && signingPubkey === signedInPubkey
+}
+
+/**
  * What a relay answer to a signed request says about the signer's role.
  *
  * - `confirmed`: the relay accepted it, so the key still holds a role.

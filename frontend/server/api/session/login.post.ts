@@ -29,6 +29,13 @@ import type { SessionState } from '~~/shared/types/session'
  */
 const MAX_EVENT_AGE_SECONDS = CHALLENGE_TTL_SECONDS
 
+/**
+ * How far in the future the login event may be dated. That is only clock
+ * skew, which the second approval does not affect, so it keeps the relay's
+ * 60 seconds.
+ */
+const MAX_EVENT_FUTURE_SECONDS = 60
+
 /** Attempts per address before login refuses; signature checks cost CPU. */
 const LOGIN_RATE_LIMIT = { limit: 10, windowMs: 60_000 }
 
@@ -48,7 +55,8 @@ export default defineEventHandler(async (event): Promise<SessionState> => {
       // actually requested, which still carries the prefix.
       path: getRequestURL(event).pathname,
       method: 'POST',
-      maxAgeSeconds: MAX_EVENT_AGE_SECONDS
+      maxAgeSeconds: MAX_EVENT_AGE_SECONDS,
+      maxFutureSeconds: MAX_EVENT_FUTURE_SECONDS
     })
   } catch (error) {
     // Logged server-side with the reason; the client is told only that it

@@ -138,6 +138,10 @@ export async function forwardSignedRequest(event: H3Event, sessionPubkey: string
   if (signerPubkeyOf(authorization) === sessionPubkey) {
     const evidence = roleEvidenceFrom(answer.response.status, parsed?.reason)
     if (evidence === 'confirmed') {
+      // False if the session was logged out while the relay answered; then
+      // nothing is written. The answer is still returned: the request was
+      // authorized when it started, unlike a re-check, whose only purpose
+      // is the session itself.
       await confirmAdminRole(event)
     } else if (evidence === 'revoked') {
       console.warn('dashboard session ended: the relay no longer recognises the signed-in key', sessionPubkey)

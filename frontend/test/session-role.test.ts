@@ -6,6 +6,7 @@ import {
   roleFromWhoami,
   roleRecheckDue,
   roleSatisfies,
+  sessionEndedFor,
   signerPubkeyOf,
   WHOAMI_REQUEST
 } from '../shared/utils/session-role'
@@ -104,5 +105,32 @@ describe('roleEvidenceFrom', () => {
     expect(roleEvidenceFrom(401, 'event created_at is more than 60 seconds from now')).toBe('unknown')
     expect(roleEvidenceFrom(403, 'owner only')).toBe('unknown')
     expect(roleEvidenceFrom(502, undefined)).toBe('unknown')
+  })
+})
+
+describe('sessionEndedFor', () => {
+  // Shaped like a $fetch error for createError({ data: { sessionEnded: true } }).
+  const ended = { data: { data: { sessionEnded: true } } }
+
+  it('signs out when the ended session is the one signed in', () => {
+    expect(sessionEndedFor(ended, ADMIN, ADMIN)).toBe(true)
+  })
+
+  it('leaves a session that replaced the one the request was signed for', () => {
+    expect(sessionEndedFor(ended, ADMIN, OWNER)).toBe(false)
+  })
+
+  it('does nothing once nobody is signed in', () => {
+    expect(sessionEndedFor(ended, ADMIN, undefined)).toBe(false)
+  })
+
+  it('does nothing without a signing key', () => {
+    expect(sessionEndedFor(ended, undefined, undefined)).toBe(false)
+  })
+
+  it('ignores failures that did not end the session', () => {
+    expect(sessionEndedFor({ data: { data: {} } }, ADMIN, ADMIN)).toBe(false)
+    expect(sessionEndedFor(new Error('network'), ADMIN, ADMIN)).toBe(false)
+    expect(sessionEndedFor(null, ADMIN, ADMIN)).toBe(false)
   })
 })

@@ -30,6 +30,12 @@ export interface Nip98Expectation {
   path: string
   method: string
   maxAgeSeconds: number
+  /**
+   * How far ahead of this server's clock created_at may be. Defaults to
+   * maxAgeSeconds; set it apart when the age limit is widened for a reason
+   * that has nothing to do with clock skew.
+   */
+  maxFutureSeconds?: number
 }
 
 export class Nip98Error extends Error {}
@@ -61,9 +67,13 @@ export function verifyNip98Header(header: string | undefined, expected: Nip98Exp
     throw new Nip98Error('signature verification failed')
   }
 
-  const age = Math.abs(Math.floor(Date.now() / 1000) - event.created_at)
+  const age = Math.floor(Date.now() / 1000) - event.created_at
   if (age > expected.maxAgeSeconds) {
-    throw new Nip98Error(`created_at is more than ${expected.maxAgeSeconds} seconds from now`)
+    throw new Nip98Error(`created_at is more than ${expected.maxAgeSeconds} seconds old`)
+  }
+  const maxFutureSeconds = expected.maxFutureSeconds ?? expected.maxAgeSeconds
+  if (-age > maxFutureSeconds) {
+    throw new Nip98Error(`created_at is more than ${maxFutureSeconds} seconds in the future`)
   }
 
   const tag = (name: string): string => event.tags.find(t => t[0] === name)?.[1] ?? ''

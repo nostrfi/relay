@@ -1,7 +1,7 @@
 import type { ChallengeResponse, SessionState } from '~~/shared/types/session'
 import type { EventTemplate } from 'nostr-tools/pure'
 import { loginUrlFor } from '~~/shared/utils/login-url'
-import { WHOAMI_REQUEST } from '~~/shared/utils/session-role'
+import { sessionEndedFor, WHOAMI_REQUEST } from '~~/shared/utils/session-role'
 
 const NIP98_AUTH_KIND = 27235
 
@@ -103,6 +103,8 @@ export function useAdminSession() {
           headers: { 'Content-Type': 'application/json', 'Authorization': signed.authorization }
         })
         // Logged out, or signed in as someone else, while this was in flight.
+        // The server has already refused to restore a revoked session; this
+        // keeps the stale answer out of the page as well.
         if (state.value?.pubkey !== signingPubkey) {
           throw new Error('The session changed during the role re-check')
         }
@@ -124,13 +126,11 @@ export function useAdminSession() {
    * server has already cleared the session; logging out here also drops the
    * stored signer pairing and sends the browser to sign in again.
    *
-   * `signingPubkey` is the key the failed request was signed with. A request
-   * that outlived its session — the operator logged out, or another
-   * administrator signed in, while it was in flight — must not end the
-   * session that replaced it.
+   * `signingPubkey` is the key the failed request was signed with; see
+   * sessionEndedFor.
    */
   async function signOutIfSessionEnded(cause: unknown, signingPubkey: string | undefined): Promise<boolean> {
-    if (!sessionEndedBy(cause) || !signingPubkey || state.value?.pubkey !== signingPubkey) {
+    if (!sessionEndedFor(cause, signingPubkey, state.value?.pubkey)) {
       return false
     }
     await logout().catch(() => {})
@@ -145,12 +145,4 @@ export function useAdminSession() {
   }
 
   return { state, refresh, login, logout, recheck, signOutIfSessionEnded }
-}
-
-/** True when a thrown fetch error carries the server's sessionEnded flag. */
-function sessionEndedBy(cause: unknown): boolean {
-  // $fetch puts the whole error body at `data`, and createError's own
-  // `data` one level further down — see refusalDiagnosticsFrom.
-  const body = (cause as { data?: { data?: { sessionEnded?: unknown } } })?.data
-  return body?.data?.sessionEnded === true
 }
