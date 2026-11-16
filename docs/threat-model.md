@@ -34,6 +34,14 @@
   endpoint a product surface rather than an operator's private `curl` and
   fired the boundary trigger above. The disposition changed; see
   "Metadata disclosure".
+- **Reviewed since acceptance:** operator keys, under nostrfi/relay#57 —
+  the boundary trigger, fired by administrators (#55, #56) and the owner's
+  dashboard page for managing them (#57). Trust boundary 5, the operator
+  signing-keys asset, and the key-compromise row were rewritten. The row now
+  covers administrator keys and corrects an earlier claim that the key
+  grants no data read-out: the event browse API does. The source revision in
+  the metadata above is unchanged: this reviewed the operator boundary, not
+  the whole document.
 
 > **Where this lives.** This threat model moved here from Nostrfi's internal
 > workspace on 2026-11-14 and is now maintained alongside the code it
@@ -78,8 +86,11 @@ threat to exactly one disposition:
 - Structured JSON logs (authenticated pubkeys at `Info`, moderation calls,
   event ids on failure; no IPs, no event content, no filters).
 - NIP-42 session state and per-connection challenges (process memory only).
-- The moderation admin key (`moderation.admin_pubkey`) — a signing capability
-  for the NIP-86 management API, held by the operator, never by the relay.
+- The operator signing keys — the owner key (`moderation.admin_pubkey`) and
+  every administrator key the owner has granted (nostrfi/relay#55). Each is
+  a signing capability for the operator APIs, held by its operator, never by
+  the relay. The relay stores only the administrators' public keys, labels
+  and grant records, in the `admins` table.
 - Host and process access (whoever controls the host controls everything
   above).
 
@@ -99,9 +110,16 @@ threat to exactly one disposition:
 4. **Application ↔ DuckDB/host.** The operator (and anyone with host access)
    can read every stored envelope, ciphertext, and backup. Controls are
    procedural (`operating-model.md`'s operator-access responsibilities).
-5. **Operator ↔ NIP-86 management API.** Authenticated by NIP-98 signatures
-   from `moderation.admin_pubkey`, with a freshness window and a bounded
-   request-body reader; every call is logged.
+5. **Operator ↔ operator APIs (NIP-86 management, configuration, event
+   browse and statistics).** Authenticated by NIP-98 signatures from the
+   owner (`moderation.admin_pubkey`) or a stored administrator, with a
+   freshness window and a bounded request-body reader; every NIP-86 call is
+   logged with the operator's pubkey and role. Administrators are refused
+   (`403`) the configuration API and the role methods, so only the owner can
+   grant or revoke administrators, whether through the API or the dashboard's
+   Administrators page (nostrfi/relay#57). A revocation takes effect on the
+   revoked key's next request. The owner always comes from configuration and
+   cannot be granted, revoked or removed through the API.
 
 ## Threats and dispositions
 
@@ -185,7 +203,7 @@ threat to exactly one disposition:
 | Ephemeral-event metadata (presence heartbeats, typing indicators, NIP-46 signer traffic) accumulating as a record of user activity | **Mitigated** — NIP-01 ephemeral events (kinds 20000–29999) are broadcast to open subscriptions and never written to DuckDB, so they reach neither the database nor backups. Kind `22242` NIP-42 AUTH events sent as `EVENT` are refused, never broadcast (NIP-42). Ephemeral rows stored by releases before 0.3.0 are deleted by schema migration 6; copies may persist in older backups until those backups rotate. |
 | Deleted/expired content lingering | **Mitigated** — NIP-09 deletions and NIP-40 expiration are honored; the purge worker reclaims expired rows and checkpoints on an interval (workspace #5). Deleted rows may persist in older backups until those backups rotate — **accepted residual**, deployment-layer rotation. |
 | Abuse reports with no intake path | **Mitigated** — NIP-11 contact address, operator triage runbook, and NIP-86 enforcement with logged, authenticated management calls (workspace #9). |
-| Moderation-key compromise | **Accepted residual** — `moderation.admin_pubkey` grants ban/unban control (not data read-out); calls are NIP-98-signed with a 60-second freshness window and logged. Key custody is an operator responsibility. |
+| Operator-key compromise (owner or administrator) | **Accepted residual, mitigated.** Every administrator is another signing key that can be stolen, so granting administrators makes the compromise surface larger. A stolen administrator key can ban any pubkey, ban any event, block any IP range, and read every stored event through the browse API (only the ciphertext of encrypted messages). It cannot grant or revoke administrators, read or change configuration, or lock the owner out, because bans and IP blocks never apply to the operator APIs. Mitigations: only the owner manages administrators (D2); revocation is immediate; grants and every management call are logged with the operator's pubkey and role; the owner can undo any ban or block. A stolen owner key is a full takeover of the operator APIs. Recovery is to rotate `moderation.admin_pubkey`, then review `listroleassignments` and revoke any grant the operator did not make (README §Administrators). All calls are NIP-98-signed with a 60-second freshness window. Key custody is each operator's responsibility. |
 
 ## Accepted-risks register
 

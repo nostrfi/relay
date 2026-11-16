@@ -23,6 +23,8 @@ const allLinks = [
   { label: 'Events', icon: 'i-lucide-list', to: '/dashboard/events' },
   { label: 'Moderation', icon: 'i-lucide-shield-ban', to: '/dashboard/moderation' },
   { label: 'Metrics', icon: 'i-lucide-activity', to: '/dashboard/metrics' },
+  // Owner only (D2): the relay refuses the role methods to administrators.
+  { label: 'Administrators', icon: 'i-lucide-users', to: '/dashboard/administrators', ownerOnly: true },
   // Owner only (D3): the relay refuses /api/config to administrators.
   { label: 'Configuration', icon: 'i-lucide-settings', to: '/dashboard/configuration', ownerOnly: true }
 ]
