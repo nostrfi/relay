@@ -30,10 +30,14 @@ export default defineEventHandler(async (event): Promise<SessionState> => {
   )
 
   if (outcome.kind === 'role') {
-    // False when the session was logged out while the relay was answering:
-    // the re-check must not bring it back.
+    // False when the session was logged out, or replaced by a new sign-in,
+    // while the relay was answering: the re-check must not bring it back.
+    // No sessionEnded flag, though. Something else ended this session, and
+    // the browser may already hold its replacement, possibly for the same
+    // key and possibly from another tab. Flagging it would make the client
+    // log out, and the logout would end that replacement.
     if (!await confirmAdminRole(event, outcome.role)) {
-      throw createError({ statusCode: 401, statusMessage: 'Not authenticated', data: { sessionEnded: true } })
+      throw createError({ statusCode: 401, statusMessage: 'Not authenticated' })
     }
     return { authenticated: true, pubkey: session.pubkey, role: outcome.role, roleRecheckDue: false }
   }

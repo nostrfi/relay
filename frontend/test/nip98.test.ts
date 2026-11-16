@@ -80,6 +80,21 @@ describe('verifyNip98Header', () => {
     expect(() => verifyNip98Header(header, EXPECTED)).toThrow(/created_at/)
   })
 
+  it('rejects an event dated too far in the future', () => {
+    const header = authHeader({ createdAt: Math.floor(Date.now() / 1000) + 120 })
+    expect(() => verifyNip98Header(header, EXPECTED)).toThrow(/in the future/)
+  })
+
+  it('bounds age and future skew separately when asked', () => {
+    // The login route: a long age window for the second approval, but only
+    // the usual clock skew ahead.
+    const login = { ...EXPECTED, maxAgeSeconds: 300, maxFutureSeconds: 60 }
+    const now = Math.floor(Date.now() / 1000)
+    expect(verifyNip98Header(authHeader({ createdAt: now - 240 }), login).pubkey).toBe(pubkey)
+    expect(() => verifyNip98Header(authHeader({ createdAt: now - 360 }), login)).toThrow(/old/)
+    expect(() => verifyNip98Header(authHeader({ createdAt: now + 120 }), login)).toThrow(/in the future/)
+  })
+
   it('rejects an event signed for a different path', () => {
     const header = authHeader({ u: 'https://relay.example.com/admin/api/session/logout' })
     expect(() => verifyNip98Header(header, EXPECTED)).toThrow(/u tag/)

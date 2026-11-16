@@ -648,7 +648,10 @@ the relay's reason, as the other pages do.
   therefore visible to a key after it is revoked, and nothing else is.
 
 Sessions last 8 hours. Signing out clears the cookie and any stored bunker pairing, and returns to
-the public page. Login and challenge requests are rate-limited per client address.
+the public page. The dashboard also stops honouring that cookie, so a copy of it, or a request that
+was still in flight, cannot bring the session back. Signing in again in the same browser ends the
+previous session the same way. Restarting the dashboard ends every session, and operators sign in
+again. Login and challenge requests are rate-limited per client address.
 
 ### Admin dashboard theme
 
