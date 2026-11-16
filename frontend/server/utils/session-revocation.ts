@@ -38,6 +38,19 @@ export interface SessionRevocations {
   size: () => number
 }
 
+/**
+ * When a revocation can be forgotten: once no copy of the cookie unseals.
+ *
+ * h3 accepts a cookie until its `createdAt + maxAge`, in milliseconds. The
+ * session records only `loggedInAt`, in whole seconds rounded down, and
+ * `createdAt` may fall later in that same second. So this rounds up by one
+ * second. A revocation forgotten early would make a copied cookie live
+ * again.
+ */
+export function revocationExpiryMs(loggedInAtSeconds: number, maxAgeSeconds: number): number {
+  return (loggedInAtSeconds + 1 + maxAgeSeconds) * 1000
+}
+
 export function createSessionRevocations(bootId: string = randomUUID()): SessionRevocations {
   const revoked = new Map<string, number>()
 

@@ -48,9 +48,8 @@ const revocations = createSessionRevocations()
 /** Stops honouring a session's cookie, wherever copies of it went. */
 function revokeSession(data: AdminSessionData): void {
   if (data.sid && data.loggedInAt) {
-    // loggedInAt is no earlier than the cookie's own createdAt, so this
     // outlasts every copy h3 would still unseal.
-    revocations.revoke(data.sid, (data.loggedInAt + SESSION_MAX_AGE_SECONDS) * 1000)
+    revocations.revoke(data.sid, revocationExpiryMs(data.loggedInAt, SESSION_MAX_AGE_SECONDS))
   }
 }
 
