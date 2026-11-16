@@ -38,7 +38,7 @@ func (h *RelayHandler) handleEvent(c *Client, ev *nostr.Event) {
 
 	wrapped, err := domainevent.NewEvent(ev)
 	if err != nil {
-		h.sendOK(c, ev.ID, false, prefixInvalid+": signature verification failed")
+		h.sendOK(c, ev.ID, false, prefixInvalid+": event id or signature verification failed")
 		return
 	}
 

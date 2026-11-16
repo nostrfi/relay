@@ -5601,7 +5601,8 @@ func TestNip98AcceptsTheRelaysOriginBehindAProxy(t *testing.T) {
 	})
 }
 
-// TestNip98RefusesAReplayedEvent: a valid signature is good for one request.
+// TestNip98RefusesAReplayedEvent: a valid signature is good for one request,
+// and a replay is answered exactly as an unknown key is.
 func TestNip98RefusesAReplayedEvent(t *testing.T) {
 	operatorSk := nostr.GeneratePrivateKey()
 	operatorPk, _ := nostr.GetPublicKey(operatorSk)
@@ -5614,7 +5615,9 @@ func TestNip98RefusesAReplayedEvent(t *testing.T) {
 
 			out, status, _ := callOperatorAPI(t, server, operatorSk, endpoint.path, endpoint.body, server.URL, authorization)
 			require.Equal(t, http.StatusUnauthorized, status)
-			assert.Contains(t, out["reason"], "already been used")
+			// Refused like an unknown key, so a replayer cannot learn the
+			// signer holds a role.
+			assert.Equal(t, map[string]any{"error": "unauthorized"}, out)
 		})
 	}
 }
@@ -5636,4 +5639,30 @@ func TestNip98FailsClosedWithoutACanonicalURL(t *testing.T) {
 			assert.Contains(t, out["reason"], "auth.relay_url")
 		})
 	}
+}
+
+// TestNip01RejectsAnEventWhoseIDIsNotItsHash: the signature covers the
+// content, not the claimed id, so an event can keep a valid signature
+// under any id. Found in review of nostrfi/relay#65. Storage keys on the
+// id, so such an event could pose as another (an id a deletion or a ban
+// names, say).
+func TestNip01RejectsAnEventWhoseIDIsNotItsHash(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+	c := connectTestRelay(t, server)
+	defer c.Close()
+
+	sk := nostr.GeneratePrivateKey()
+	ev := nostr.Event{CreatedAt: nostr.Now(), Kind: 1, Content: "forged id"}
+	require.NoError(t, ev.Sign(sk))
+	ok, err := ev.CheckSignature()
+	require.NoError(t, err)
+	require.True(t, ok)
+	ev.ID = strings.Repeat("ab", 32)
+
+	msg, _ := json.Marshal([]any{"EVENT", ev})
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+	okMsg := c.readOK(t)
+	assert.Equal(t, false, okMsg[2])
+	assert.Equal(t, "invalid: event id or signature verification failed", okMsg[3])
 }

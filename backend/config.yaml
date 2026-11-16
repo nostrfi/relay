@@ -29,8 +29,9 @@ resource_limits:
 auth:
   # This relay's public wss:// URL. Binds NIP-42 AUTH to it, and gives the
   # operator APIs (NIP-86, /api/config, /api/events) the origin their NIP-98
-  # signatures must name. Left empty, every operator request is refused
-  # (nostrfi/relay#60). Overridden by RELAY_AUTH_RELAY_URL.
+  # signatures must name. When neither this nor moderation.api_origin gives
+  # a usable origin, every operator request is refused (nostrfi/relay#60).
+  # Overridden by RELAY_AUTH_RELAY_URL.
   relay_url: ""
   max_event_age_seconds: 600 # NIP-42 AUTH events older or further in the future than this are rejected
 

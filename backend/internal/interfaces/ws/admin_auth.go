@@ -118,15 +118,6 @@ func (a operatorAuthorizer) authorize(r *http.Request, body []byte, minimum admi
 		wrapped := fmt.Errorf("NIP-98 verification failed: %w", err)
 		return "", admin.RoleNone, &operatorAuthFailure{PublicReason: err.Error(), err: wrapped}
 	}
-	// Before the role lookup, for every signer: see nip98ReplayGuard.
-	expiresAt := time.Unix(int64(verified.CreatedAt)+int64(a.maxEventAgeSeconds)+1, 0)
-	if !a.replays.claim(verified.ID, expiresAt) {
-		const reason = "this NIP-98 event has already been used; sign a new one for each request"
-		return "", admin.RoleNone, &operatorAuthFailure{
-			PublicReason: reason,
-			err:          fmt.Errorf("NIP-98 verification failed: event %s replayed", verified.ID),
-		}
-	}
 	pubkey := verified.PubKey
 	if a.owner == "" {
 		// Not an identity failure, and safe to say: there is no operator
@@ -144,6 +135,25 @@ func (a operatorAuthorizer) authorize(r *http.Request, body []byte, minimum admi
 	role := a.roleOf(pubkey)
 	if role == admin.RoleNone {
 		return "", admin.RoleNone, &operatorAuthFailure{err: fmt.Errorf("pubkey %s is neither the owner nor an administrator", pubkey)}
+	}
+	// Only now, for a key that holds a role, is the event recorded: a
+	// stranger's events are refused anyway, so they need no record and must
+	// not fill one (see nip98ReplayGuard).
+	//
+	// A replay is refused exactly like an unknown key, without a reason.
+	// Explaining it would tell whoever replayed a captured signature that
+	// its signer holds a role, since a stranger's replay never gets here.
+	expiresAt := time.Unix(int64(verified.CreatedAt)+int64(a.maxEventAgeSeconds)+1, 0)
+	switch a.replays.claim(verified.ID, expiresAt) {
+	case claimReplayed:
+		return "", admin.RoleNone, &operatorAuthFailure{err: fmt.Errorf("NIP-98 event %s from %s replayed", verified.ID, pubkey)}
+	case claimFull:
+		// Reachable only by the owner and administrators themselves: tens of
+		// thousands of signed requests within one freshness window.
+		return "", admin.RoleNone, &operatorAuthFailure{
+			PublicReason: "too many operator requests in the last minute; try again shortly",
+			err:          fmt.Errorf("NIP-98 replay record is full"),
+		}
 	}
 	if !role.Satisfies(minimum) {
 		return pubkey, role, &insufficientRoleError{pubkey: pubkey, role: role, minimum: minimum}

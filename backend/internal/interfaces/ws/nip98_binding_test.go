@@ -129,21 +129,61 @@ func TestOperatorAuthorizerRefusesReplays(t *testing.T) {
 		require.NoError(t, err)
 		_, _, err = authorizer.authorize(replay, body, admin.RoleOwner)
 		require.Error(t, err)
-		assert.Contains(t, publicReasonFor(err), "already been used")
 	})
 
-	t.Run("a stranger's replay gets the same explanation as the owner's", func(t *testing.T) {
-		// Otherwise "already used" would say the signer holds a role.
+	t.Run("a replay is refused exactly like a stranger", func(t *testing.T) {
+		// A reason would tell whoever replayed the event that its signer
+		// holds a role.
 		authorizer := newOperatorAuthorizer(ownerPk, 60, authTestOrigin, nil)
-		first := signedFor(t, strangerSk, "http://relay.test/", "http://relay.test/", body)
-		replay := first.Clone(first.Context())
+		first := signedFor(t, ownerSk, "http://relay.test/", "http://relay.test/", body)
+		_, _, err := authorizer.authorize(first, body, admin.RoleOwner)
+		require.NoError(t, err)
+		_, _, replayErr := authorizer.authorize(first.Clone(first.Context()), body, admin.RoleOwner)
 
-		_, _, err := authorizer.authorize(first, body, admin.RoleAdmin)
+		stranger := signedFor(t, strangerSk, "http://relay.test/", "http://relay.test/", body)
+		_, _, strangerErr := authorizer.authorize(stranger, body, admin.RoleOwner)
+
+		replayed, refused := httptest.NewRecorder(), httptest.NewRecorder()
+		writeOperatorRefusal(replayed, replayErr)
+		writeOperatorRefusal(refused, strangerErr)
+		assert.Equal(t, refused.Code, replayed.Code)
+		assert.JSONEq(t, refused.Body.String(), replayed.Body.String())
+	})
+
+	t.Run("a stranger's events are not recorded", func(t *testing.T) {
+		// Anyone can sign valid events; recording them would let anyone fill
+		// the record.
+		authorizer := newOperatorAuthorizer(ownerPk, 60, authTestOrigin, nil)
+		for range 5 {
+			r := signedFor(t, nostr.GeneratePrivateKey(), "http://relay.test/", "http://relay.test/", body)
+			_, _, err := authorizer.authorize(r, body, admin.RoleOwner)
+			require.Error(t, err)
+		}
+		assert.Equal(t, 0, authorizer.replays.size())
+	})
+
+	t.Run("an edited id does not make a new event", func(t *testing.T) {
+		// The signature covers the content, not the claimed id. Without an
+		// id check, rewriting "id" would give the same signed request a new
+		// replay key.
+		authorizer := newOperatorAuthorizer(ownerPk, 60, authTestOrigin, nil)
+		first := signedFor(t, ownerSk, "http://relay.test/", "http://relay.test/", body)
+		_, _, err := authorizer.authorize(first, body, admin.RoleOwner)
+		require.NoError(t, err)
+
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(first.Header.Get("Authorization"), "Nostr "))
+		require.NoError(t, err)
+		var ev map[string]any
+		require.NoError(t, json.Unmarshal(raw, &ev))
+		ev["id"] = strings.Repeat("0", 64)
+		edited, err := json.Marshal(ev)
+		require.NoError(t, err)
+		replay := first.Clone(first.Context())
+		replay.Header.Set("Authorization", "Nostr "+base64.StdEncoding.EncodeToString(edited))
+
+		_, _, err = authorizer.authorize(replay, body, admin.RoleOwner)
 		require.Error(t, err)
-		assert.Empty(t, publicReasonFor(err), "an identity failure stays unexplained")
-		_, _, err = authorizer.authorize(replay, body, admin.RoleAdmin)
-		require.Error(t, err)
-		assert.Contains(t, publicReasonFor(err), "already been used")
+		assert.Contains(t, publicReasonFor(err), "event id or signature verification failed")
 	})
 
 	t.Run("copies racing each other admit exactly one", func(t *testing.T) {
@@ -175,10 +215,10 @@ func TestNip98ReplayGuard(t *testing.T) {
 
 	t.Run("claims once until expiry", func(t *testing.T) {
 		g := newGuard(10)
-		assert.True(t, g.claim("a", clock.Add(time.Minute)))
-		assert.False(t, g.claim("a", clock.Add(time.Minute)))
+		assert.Equal(t, claimed, g.claim("a", clock.Add(time.Minute)))
+		assert.Equal(t, claimReplayed, g.claim("a", clock.Add(time.Minute)))
 		clock = clock.Add(2 * time.Minute)
-		assert.True(t, g.claim("a", clock.Add(time.Minute)), "an expired event could not pass freshness anyway")
+		assert.Equal(t, claimed, g.claim("a", clock.Add(time.Minute)), "an expired event could not pass freshness anyway")
 	})
 
 	t.Run("prunes expired entries", func(t *testing.T) {
@@ -191,14 +231,23 @@ func TestNip98ReplayGuard(t *testing.T) {
 		assert.Equal(t, 1, g.size())
 	})
 
-	t.Run("evicts the oldest at capacity", func(t *testing.T) {
+	t.Run("never evicts a live record, and refuses at capacity", func(t *testing.T) {
 		g := newGuard(3)
-		for _, id := range []string{"a", "b", "c", "d"} {
-			assert.True(t, g.claim(id, clock.Add(time.Minute)))
+		for _, id := range []string{"a", "b", "c"} {
+			require.Equal(t, claimed, g.claim(id, clock.Add(time.Minute)))
 		}
-		assert.Equal(t, 3, g.size())
-		assert.True(t, g.claim("a", clock.Add(time.Minute)), "a was evicted")
-		assert.False(t, g.claim("d", clock.Add(time.Minute)), "d is still remembered")
+		assert.Equal(t, claimFull, g.claim("d", clock.Add(time.Minute)))
+		assert.Equal(t, claimReplayed, g.claim("a", clock.Add(time.Minute)), "a is still remembered")
+	})
+
+	t.Run("makes room as records expire", func(t *testing.T) {
+		g := newGuard(2)
+		require.Equal(t, claimed, g.claim("a", clock.Add(time.Second)))
+		require.Equal(t, claimed, g.claim("b", clock.Add(time.Minute)))
+		require.Equal(t, claimFull, g.claim("c", clock.Add(time.Minute)))
+		clock = clock.Add(2 * time.Second)
+		assert.Equal(t, claimed, g.claim("c", clock.Add(time.Minute)))
+		assert.Equal(t, claimReplayed, g.claim("b", clock.Add(time.Minute)))
 	})
 }
 

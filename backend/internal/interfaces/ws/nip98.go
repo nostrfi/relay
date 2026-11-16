@@ -56,7 +56,7 @@ func verifyNip98(r *http.Request, body []byte, maxAgeSeconds int, origin string)
 		return nip98Verified{}, fmt.Errorf("expected kind %d, got %d", nip98AuthKind, ev.Kind)
 	}
 	if _, err := domainevent.NewEvent(&ev); err != nil {
-		return nip98Verified{}, fmt.Errorf("signature verification failed")
+		return nip98Verified{}, fmt.Errorf("event id or signature verification failed")
 	}
 
 	age := nostr.Now() - ev.CreatedAt
