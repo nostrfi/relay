@@ -368,9 +368,23 @@ methods are also this relay's own, because NIP-86 has no equivalent:
 Grants are stored in the relay's database (the `admins` table), so they survive restarts and are
 included in `-backup`/`-restore`. The relay keeps them in memory as well, so a revocation takes
 effect on the revoked key's very next request. The owner is never stored: it always comes from
-configuration and cannot be granted, revoked, or removed through the API. If you change
-`moderation.admin_pubkey`, the new key is the owner from the next start; administrators granted by
-the old owner keep their role, and `granted_by` still names the key that granted it.
+configuration and cannot be granted, revoked, or removed through the API.
+
+If you change `moderation.admin_pubkey`, the new key is the owner from the next start:
+
+- Administrators granted by the old owner keep their role, and `granted_by` still names the key
+  that granted them. The relay logs a warning at start for each one. If you rotated the key because
+  it may have been compromised, check that list with `listroleassignments` and `unassignrole` any
+  grant you did not make.
+- A stored grant for the new owner's own key is deleted at start, so it cannot come back if
+  ownership later moves again.
+
+Be clear about what an administrator can do. They can read every stored event through the browse
+API, including encrypted direct messages and gift wraps (only the ciphertext). They can also ban any
+pubkey, ban any event and block any IP range, including the owner's pubkey or `0.0.0.0/0`. Bans
+and IP blocks apply to publishing and to WebSocket connections, never to the operator APIs, so an
+administrator cannot lock the owner out of management. The owner can undo anything an administrator
+does with the matching `unban`, `allow` or `unblock` call.
 
 ### Configuration API (operator only)
 

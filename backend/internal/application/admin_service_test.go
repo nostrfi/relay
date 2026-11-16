@@ -16,6 +16,8 @@ import (
 type fakeAdminRepo struct {
 	rows map[string]admin.Administrator
 	fail error
+	// writeCtxErr is ctx.Err() as the last write saw it.
+	writeCtxErr error
 }
 
 func newFakeAdminRepo(rows ...admin.Administrator) *fakeAdminRepo {
@@ -26,7 +28,8 @@ func newFakeAdminRepo(rows ...admin.Administrator) *fakeAdminRepo {
 	return r
 }
 
-func (r *fakeAdminRepo) GrantAdmin(_ context.Context, a admin.Administrator) error {
+func (r *fakeAdminRepo) GrantAdmin(ctx context.Context, a admin.Administrator) error {
+	r.writeCtxErr = ctx.Err()
 	if r.fail != nil {
 		return r.fail
 	}
@@ -34,7 +37,8 @@ func (r *fakeAdminRepo) GrantAdmin(_ context.Context, a admin.Administrator) err
 	return nil
 }
 
-func (r *fakeAdminRepo) RevokeAdmin(_ context.Context, pubkey string) error {
+func (r *fakeAdminRepo) RevokeAdmin(ctx context.Context, pubkey string) error {
+	r.writeCtxErr = ctx.Err()
 	if r.fail != nil {
 		return r.fail
 	}
@@ -150,14 +154,43 @@ func TestNewAdminServiceFailsWhenGrantsCannotBeLoaded(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestAdminServiceListHidesAGrantForTheOwner(t *testing.T) {
-	// A key granted before it became the owner is listed as the owner by
-	// the caller, not as a stale administrator.
-	svc, err := NewAdminService(t.Context(), ownerPk, newFakeAdminRepo(admin.Administrator{Pubkey: ownerPk}, admin.Administrator{Pubkey: adminPk}))
+func TestNewAdminServiceDeletesAGrantForTheOwner(t *testing.T) {
+	// A key granted before it became the owner must not keep a grant that
+	// the API cannot revoke and that would revive if ownership moved on.
+	repo := newFakeAdminRepo(admin.Administrator{Pubkey: ownerPk, GrantedBy: strangerPk}, admin.Administrator{Pubkey: adminPk, GrantedBy: ownerPk})
+	svc, err := NewAdminService(t.Context(), ownerPk, repo)
 	require.NoError(t, err)
+
+	assert.NotContains(t, repo.rows, ownerPk)
+	assert.Contains(t, repo.rows, adminPk)
+	assert.Equal(t, admin.RoleOwner, svc.RoleOf(ownerPk))
 
 	list, err := svc.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, adminPk, list[0].Pubkey)
+}
+
+func TestNewAdminServiceKeepsGrantsFromAFormerOwner(t *testing.T) {
+	// Kept, and logged for the new owner to review: deleting them would
+	// silently strip a legitimate team of access on every key rotation.
+	repo := newFakeAdminRepo(admin.Administrator{Pubkey: adminPk, GrantedBy: strangerPk})
+	svc, err := NewAdminService(t.Context(), ownerPk, repo)
+	require.NoError(t, err)
+	assert.Equal(t, admin.RoleAdmin, svc.RoleOf(adminPk))
+}
+
+func TestAdminServiceWritesSurviveACancelledRequest(t *testing.T) {
+	repo := newFakeAdminRepo()
+	svc, err := NewAdminService(t.Context(), ownerPk, repo)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	require.NoError(t, svc.Grant(ctx, adminPk, "", ownerPk))
+	assert.NoError(t, repo.writeCtxErr, "the grant must not run under the cancelled request context")
+	require.NoError(t, svc.Revoke(ctx, adminPk))
+	assert.NoError(t, repo.writeCtxErr, "the revocation must not run under the cancelled request context")
+	assert.Equal(t, admin.RoleNone, svc.RoleOf(adminPk))
 }
