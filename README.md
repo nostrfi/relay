@@ -830,6 +830,14 @@ curl https://localhost:8443/admin                                  # admin dashb
 
 The bundled `Caddyfile` uses `tls internal` (Caddy issues itself a locally-trusted certificate) so this works out of the box with no domain or DNS setup — exactly what's exercised above. For an internet-facing deployment: replace `localhost` in the `Caddyfile` with your real domain and delete the `tls internal` line; Caddy then obtains and renews a real Let's Encrypt certificate automatically via ACME, no other configuration changes needed. Port `8443` is used above because this was verified in a rootless-container environment that can't bind privileged host ports without extra host configuration — on a host that can, map `443:443` (and `80:80` for the ACME HTTP challenge) instead.
 
+The overlay pins Caddy to an exact version and image digest (`caddy:2.11.9-alpine@sha256:…`), so every host runs the Caddy the repository was tested with. A floating tag such as `caddy:2-alpine` would have kept whatever Caddy the host last pulled. The bundled proxy is Caddy, not NGINX, so NGINX advisories (for example the November 2026 HTTP/2 advisories CVE-2026-123633 and CVE-2026-123007) do not apply to it. Check Caddy's own advisories instead. To pick up a new pin after upgrading the repository, pull it again and confirm the running version:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.tls.yml pull caddy
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d caddy
+docker compose -f docker-compose.yml -f docker-compose.tls.yml exec caddy caddy version
+```
+
 ### Resource sizing
 
 A rough baseline for running the two application processes side by side, measured on a development sandbox (4 logical CPUs, linux/amd64, Node v22 — the `frontend/Dockerfile` base) with each process run directly and observed via `/proc`. Like every number in the capacity baseline (workspace `capacity-baseline.md`), this describes that sandbox, not production hardware — re-measure on your own host before relying on it.
