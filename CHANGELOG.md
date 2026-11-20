@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/nostrfi/relay/compare/v0.3.0...v0.3.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **deploy:** pin the Caddy image to 2.11.9 by digest ([#68](https://github.com/nostrfi/relay/issues/68)) ([8e6abcb](https://github.com/nostrfi/relay/commit/8e6abcb2942d40b033fb439eac724abd5d74b396))
+
 ## [0.3.0](https://github.com/nostrfi/relay/compare/v0.2.0...v0.3.0) (2026-11-16)
 
 
