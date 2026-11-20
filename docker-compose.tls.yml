@@ -20,7 +20,14 @@ services:
       - RELAY_AUTH_RELAY_URL=${RELAY_URL:-wss://localhost:8443}
 
   caddy:
-    image: caddy:2-alpine
+    # Pinned to an exact release and multi-arch index digest. A floating
+    # `caddy:2-alpine` only moves when the host pulls again, so an old host
+    # could keep a Caddy from before the 2.11.5 fix for CVE-2026-55458
+    # (hop-by-hop headers leaking on WebSocket upgrades served over HTTP/2
+    # or HTTP/3), which is the relay's main traffic. Bump the tag and digest
+    # together; get the digest with
+    #   docker buildx imagetools inspect caddy:<version>-alpine
+    image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
     container_name: nostrfi-relay-caddy
     restart: unless-stopped
     depends_on:
