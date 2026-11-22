@@ -47,10 +47,10 @@ func TestQueryEventsSearchOrdering(t *testing.T) {
 
 // TestQueryEventsSearchIgnoredForSync covers the one path a search term can
 // reach without passing the REQ handler's guardrails: NEG-OPEN hands its
-// filter straight from the wire to QueryEventsSorted. NIP-77 defines no
-// search semantics, and narrowing a reconciliation by an unvalidated
-// substring would leave two peers disagreeing about what the other holds,
-// so sync reads ignore the field entirely.
+// filter from the wire to QuerySyncItems. NIP-77 defines no search
+// semantics, and narrowing a reconciliation by an unvalidated substring
+// would leave two peers disagreeing about what the other holds, so sync
+// reads ignore the field entirely.
 func TestQueryEventsSearchIgnoredForSync(t *testing.T) {
 	db, _ := openTempDB(t)
 	ctx := context.Background()
@@ -63,7 +63,7 @@ func TestQueryEventsSearchIgnoredForSync(t *testing.T) {
 	signAndSave(t, ctx, repo, sk, &matching)
 	signAndSave(t, ctx, repo, sk, &other)
 
-	sorted, err := repo.QueryEventsSorted(ctx, nostr.Filter{Search: "orange"})
+	sorted, err := repo.QuerySyncItems(ctx, nostr.Filter{Search: "orange"})
 	require.NoError(t, err)
 	require.Len(t, sorted, 2, "a sync read must reconcile the whole set, search term or not")
 	assert.Equal(t, matching.ID, sorted[0].ID, "and stay in its own created_at ASC order")

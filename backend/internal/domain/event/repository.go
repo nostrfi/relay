@@ -36,6 +36,13 @@ type Query struct {
 	TagConditions map[string][]string
 }
 
+// SyncItem is the part of a stored event NIP-77 reconciliation needs: its
+// id and created_at. Nothing else is read for a sync (nostrfi/relay#70).
+type SyncItem struct {
+	ID        string
+	CreatedAt nostr.Timestamp
+}
+
 // StatsBucket is the granularity a statistics query groups by.
 type StatsBucket string
 
@@ -90,7 +97,11 @@ type Stats struct {
 type Repository interface {
 	SaveEvent(ctx context.Context, event *Event) (bool, error)
 	QueryEvents(ctx context.Context, filter nostr.Filter) ([]*Event, error)
-	QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*Event, error)
+	// QuerySyncItems returns the id and created_at of every event the
+	// filter matches, ordered by created_at then id ascending as NIP-77
+	// requires, honouring filter.Limit. It applies the same exclusions as
+	// QueryEvents and ignores filter.Search.
+	QuerySyncItems(ctx context.Context, filter nostr.Filter) ([]SyncItem, error)
 	// QueryEventsMatching is QueryEvents with Query's extra dimension, in
 	// the same newest-first order.
 	QueryEventsMatching(ctx context.Context, query Query) ([]*Event, error)
