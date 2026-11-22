@@ -58,9 +58,10 @@ type ResourceLimits struct {
 	MaxSyncEvents int `mapstructure:"max_sync_events"`
 	// MaxSyncSessions caps the NIP-77 sessions one connection may hold
 	// open at once. Each holds its whole reconciliation vector, up to
-	// MaxSyncEvents items, until NEG-CLOSE, a failed reconcile or disconnect; a
-	// NEG-OPEN past the cap is refused with NEG-ERR "blocked" before its
-	// query runs (nostrfi/relay#71). Zero disables the cap.
+	// MaxSyncEvents items, until NEG-CLOSE, a NEG-OPEN reusing its id, a
+	// failed reconcile or disconnect. A NEG-OPEN past the cap is refused
+	// with NEG-ERR "blocked" before its query runs (nostrfi/relay#71).
+	// Zero disables the cap.
 	MaxSyncSessions int `mapstructure:"max_sync_sessions"`
 }
 

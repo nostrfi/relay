@@ -4062,6 +4062,18 @@ func TestNegentropySessionCap(t *testing.T) {
 		assert.Equal(t, "NEG-MSG", reply[0], "the failed session's slot was not freed: %v", reply)
 	})
 
+	t.Run("bad hex on a reused id closes the replaced session", func(t *testing.T) {
+		// NIP-77 closes the open session before the replacement is read;
+		// after the NEG-ERR the client counts the id as closed.
+		reply := c.negOpen(t, "s5", nostr.Filter{}, "zz")
+		require.Equal(t, "NEG-ERR", reply[0], "got %v", reply)
+		assert.True(t, strings.HasPrefix(reply[2].(string), "invalid:"), "got %q", reply[2])
+		c.negMsgClosed(t, "s5")
+
+		reply = c.negOpen(t, "s5", nostr.Filter{}, initial)
+		assert.Equal(t, "NEG-MSG", reply[0], "the replaced session's slot was not freed: %v", reply)
+	})
+
 	t.Run("a failed NEG-MSG reconcile frees its slot", func(t *testing.T) {
 		bad, _ := json.Marshal([]any{"NEG-MSG", "s5", "00"})
 		require.NoError(t, c.WriteMessage(websocket.TextMessage, bad))
