@@ -251,7 +251,7 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.clients.Store(client, true)
 
 	// NIP-42: Send AUTH challenge
-	client.challenge = fmt.Sprintf("%x", nostr.GeneratePrivateKey()[:16])
+	client.challenge = newChallenge()
 	h.sendAuth(client, client.challenge)
 
 	// One worker per connection runs handleMessage in arrival order, off
