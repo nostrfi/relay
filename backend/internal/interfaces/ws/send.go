@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"relay/pkg/metrics"
@@ -39,9 +40,51 @@ func (h *RelayHandler) write(c *Client, msg []byte) {
 	}
 }
 
-func (h *RelayHandler) sendEvent(c *Client, subID string, ev *nostr.Event) {
-	msg, _ := json.Marshal([]any{"EVENT", subID, ev})
-	h.write(c, msg)
+// encodeEvent is the one place an event becomes wire JSON. It must be
+// json.Marshal, not ev.MarshalJSON: nostr.Event's generated encoder does
+// not HTML-escape, and json.Marshal compacts and escapes its output, so
+// only this form is byte-identical to the frames the relay has always
+// sent. A variable so tests can count encodes (nostrfi/relay#72).
+var encodeEvent = func(ev *nostr.Event) ([]byte, error) {
+	return json.Marshal(ev)
+}
+
+// framePool holds the buffers EVENT frames are built in. gorilla's server
+// WriteMessage, without compression (which the relay's Upgrader does not
+// enable), copies the frame into its own write buffer and keeps no
+// reference once it returns, so a buffer can go back as soon as write does.
+var framePool = sync.Pool{New: func() any {
+	b := make([]byte, 0, 1024)
+	return &b
+}}
+
+// maxPooledFrame keeps one outsized event from pinning a large buffer in
+// the pool; such frames are built and left to the garbage collector.
+const maxPooledFrame = 64 << 10
+
+// appendEventFrame appends ["EVENT",<subID>,<event>] to dst, splicing in
+// an event already encoded by encodeEvent. The result is byte-identical to
+// json.Marshal([]any{"EVENT", subID, ev}). subID is client-supplied, so it
+// always goes through json.Marshal for the same escaping as before.
+func appendEventFrame(dst []byte, subID string, eventJSON []byte) []byte {
+	subIDJSON, _ := json.Marshal(subID) // a string always encodes
+	dst = append(dst, `["EVENT",`...)
+	dst = append(dst, subIDJSON...)
+	dst = append(dst, ',')
+	dst = append(dst, eventJSON...)
+	return append(dst, ']')
+}
+
+// sendEventJSON sends one EVENT frame for an event encoded once by the
+// caller, so a broadcast to many subscriptions encodes it a single time.
+func (h *RelayHandler) sendEventJSON(c *Client, subID string, eventJSON []byte) {
+	bp := framePool.Get().(*[]byte)
+	frame := appendEventFrame((*bp)[:0], subID, eventJSON)
+	h.write(c, frame)
+	if cap(frame) <= maxPooledFrame {
+		*bp = frame[:0]
+		framePool.Put(bp)
+	}
 }
 
 func (h *RelayHandler) sendOK(c *Client, eventID string, ok bool, reason string) {
