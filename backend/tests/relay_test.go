@@ -2605,6 +2605,33 @@ func TestResourceLimitsSubidLength(t *testing.T) {
 	assert.Equal(t, "invalid: subscription id longer than 5 characters", closedMsg[2])
 }
 
+// TestResourceLimitsSubidLengthCountsCharacters pins that max_subid_length
+// counts characters, as NIP-11 and the README describe it, not UTF-8
+// bytes: five two-byte characters fit a limit of five.
+func TestResourceLimitsSubidLengthCountsCharacters(t *testing.T) {
+	limitation := &ws.RelayLimitation{MaxSubidLength: 5}
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+
+	fits := strings.Repeat("é", 5)
+	req, _ := json.Marshal([]any{"REQ", fits, nostr.Filter{Kinds: []int{1}}})
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, req))
+	eose := c.readMessageType(t, "EOSE")
+	assert.Equal(t, fits, eose[1])
+
+	tooLong := strings.Repeat("é", 6)
+	req, _ = json.Marshal([]any{"REQ", tooLong, nostr.Filter{Kinds: []int{1}}})
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, req))
+	closedMsg := c.readClosed(t)
+	assert.Equal(t, tooLong, closedMsg[1])
+	assert.Equal(t, "invalid: subscription id longer than 5 characters", closedMsg[2])
+}
+
 func TestResourceLimitsMaxLimitClamp(t *testing.T) {
 	limitation := &ws.RelayLimitation{MaxLimit: 2}
 	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: limitation}, ws.ResourceLimits{})
@@ -4112,6 +4139,12 @@ func TestNegentropySubidLength(t *testing.T) {
 	c.negMsgClosed(t, "123456789")
 
 	assert.Equal(t, "NEG-MSG", c.negOpen(t, "12345678", nostr.Filter{}, initial)[0])
+
+	// Characters, not bytes: eight two-byte characters fit, nine do not.
+	assert.Equal(t, "NEG-MSG", c.negOpen(t, strings.Repeat("é", 8), nostr.Filter{}, initial)[0])
+	reply = c.negOpen(t, strings.Repeat("é", 9), nostr.Filter{}, initial)
+	require.Equal(t, "NEG-ERR", reply[0], "got %v", reply)
+	assert.Equal(t, "invalid: subscription id longer than 8 characters", reply[2])
 }
 
 // TestNegentropySyncCap covers resource_limits.max_sync_events: a NEG-OPEN
