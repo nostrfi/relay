@@ -3917,6 +3917,43 @@ func TestNegentropyNoPayloadInLogs(t *testing.T) {
 	assert.Contains(t, logged, subID, "the subscription ID may still be logged")
 }
 
+// TestNegentropyShortMessages covers NEG-OPEN and NEG-MSG frames missing
+// their trailing fields. handleMessage only guarantees two elements, and
+// it runs on a goroutine with no recover, so reading past the end of the
+// frame used to panic and take the whole relay down (nostrfi/relay#70).
+func TestNegentropyShortMessages(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+
+	tests := []struct {
+		name  string
+		frame []any
+	}{
+		{"NEG-OPEN with no filter", []any{"NEG-OPEN", "neg_short"}},
+		{"NEG-OPEN with no initial message", []any{"NEG-OPEN", "neg_short", nostr.Filter{}}},
+		{"NEG-MSG with no message", []any{"NEG-MSG", "neg_short"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, _ := json.Marshal(tt.frame)
+			require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+
+			reply := c.readMessageType(t, "NEG-ERR")
+			require.Len(t, reply, 3)
+			assert.Equal(t, "neg_short", reply[1])
+			assert.True(t, strings.HasPrefix(reply[2].(string), "invalid:"), "got %q", reply[2])
+		})
+	}
+
+	// The relay is still up and this connection still served.
+	assert.Empty(t, c.reqEventIDs(t, "after_short_neg", nostr.Filter{Kinds: []int{1}}))
+}
+
 // nip98AuthHeader signs a NIP-98 kind-27235 event authorizing a POST to url
 // with the given body, and returns the resulting Authorization header
 // value ("Nostr <base64>").
