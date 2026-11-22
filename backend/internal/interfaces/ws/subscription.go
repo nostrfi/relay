@@ -38,7 +38,7 @@ func countNegSessions(c *Client) int {
 func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter) {
 	c.subscriptions.Store(subID, subscription.New(subID, filters))
 
-	seenIDs := make(map[string]bool)
+	seenIDs := make(map[string]struct{})
 	for _, f := range filters {
 		// NIP-01: limit is the maximum number of events to return in the
 		// initial query, so "limit":0 asks for none of them — a client
@@ -74,7 +74,7 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 			continue
 		}
 		for _, ev := range events {
-			if !seenIDs[ev.ID] {
+			if _, seen := seenIDs[ev.ID]; !seen {
 				// NIP-17: Relays MAY protect message metadata by only serving kind:1059 events to users p-tagged on the event
 				if ev.Kind == 1059 {
 					isRecipient := false
@@ -96,7 +96,7 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 					continue
 				}
 				h.sendEventJSON(c, subID, eventJSON)
-				seenIDs[ev.ID] = true
+				seenIDs[ev.ID] = struct{}{}
 			}
 		}
 	}

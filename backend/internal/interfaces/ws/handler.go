@@ -38,11 +38,12 @@ type RelayHandler struct {
 	websocket         WebsocketConfig
 	// admins is nil unless UseAdministrators was called, and then only the
 	// owner is admitted and the role methods are not offered.
-	admins    application.AdminService
-	operators operatorAuthorizer
-	upgrader  websocket.Upgrader
-	connCount atomic.Int64
-	subCount  atomic.Int64
+	admins     application.AdminService
+	operators  operatorAuthorizer
+	upgrader   websocket.Upgrader
+	connCount  atomic.Int64
+	subCount   atomic.Int64
+	blockedIPs blocklistCache
 }
 
 func NewRelayHandler(events application.EventService, moderationSvc application.ModerationService, info RelayInfo, buildVersion string) *RelayHandler {
@@ -161,19 +162,11 @@ func (h *RelayHandler) isConnectionSourceBlocked(r *http.Request) (bool, error) 
 		return false, nil
 	}
 
-	blocked, err := h.moderationService.ListBlockedIPs(r.Context())
+	blocked, err := h.blockedIPs.get(r.Context(), h.moderationService)
 	if err != nil {
 		return false, err
 	}
-	for _, entry := range blocked {
-		if entry.Value == host {
-			return true, nil
-		}
-		if _, ipNet, err := net.ParseCIDR(entry.Value); err == nil && ipNet.Contains(ip) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return blocked.contains(host, ip), nil
 }
 
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -251,7 +244,7 @@ func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.clients.Store(client, true)
 
 	// NIP-42: Send AUTH challenge
-	client.challenge = fmt.Sprintf("%x", nostr.GeneratePrivateKey()[:16])
+	client.challenge = newChallenge()
 	h.sendAuth(client, client.challenge)
 
 	// One worker per connection runs handleMessage in arrival order, off

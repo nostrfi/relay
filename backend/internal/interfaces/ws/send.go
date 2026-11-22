@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -87,12 +88,47 @@ func (h *RelayHandler) sendEventJSON(c *Client, subID string, eventJSON []byte) 
 	}
 }
 
+// controlEncoder builds the small non-EVENT frames (OK, NOTICE, AUTH,
+// EOSE, CLOSED, NEG-*). json.Encoder escapes exactly as json.Marshal does
+// and adds only a trailing newline, so trimming it gives byte-identical
+// frames while the output buffer is reused instead of allocated per frame.
+type controlEncoder struct {
+	buf bytes.Buffer
+	enc *json.Encoder
+}
+
+var controlPool = sync.Pool{New: func() any {
+	e := &controlEncoder{}
+	e.enc = json.NewEncoder(&e.buf)
+	return e
+}}
+
+func (e *controlEncoder) encode(frame []any) ([]byte, error) {
+	e.buf.Reset()
+	if err := e.enc.Encode(frame); err != nil {
+		return nil, err
+	}
+	b := e.buf.Bytes()
+	return b[:len(b)-1], nil
+}
+
+// writeControl encodes and sends one control frame. As with framePool, the
+// buffer is safe to reuse once write returns.
+func (h *RelayHandler) writeControl(c *Client, frame ...any) {
+	e := controlPool.Get().(*controlEncoder)
+	if msg, err := e.encode(frame); err == nil {
+		h.write(c, msg)
+	}
+	if e.buf.Cap() <= maxPooledFrame {
+		controlPool.Put(e)
+	}
+}
+
 func (h *RelayHandler) sendOK(c *Client, eventID string, ok bool, reason string) {
 	if !ok {
 		recordRejection(reason)
 	}
-	msg, _ := json.Marshal([]any{"OK", eventID, ok, reason})
-	h.write(c, msg)
+	h.writeControl(c, "OK", eventID, ok, reason)
 }
 
 // recordRejection extracts the leading NIP-01 prefix from reason (the text
@@ -110,18 +146,15 @@ func recordRejection(reason string) {
 // call records a rejection.
 func (h *RelayHandler) sendNotice(c *Client, message string) {
 	recordRejection(message)
-	msg, _ := json.Marshal([]any{"NOTICE", message})
-	h.write(c, msg)
+	h.writeControl(c, "NOTICE", message)
 }
 
 func (h *RelayHandler) sendAuth(c *Client, challenge string) {
-	msg, _ := json.Marshal([]any{"AUTH", challenge})
-	h.write(c, msg)
+	h.writeControl(c, "AUTH", challenge)
 }
 
 func (h *RelayHandler) sendEOSE(c *Client, subID string) {
-	msg, _ := json.Marshal([]any{"EOSE", subID})
-	h.write(c, msg)
+	h.writeControl(c, "EOSE", subID)
 }
 
 // sendClosed sends a NIP-01 CLOSED message and drops the subscription, used
@@ -140,18 +173,15 @@ func (h *RelayHandler) sendClosed(c *Client, subID string, reason string) {
 		h.subCount.Add(-1)
 		metrics.SubscriptionsActive.Dec()
 	}
-	msg, _ := json.Marshal([]any{"CLOSED", subID, reason})
-	h.write(c, msg)
+	h.writeControl(c, "CLOSED", subID, reason)
 }
 
 func (h *RelayHandler) sendNegErr(c *Client, subID string, reason string) {
 	recordRejection(reason)
-	msg, _ := json.Marshal([]any{"NEG-ERR", subID, reason})
-	h.write(c, msg)
+	h.writeControl(c, "NEG-ERR", subID, reason)
 }
 
 func (h *RelayHandler) sendNegMsg(c *Client, subID string, msgHex string) {
 	slog.Debug("Sending NEG-MSG", "sub_id", subID)
-	msg, _ := json.Marshal([]any{"NEG-MSG", subID, msgHex})
-	h.write(c, msg)
+	h.writeControl(c, "NEG-MSG", subID, msgHex)
 }

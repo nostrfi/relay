@@ -1,6 +1,8 @@
 package ws
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -12,6 +14,21 @@ import (
 
 // nip42AuthKind is the kind of a NIP-42 AUTH event.
 const nip42AuthKind = 22242
+
+// challengeBytes is the NIP-42 challenge's entropy, sent as 32 hex characters.
+const challengeBytes = 16
+
+// newChallenge returns a fresh NIP-42 challenge read straight from
+// crypto/rand. It replaced fmt.Sprintf("%x", nostr.GeneratePrivateKey()[:16]),
+// which built a whole secp256k1 key per connection and then sliced its hex
+// string, not its bytes: the result was 16 hex digits — 64 bits — hex-encoded
+// a second time, and it panicked if GeneratePrivateKey returned "" on a
+// failed read. crypto/rand.Read never returns an error, so neither can this.
+func newChallenge() string {
+	b := make([]byte, challengeBytes)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // handleAuth answers every AUTH with an OK, as NIP-42 requires: true on
 // success, false with an invalid: or restricted: reason otherwise. Clients

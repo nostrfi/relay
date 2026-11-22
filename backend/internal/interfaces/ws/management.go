@@ -323,7 +323,10 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, caller mana
 		if err := validateReason(reason); err != nil {
 			return nil, err
 		}
-		if err := h.moderationService.BlockIP(ctx, ip, reason); err != nil {
+		err = h.moderationService.BlockIP(ctx, ip, reason)
+		// Even a failed write may have changed the list.
+		h.blockedIPs.invalidate()
+		if err != nil {
 			return nil, err
 		}
 		return true, nil
@@ -336,7 +339,10 @@ func (h *RelayHandler) dispatchManagementMethod(ctx context.Context, caller mana
 		if err := validateIPOrCIDR(ip); err != nil {
 			return nil, err
 		}
-		if err := h.moderationService.UnblockIP(ctx, ip); err != nil {
+		err = h.moderationService.UnblockIP(ctx, ip)
+		// Even a failed write may have changed the list.
+		h.blockedIPs.invalidate()
+		if err != nil {
 			return nil, err
 		}
 		return true, nil
