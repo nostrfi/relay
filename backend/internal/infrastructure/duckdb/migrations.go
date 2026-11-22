@@ -233,7 +233,7 @@ func readTagsJSONPage(ctx context.Context, tx *sql.Tx, after string) ([]tagsJSON
 		var tags nostr.Tags
 		if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
 			// The read path falls back to the legacy rows for such an
-			// event too (reconstructTags); there is nothing to index.
+			// event too (decodeTags); there is nothing to index.
 			slog.Warn("skipping unreadable tags_json in tag backfill", "event_id", id, "error", err)
 			tags = nil
 		}

@@ -432,7 +432,12 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query) (
 	}
 	defer rows.Close()
 
-	var events []*nostr.Event
+	// Rows needing the legacy tag fallback are fetched after the scan, not
+	// during it: rows holds a pooled connection until it is closed, so a
+	// lookup inside the loop takes a second one. With the pool bounded
+	// (NewRepository), concurrent REQs over legacy rows would each hold one
+	// connection and wait forever for another (nostrfi/relay#73).
+	var events, legacy []*nostr.Event
 	for rows.Next() {
 		var ev nostr.Event
 		var tagsJSON sql.NullString
@@ -440,7 +445,11 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query) (
 		if err != nil {
 			return nil, err
 		}
-		ev.Tags = r.reconstructTags(ctx, ev.ID, tagsJSON)
+		if tags, ok := decodeTags(ev.ID, tagsJSON); ok {
+			ev.Tags = tags
+		} else {
+			legacy = append(legacy, &ev)
+		}
 		events = append(events, &ev)
 	}
 	// rows.Err carries a context cancellation or deadline that fired while
@@ -452,6 +461,12 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query) (
 	// presented as a full one.
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, ev := range legacy {
+		ev.Tags = r.getLegacyTags(ctx, ev.ID)
 	}
 	return events, nil
 }
@@ -563,21 +578,22 @@ func eventConditions(query domainevent.Query, forSync bool) (conditions []string
 	return conditions, args, searchTerm
 }
 
-// reconstructTags returns the event's tags with full fidelity when
-// tagsJSON was populated at save time. A row saved before the tags_json
-// migration has tagsJSON NULL; for that case only, fall back to the
-// lossy two-field reconstruction the relay used previously, since the
-// original tag fields were never stored and cannot be recovered.
-func (r *Repository) reconstructTags(ctx context.Context, eventID string, tagsJSON sql.NullString) nostr.Tags {
+// decodeTags returns the event's tags with full fidelity when tagsJSON was
+// populated at save time. ok is false when the caller must fall back to
+// getLegacyTags: a row saved before the tags_json migration has tagsJSON
+// NULL, and a corrupt value is logged and treated the same way. That
+// fallback is the lossy two-field reconstruction the relay used
+// previously, since the original tag fields were never stored and cannot
+// be recovered.
+func decodeTags(eventID string, tagsJSON sql.NullString) (tags nostr.Tags, ok bool) {
 	if !tagsJSON.Valid {
-		return r.getLegacyTags(ctx, eventID)
+		return nil, false
 	}
-	var tags nostr.Tags
 	if err := json.Unmarshal([]byte(tagsJSON.String), &tags); err != nil {
 		slog.Error("failed to unmarshal tags_json, falling back to legacy reconstruction", "event_id", eventID, "error", err)
-		return r.getLegacyTags(ctx, eventID)
+		return nil, false
 	}
-	return tags
+	return tags, true
 }
 
 // escapeLikePattern neutralizes the wildcards in a caller-supplied
@@ -627,7 +643,7 @@ func (r *Repository) Close() error {
 // getLegacyTags reconstructs an event's tags from the tags index table,
 // which only ever recorded a tag's name and first value. It is the fallback
 // path for events saved before the tags_json migration (see
-// reconstructTags); every event saved since then is reconstructed from its
+// decodeTags); every event saved since then is reconstructed from its
 // own tags_json column instead.
 func (r *Repository) getLegacyTags(ctx context.Context, eventID string) nostr.Tags {
 	rows, err := r.db.QueryContext(ctx, "SELECT tag, value FROM tags WHERE event_id = ?", eventID)
