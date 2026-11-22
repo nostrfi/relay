@@ -17,6 +17,8 @@ import (
 
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/nbd-wtf/go-nostr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 )
 
 // Repository is the DuckDB-backed implementation of both event.Repository
@@ -37,6 +39,15 @@ func NewRepository(path string) (*Repository, error) {
 	}
 
 	return &Repository{db: db}, nil
+}
+
+// StatsCollector exposes the connection pool's database/sql statistics as
+// go_sql_* metrics labelled db_name="duckdb": open, in-use and idle
+// connections, how often and how long callers waited for one, and how
+// many were closed for idling. It is how a pool bound is seen working —
+// or seen starving callers — in production (nostrfi/relay#73).
+func (r *Repository) StatsCollector() prometheus.Collector {
+	return collectors.NewDBStatsCollector(r.db, "duckdb")
 }
 
 // CountEvents returns how many events the database holds, expired and banned

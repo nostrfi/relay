@@ -16,6 +16,8 @@ import (
 	"relay/internal/infrastructure/duckdb"
 	"relay/internal/interfaces/ws"
 	"relay/pkg/logger"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // version is injected at build time via -ldflags "-X main.version=..."
@@ -64,6 +66,7 @@ func main() {
 		os.Exit(1)
 	}
 	logOpenedStorage(cfg.Storage.DBPath, repo)
+	prometheus.MustRegister(repo.StatsCollector())
 
 	// 4. Initialize Services
 	eventService := application.NewEventService(repo)
