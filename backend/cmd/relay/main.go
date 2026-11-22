@@ -60,13 +60,13 @@ func main() {
 	slog.Info("Starting relay", "version", version)
 
 	// 3. Initialize Repository
-	repo, err := duckdb.NewRepository(cfg.Storage.DBPath)
+	repo, err := duckdb.NewRepositoryWithOptions(cfg.Storage.DBPath, duckdb.Options{MemoryLimit: cfg.Storage.MemoryLimit})
 	if err != nil {
 		slog.Error("failed to open storage", "error", err)
 		os.Exit(1)
 	}
 	logOpenedStorage(cfg.Storage.DBPath, repo)
-	prometheus.MustRegister(repo.StatsCollector())
+	prometheus.MustRegister(repo.StatsCollectors()...)
 
 	// 4. Initialize Services
 	eventService := application.NewEventService(repo)

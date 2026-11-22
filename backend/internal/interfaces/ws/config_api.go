@@ -79,7 +79,8 @@ type ServerView struct {
 }
 
 type StorageView struct {
-	DBPath string `json:"db_path"`
+	DBPath      string `json:"db_path"`
+	MemoryLimit string `json:"memory_limit"`
 }
 
 // NewConfigSnapshot projects the loaded configuration onto the view above.
@@ -122,7 +123,8 @@ func NewConfigSnapshot(cfg Config) ConfigSnapshot {
 			ShutdownTimeoutSeconds: cfg.Server.ShutdownTimeoutSeconds,
 		},
 		Storage: StorageView{
-			DBPath: cfg.Storage.DBPath,
+			DBPath:      cfg.Storage.DBPath,
+			MemoryLimit: cfg.Storage.MemoryLimit,
 		},
 	}
 }

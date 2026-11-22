@@ -156,6 +156,10 @@ type ServerConfig struct {
 // normal startup and the -backup/-restore flags (see cmd/relay/backup.go).
 type StorageConfig struct {
 	DBPath string `mapstructure:"db_path"`
+	// MemoryLimit is DuckDB's memory_limit, such as "512MB" or "2GB": the
+	// ceiling on DuckDB's buffer manager, shared by both connection pools.
+	// Empty keeps DuckDB's default, 80% of system RAM (nostrfi/relay#73).
+	MemoryLimit string `mapstructure:"memory_limit"`
 }
 
 type Config struct {

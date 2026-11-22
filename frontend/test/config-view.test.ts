@@ -18,7 +18,7 @@ const configured: RelayConfig = {
   websocket: { mode: 'production', allowed_origins: ['https://relay.example.com'] },
   retention: { purge_interval_seconds: 3600 },
   server: { listen_addr: ':8080', metrics_listen_addr: '127.0.0.1:2112', shutdown_timeout_seconds: 5 },
-  storage: { db_path: 'db/relay.db' }
+  storage: { db_path: 'db/relay.db', memory_limit: '512MB' }
 }
 
 /** What the relay reports when config.yaml omits those sections. */
@@ -127,6 +127,7 @@ describe('configSections', () => {
     // scrape is refused needs to see which one it is (nostrfi/workspace#53).
     expect(rowsOf(configured, 'Listener')['Metrics address']).toBe('127.0.0.1:2112')
     expect(rowsOf(configured, 'Storage')['Database path']).toBe('db/relay.db')
+    expect(rowsOf(configured, 'Storage')['Memory limit']).toBe('512MB')
   })
 
   it('renders omitted fields without inventing values', () => {
@@ -140,6 +141,9 @@ describe('configSections', () => {
     // An empty origin allow-list reads as absent, and the mode still shows.
     expect(rowsOf(omitted, 'WebSocket origins')['Allowed origins']).toBe(EMPTY)
     expect(rowsOf(omitted, 'WebSocket origins')['Mode']).toBe('development')
+    // An unset memory_limit is not missing configuration: DuckDB applies its
+    // own default, and the row says which.
+    expect(rowsOf({ ...omitted, storage: { db_path: 'db/relay.db', memory_limit: '' } }, 'Storage')['Memory limit']).toBe('DuckDB default (80% of RAM)')
   })
 
   it('joins multiple allowed origins', () => {

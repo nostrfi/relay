@@ -36,7 +36,7 @@ func (r *Repository) EventStats(ctx context.Context, query domainevent.StatsQuer
 	// A plain transaction, not a read-only one: DuckDB's driver rejects
 	// sql.TxOptions{ReadOnly: true}. The snapshot is what matters here, and
 	// nothing in this function writes.
-	tx, err := r.db.BeginTx(ctx, nil)
+	tx, err := r.queries().BeginTx(ctx, nil)
 	if err != nil {
 		return domainevent.Stats{}, err
 	}

@@ -8,14 +8,19 @@ package duckdb
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"runtime"
 	"strings"
+	"time"
 
 	domainevent "relay/internal/domain/event"
 
-	_ "github.com/duckdb/duckdb-go/v2"
+	duckdbdriver "github.com/duckdb/duckdb-go/v2"
 	"github.com/nbd-wtf/go-nostr"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -23,31 +28,154 @@ import (
 
 // Repository is the DuckDB-backed implementation of both event.Repository
 // and moderation.Repository.
+//
+// It holds two connection pools on one DuckDB database (nostrfi/relay#73).
+// queryDB serves the long, scan-shaped queries a burst is made of — REQ,
+// sync, the events API, stats — and is bounded. db, the control pool,
+// serves everything else: saves and the publish path's ban check, the
+// per-connection IP block check, readiness, moderation and admin calls,
+// maintenance and migrations. Splitting them keeps a publish, a new
+// connection or a readiness probe from queuing behind searches.
 type Repository struct {
-	db *sql.DB
+	db      *sql.DB
+	queryDB *sql.DB
 }
 
+// queries returns the query pool. A Repository built directly around one
+// *sql.DB, as package tests do, uses it for both.
+func (r *Repository) queries() *sql.DB {
+	if r.queryDB != nil {
+		return r.queryDB
+	}
+	return r.db
+}
+
+// Options are the operator-tunable settings applied when the database is
+// opened.
+type Options struct {
+	// MemoryLimit is DuckDB's memory_limit (for example "512MB"), the
+	// ceiling on its buffer manager: cached table data and the intermediate
+	// results it can spill to disk. It belongs to the database, so both
+	// pools share it. It does not bound what queries allocate outside the
+	// buffer manager, nor the Go side of each running query, which is what
+	// the query pool's bound limits. Empty leaves DuckDB's default of 80%
+	// of system RAM.
+	MemoryLimit string
+}
+
+// The pool bounds, fixed rather than configurable (nostrfi/relay#73). See
+// configurePools for the measurements behind them.
+const (
+	minPoolConns     = 4
+	queryConnsPerCPU = 2
+	maxConnIdleTime  = 5 * time.Minute
+)
+
+// maxQueryConns caps the query pool. DuckDB runs every query on one thread
+// pool shared by the whole database (threads defaults to the core count),
+// so connections beyond a small multiple of the cores queue inside DuckDB
+// rather than add throughput — and each running query holds memory.
+func maxQueryConns() int {
+	return max(minPoolConns, queryConnsPerCPU*runtime.NumCPU())
+}
+
+// maxControlConns caps the control pool at one connection per core. Its
+// queries are short point lookups and single-event writes, but every
+// publish makes two of them, so too small a pool becomes the publish
+// path's bottleneck: four connections left a burst's publishes close to
+// a client's five-second acknowledgement window.
+func maxControlConns() int {
+	return max(minPoolConns, runtime.NumCPU())
+}
+
+// configurePools bounds both pools. Measured with the loadtest battery,
+// whose NIP-50 search phase is the burst (100 concurrent searchers plus 50
+// unthrottled publishers, 20,000 seeded events), on 16 CPUs, two runs per
+// configuration; the PR has the full figures:
+//
+//   - Unbounded, one pool: up to 150 open connections, peak RSS 918–1,013
+//     MiB, and database/sql's default of two idle connections closed and
+//     reopened connections about 6,000 times per run.
+//   - One pool capped at 32: peak RSS 433–539 MiB, but saves queued behind
+//     searches holding connections for seconds, publishes overran the
+//     loadtest's five-second acknowledgement window, and the search phase
+//     aborted. Hence the separate control pool.
+//   - Query pool 32, control pool 16 (these constants): peak RSS 601–606
+//     MiB; publish p99 during the burst 1.9–2.4s, against 2.5–3.0s
+//     unbounded; search p99 3.6–4.2s against 2.3–2.9s, with up to 1% of
+//     searches answered CLOSED by the search work budget. Searches queue
+//     for a connection instead of all running at once: the price of the
+//     memory bound, paid by the heaviest query rather than by publishing.
+//
+// Idle connections are kept up to each bound, so a burst does not close
+// and reopen connections as it ebbs and flows, and closed after
+// maxConnIdleTime, so a quiet relay gives back what a burst opened. An
+// in-process DuckDB connection never goes stale, so there is no lifetime
+// cap. Waiting callers queue under their own context: a REQ stops waiting
+// on disconnect, and a search's wait counts against its work budget.
+func configurePools(control, query *sql.DB) {
+	q := maxQueryConns()
+	query.SetMaxOpenConns(q)
+	query.SetMaxIdleConns(q)
+	query.SetConnMaxIdleTime(maxConnIdleTime)
+
+	c := maxControlConns()
+	control.SetMaxOpenConns(c)
+	control.SetMaxIdleConns(c)
+	control.SetConnMaxIdleTime(maxConnIdleTime)
+}
+
+// dsn builds the DuckDB data source name: the database path, with any
+// settings as query parameters, which duckdb-go applies as database
+// configuration when it opens the file.
+func dsn(path string, opts Options) string {
+	if opts.MemoryLimit == "" {
+		return path
+	}
+	return path + "?" + url.Values{"memory_limit": {opts.MemoryLimit}}.Encode()
+}
+
+// sharedConnector hands the query pool the control pool's connector without
+// its Close: sql.DB.Close closes a connector that implements io.Closer, and
+// closing the query pool must not close the database under the control
+// pool. The control pool owns the database and closes it last.
+type sharedConnector struct{ driver.Connector }
+
 func NewRepository(path string) (*Repository, error) {
-	db, err := sql.Open("duckdb", path)
+	return NewRepositoryWithOptions(path, Options{})
+}
+
+// NewRepositoryWithOptions opens the database at path with opts applied,
+// opens its two bounded pools, and runs any pending migrations.
+func NewRepositoryWithOptions(path string, opts Options) (*Repository, error) {
+	connector, err := duckdbdriver.NewConnector(dsn(path, opts), nil)
 	if err != nil {
 		return nil, err
 	}
+	control := sql.OpenDB(connector)
+	query := sql.OpenDB(sharedConnector{connector})
+	configurePools(control, query)
 
-	if err := RunMigrations(context.Background(), db); err != nil {
-		db.Close()
+	if err := RunMigrations(context.Background(), control); err != nil {
+		query.Close()
+		control.Close()
 		return nil, err
 	}
 
-	return &Repository{db: db}, nil
+	return &Repository{db: control, queryDB: query}, nil
 }
 
-// StatsCollector exposes the connection pool's database/sql statistics as
-// go_sql_* metrics labelled db_name="duckdb": open, in-use and idle
-// connections, how often and how long callers waited for one, and how
-// many were closed for idling. It is how a pool bound is seen working —
-// or seen starving callers — in production (nostrfi/relay#73).
-func (r *Repository) StatsCollector() prometheus.Collector {
-	return collectors.NewDBStatsCollector(r.db, "duckdb")
+// StatsCollectors expose each pool's database/sql statistics as go_sql_*
+// metrics, labelled db_name="duckdb_query" and db_name="duckdb_control":
+// open, in-use and idle connections, how often and how long callers
+// waited for one, and how many were closed for idling. They are how a
+// pool bound is seen working — or seen starving callers — in production
+// (nostrfi/relay#73).
+func (r *Repository) StatsCollectors() []prometheus.Collector {
+	return []prometheus.Collector{
+		collectors.NewDBStatsCollector(r.queries(), "duckdb_query"),
+		collectors.NewDBStatsCollector(r.db, "duckdb_control"),
+	}
 }
 
 // CountEvents returns how many events the database holds, expired and banned
@@ -340,7 +468,7 @@ func (r *Repository) QueryEvents(ctx context.Context, filter nostr.Filter) ([]*d
 // agree about which events a filter matches.
 func (r *Repository) QuerySyncItems(ctx context.Context, filter nostr.Filter) ([]domainevent.SyncItem, error) {
 	statement, args := syncQuery(filter)
-	rows, err := r.db.QueryContext(ctx, statement, args...)
+	rows, err := r.queries().QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -426,7 +554,7 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query) (
 		statement += fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
 
-	rows, err := r.db.QueryContext(ctx, statement, args...)
+	rows, err := r.queries().QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -633,11 +761,17 @@ func prefixMatchCondition(column string, values []string) (string, []any) {
 	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
+// Close closes the query pool, then the control pool, which owns the
+// database (see sharedConnector).
 func (r *Repository) Close() error {
-	if r.db != nil {
-		return r.db.Close()
+	var err error
+	if r.queryDB != nil {
+		err = r.queryDB.Close()
 	}
-	return nil
+	if r.db != nil {
+		err = errors.Join(err, r.db.Close())
+	}
+	return err
 }
 
 // getLegacyTags reconstructs an event's tags from the tags index table,
@@ -646,7 +780,7 @@ func (r *Repository) Close() error {
 // decodeTags); every event saved since then is reconstructed from its
 // own tags_json column instead.
 func (r *Repository) getLegacyTags(ctx context.Context, eventID string) nostr.Tags {
-	rows, err := r.db.QueryContext(ctx, "SELECT tag, value FROM tags WHERE event_id = ?", eventID)
+	rows, err := r.queries().QueryContext(ctx, "SELECT tag, value FROM tags WHERE event_id = ?", eventID)
 	if err != nil {
 		return nil
 	}
