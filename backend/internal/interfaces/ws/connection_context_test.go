@@ -60,6 +60,7 @@ func (stubModerationService) ListBlockedIPs(context.Context) ([]moderation.Moder
 type stubEventService struct {
 	saveEvent   func(ctx context.Context, ev *event.Event) (bool, error)
 	queryEvents func(ctx context.Context, f nostr.Filter) ([]*event.Event, error)
+	querySync   func(ctx context.Context, f nostr.Filter) ([]event.SyncItem, error)
 }
 
 func (s *stubEventService) SaveEvent(ctx context.Context, ev *event.Event) (bool, error) {
@@ -77,6 +78,9 @@ func (s *stubEventService) QueryEvents(ctx context.Context, f nostr.Filter) ([]*
 }
 
 func (s *stubEventService) QuerySyncItems(ctx context.Context, f nostr.Filter) ([]event.SyncItem, error) {
+	if s.querySync != nil {
+		return s.querySync(ctx, f)
+	}
 	return nil, nil
 }
 

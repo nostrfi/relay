@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"relay/internal/application"
 	"relay/pkg/metrics"
@@ -389,7 +390,7 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 		}
 		limitation := h.relayInfo.Limitation
 		_, subExisted := c.subscriptions.Load(subID)
-		if limitation != nil && limitation.MaxSubidLength > 0 && len(subID) > limitation.MaxSubidLength {
+		if limitation != nil && limitation.MaxSubidLength > 0 && utf8.RuneCountInString(subID) > limitation.MaxSubidLength {
 			h.sendClosed(c, subID, fmt.Sprintf("%s: subscription id longer than %d characters", prefixInvalid, limitation.MaxSubidLength))
 			return
 		}
@@ -449,6 +450,12 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 		var subID string
 		if err := json.Unmarshal(raw[1], &subID); err != nil {
 			h.sendNegErr(c, "", prefixInvalid+": invalid subscription ID")
+			return
+		}
+		// The same id-length rule REQ applies. No stored session can have
+		// an id over the limit, so there is nothing to close here.
+		if limitation := h.relayInfo.Limitation; limitation != nil && limitation.MaxSubidLength > 0 && utf8.RuneCountInString(subID) > limitation.MaxSubidLength {
+			h.sendNegErr(c, subID, fmt.Sprintf("%s: subscription id longer than %d characters", prefixInvalid, limitation.MaxSubidLength))
 			return
 		}
 		// handleMessage guarantees two elements, not four, and it runs on

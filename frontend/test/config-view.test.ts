@@ -12,7 +12,7 @@ import {
 
 /** A relay configured explicitly — every field set in config.yaml. */
 const configured: RelayConfig = {
-  resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5, search_timeout_seconds: 5, max_sync_events: 1000000 },
+  resource_limits: { max_connections: 1000, messages_per_second: 20, events_per_second: 5, search_timeout_seconds: 5, max_sync_events: 1000000, max_sync_sessions: 10 },
   auth: { relay_url: 'wss://relay.example.com', max_event_age_seconds: 600 },
   moderation: { admin_pubkey: 'a'.repeat(64), max_event_age_seconds: 60, api_origin: 'https://relay.example.com' },
   websocket: { mode: 'production', allowed_origins: ['https://relay.example.com'] },
@@ -24,7 +24,7 @@ const configured: RelayConfig = {
 /** What the relay reports when config.yaml omits those sections. */
 const omitted: RelayConfig = {
   ...configured,
-  resource_limits: { max_connections: 0, messages_per_second: 0, events_per_second: 0, search_timeout_seconds: 0, max_sync_events: 0 },
+  resource_limits: { max_connections: 0, messages_per_second: 0, events_per_second: 0, search_timeout_seconds: 0, max_sync_events: 0, max_sync_sessions: 0 },
   auth: { relay_url: '', max_event_age_seconds: 600 },
   websocket: { mode: 'development', allowed_origins: [] }
 }
@@ -88,6 +88,12 @@ describe('hasNoResourceLimits', () => {
     expect(hasNoResourceLimits({ ...omitted, resource_limits: { ...omitted.resource_limits, max_sync_events: 1000000 } })).toBe(true)
   })
 
+  it('still warns when only the sync session cap is set', () => {
+    // max_sync_sessions also defaults on server-side and bounds memory
+    // per connection, not admission or rate.
+    expect(hasNoResourceLimits({ ...omitted, resource_limits: { ...omitted.resource_limits, max_sync_sessions: 10 } })).toBe(true)
+  })
+
   it('is false when any limit is set', () => {
     expect(hasNoResourceLimits(configured)).toBe(false)
     expect(hasNoResourceLimits({ ...omitted, resource_limits: { ...omitted.resource_limits, max_connections: 10 } })).toBe(false)
@@ -114,6 +120,7 @@ describe('configSections', () => {
   it('renders a fully configured relay as written', () => {
     expect(rowsOf(configured, 'Resource limits')['Max connections']).toBe('1000 connections')
     expect(rowsOf(configured, 'Resource limits')['Max sync events']).toBe('1000000 events')
+    expect(rowsOf(configured, 'Resource limits')['Max sync sessions']).toBe('10 per connection')
     expect(rowsOf(configured, 'WebSocket origins')['Allowed origins']).toBe('https://relay.example.com')
     expect(rowsOf(configured, 'Listener')['Listen address']).toBe(':8080')
     // The metrics listener is a separate address, and an operator whose

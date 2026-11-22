@@ -56,6 +56,13 @@ type ResourceLimits struct {
 	// rather than truncated, since a truncated set silently mis-syncs
 	// (nostrfi/relay#70). Zero disables the cap.
 	MaxSyncEvents int `mapstructure:"max_sync_events"`
+	// MaxSyncSessions caps the NIP-77 sessions one connection may hold
+	// open at once. Each holds its whole reconciliation vector, up to
+	// MaxSyncEvents items, until NEG-CLOSE, a NEG-OPEN reusing its id, a
+	// failed reconcile or disconnect. A NEG-OPEN past the cap is refused
+	// with NEG-ERR "blocked" before its query runs (nostrfi/relay#71).
+	// Zero disables the cap.
+	MaxSyncSessions int `mapstructure:"max_sync_sessions"`
 }
 
 // AuthConfig binds NIP-42 authentication to this specific relay instance.
@@ -204,6 +211,12 @@ const defaultSearchTimeoutSeconds = 5
 // negentropy vector per session.
 const defaultMaxSyncEvents = 1_000_000
 
+// defaultMaxSyncSessions is the per-connection NIP-77 session cap applied
+// when a configuration does not mention resource_limits.max_sync_sessions,
+// again so an explicit zero still disables it. Ten sessions at the default
+// MaxSyncEvents bounds one connection to roughly 400 MB of vectors.
+const defaultMaxSyncSessions = 10
+
 // configSearchPaths lists where a config.yaml is looked for, in order.
 //
 // The relay used to look only in the working directory, which is right for
@@ -277,6 +290,7 @@ func LoadConfig() (*Config, error) {
 	// gets the shipped budget; an explicit zero still disables it.
 	viper.SetDefault("resource_limits.search_timeout_seconds", defaultSearchTimeoutSeconds)
 	viper.SetDefault("resource_limits.max_sync_events", defaultMaxSyncEvents)
+	viper.SetDefault("resource_limits.max_sync_sessions", defaultMaxSyncSessions)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
