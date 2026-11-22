@@ -4820,7 +4820,7 @@ func TestConfigAPIReportsEffectiveValues(t *testing.T) {
 		Websocket:      ws.WebsocketConfig{Mode: "production", AllowedOrigins: []string{"https://relay.example.com"}},
 		Retention:      ws.RetentionConfig{PurgeIntervalSeconds: 3600},
 		Server:         ws.ServerConfig{ListenAddr: ":8080", ShutdownTimeoutSeconds: 5},
-		Storage:        ws.StorageConfig{DBPath: "db/relay.db"},
+		Storage:        ws.StorageConfig{DBPath: "db/relay.db", MemoryLimit: "512MB"},
 	}
 	server := startTestRelayWithAdminAPI(t, cfg)
 
@@ -4844,6 +4844,7 @@ func TestConfigAPIReportsEffectiveValues(t *testing.T) {
 	assert.Equal(t, float64(3600), section("retention")["purge_interval_seconds"])
 	assert.Equal(t, ":8080", section("server")["listen_addr"])
 	assert.Equal(t, "db/relay.db", section("storage")["db_path"])
+	assert.Equal(t, "512MB", section("storage")["memory_limit"])
 
 	// The identity fields stay on NIP-11, which the dashboard reads
 	// separately: this endpoint must not duplicate them.

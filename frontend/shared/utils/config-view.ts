@@ -113,7 +113,10 @@ export function configSections(config: RelayConfig): ConfigSection[] {
     },
     {
       title: 'Storage',
-      rows: [{ label: 'Database path', value: formatText(config.storage.db_path), mono: true }]
+      rows: [
+        { label: 'Database path', value: formatText(config.storage.db_path), mono: true },
+        { label: 'Memory limit', value: config.storage.memory_limit || 'DuckDB default (80% of RAM)', mono: true }
+      ]
     }
   ]
 }

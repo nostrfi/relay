@@ -41,5 +41,6 @@ export interface RelayConfig {
   }
   storage: {
     db_path: string
+    memory_limit: string
   }
 }

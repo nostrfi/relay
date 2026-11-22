@@ -16,6 +16,8 @@ import (
 	"relay/internal/infrastructure/duckdb"
 	"relay/internal/interfaces/ws"
 	"relay/pkg/logger"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // version is injected at build time via -ldflags "-X main.version=..."
@@ -58,12 +60,13 @@ func main() {
 	slog.Info("Starting relay", "version", version)
 
 	// 3. Initialize Repository
-	repo, err := duckdb.NewRepository(cfg.Storage.DBPath)
+	repo, err := duckdb.NewRepositoryWithOptions(cfg.Storage.DBPath, duckdb.Options{MemoryLimit: cfg.Storage.MemoryLimit})
 	if err != nil {
 		slog.Error("failed to open storage", "error", err)
 		os.Exit(1)
 	}
 	logOpenedStorage(cfg.Storage.DBPath, repo)
+	prometheus.MustRegister(repo.StatsCollectors()...)
 
 	// 4. Initialize Services
 	eventService := application.NewEventService(repo)

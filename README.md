@@ -293,6 +293,7 @@ server:
 
 storage:
   db_path: "db/relay.db"                   # shared by normal startup and the -backup/-restore flags
+  memory_limit: ""                         # DuckDB memory_limit, e.g. "512MB"; empty = 80% of system RAM
 ```
 
 All four settings default to the values shown above when unset. `metrics_listen_addr` may also be
@@ -306,6 +307,28 @@ A **relative** `db_path` is relative to the configuration file that set it, so t
 where the file that names it does — `backend/db/relay.db` for `backend/config.yaml`, whichever
 directory the relay was started from, and `/app/db/relay.db` in the container. Give an absolute
 path to put it anywhere else.
+
+`storage.memory_limit` sets DuckDB's `memory_limit`, in DuckDB's own syntax (`"512MB"`, `"2GB"`):
+the ceiling on its buffer manager, which holds cached table data and the intermediate results it
+can spill to disk. Unset, DuckDB allows itself 80% of the host's RAM, more than a small container
+has, so set it when the relay runs under a container memory limit, leaving room for the Go
+process. It is not a cap on the relay's whole footprint: it does not cover what running queries
+allocate outside the buffer manager or on the Go side, which the connection pools below bound. On
+a small database (12 MB, 100 concurrent searches) a 256 MB limit made no measurable difference to
+peak RSS, because the buffer manager was not the large part; it matters as the database outgrows
+the cache. A value DuckDB does not accept stops the relay at startup.
+
+The relay talks to DuckDB through two bounded connection pools on the one database. The **query**
+pool (twice the CPU count, at least 4) serves `REQ`s, NIP-77 syncs, the events API and the
+dashboard's statistics. The **control** pool (one per CPU, at least 4) serves everything else:
+saving events and the ban check before each save, the IP block check on each new connection,
+`/readyz`, moderation and maintenance. A burst of searches therefore queues for the query pool
+instead of all running at once, which bounds memory, and never delays a publish, a new
+connection or a readiness probe. Measured on 16 CPUs with 100 concurrent searchers, the bound cut
+peak RSS by about 40% and improved publish latency, at the cost of about a second on the slowest
+searches. Each pool's use is on `/metrics` as the `go_sql_*` series labelled
+`db_name="duckdb_query"` and `db_name="duckdb_control"`; a growing
+`go_sql_wait_duration_seconds_total` shows callers waiting for a connection.
 
 ### Health and readiness
 

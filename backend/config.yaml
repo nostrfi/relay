@@ -70,3 +70,4 @@ server:
 
 storage:
   db_path: "db/relay.db" # shared by normal startup and the -backup/-restore flags
+  memory_limit: "" # DuckDB memory_limit, e.g. "512MB"; empty keeps DuckDB's default of 80% of system RAM
