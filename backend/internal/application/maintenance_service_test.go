@@ -26,7 +26,7 @@ func (f *fakeEventRepository) SaveEvent(ctx context.Context, ev *event.Event) (b
 func (f *fakeEventRepository) QueryEvents(ctx context.Context, filter nostr.Filter) ([]*event.Event, error) {
 	return nil, nil
 }
-func (f *fakeEventRepository) QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error) {
+func (f *fakeEventRepository) QuerySyncItems(ctx context.Context, filter nostr.Filter) ([]event.SyncItem, error) {
 	return nil, nil
 }
 

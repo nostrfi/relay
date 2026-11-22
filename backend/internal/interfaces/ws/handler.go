@@ -451,6 +451,13 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 			h.sendNegErr(c, "", prefixInvalid+": invalid subscription ID")
 			return
 		}
+		// handleMessage guarantees two elements, not four, and it runs on
+		// a goroutine with no recover: indexing past the frame would panic
+		// and take the relay down (nostrfi/relay#70).
+		if len(raw) < 4 {
+			h.sendNegErr(c, subID, prefixInvalid+": NEG-OPEN needs a filter and an initial message")
+			return
+		}
 		var filter nostr.Filter
 		if err := json.Unmarshal(raw[2], &filter); err != nil {
 			h.sendNegErr(c, subID, prefixInvalid+": invalid filter")
@@ -470,6 +477,10 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 		var subID string
 		if err := json.Unmarshal(raw[1], &subID); err != nil {
 			h.sendNegErr(c, "", prefixInvalid+": invalid subscription ID")
+			return
+		}
+		if len(raw) < 3 {
+			h.sendNegErr(c, subID, prefixInvalid+": NEG-MSG needs a message")
 			return
 		}
 		var msgHex string

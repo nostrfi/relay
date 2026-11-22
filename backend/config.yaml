@@ -25,6 +25,7 @@ resource_limits:
   messages_per_second: 20
   events_per_second: 5
   search_timeout_seconds: 5 # a NIP-50 search past this budget is cancelled and answered with CLOSED; 0 disables
+  max_sync_events: 1000000 # a NIP-77 sync covering more events is refused with NEG-ERR blocked; 0 disables
 
 auth:
   # This relay's public wss:// URL. Binds NIP-42 AUTH to it, and gives the

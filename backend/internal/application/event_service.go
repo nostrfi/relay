@@ -16,7 +16,7 @@ import (
 type EventService interface {
 	SaveEvent(ctx context.Context, ev *event.Event) (bool, error)
 	QueryEvents(ctx context.Context, filter nostr.Filter) ([]*event.Event, error)
-	QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error)
+	QuerySyncItems(ctx context.Context, filter nostr.Filter) ([]event.SyncItem, error)
 	QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error)
 	CountEvents(ctx context.Context) (int64, error)
 	EventStats(ctx context.Context, query event.StatsQuery) (event.Stats, error)
@@ -40,8 +40,8 @@ func (s *eventService) QueryEvents(ctx context.Context, filter nostr.Filter) ([]
 	return s.repo.QueryEvents(ctx, filter)
 }
 
-func (s *eventService) QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*event.Event, error) {
-	return s.repo.QueryEventsSorted(ctx, filter)
+func (s *eventService) QuerySyncItems(ctx context.Context, filter nostr.Filter) ([]event.SyncItem, error) {
+	return s.repo.QuerySyncItems(ctx, filter)
 }
 
 func (s *eventService) QueryEventsMatching(ctx context.Context, query event.Query) ([]*event.Event, error) {

@@ -14,6 +14,7 @@ export interface RelayConfig {
     messages_per_second: number
     events_per_second: number
     search_timeout_seconds: number
+    max_sync_events: number
   }
   auth: {
     relay_url: string

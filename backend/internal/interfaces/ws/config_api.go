@@ -42,6 +42,7 @@ type ResourceLimitsView struct {
 	MessagesPerSecond    int `json:"messages_per_second"`
 	EventsPerSecond      int `json:"events_per_second"`
 	SearchTimeoutSeconds int `json:"search_timeout_seconds"`
+	MaxSyncEvents        int `json:"max_sync_events"`
 }
 
 type AuthView struct {
@@ -95,6 +96,7 @@ func NewConfigSnapshot(cfg Config) ConfigSnapshot {
 			MessagesPerSecond:    cfg.ResourceLimits.MessagesPerSecond,
 			EventsPerSecond:      cfg.ResourceLimits.EventsPerSecond,
 			SearchTimeoutSeconds: cfg.ResourceLimits.SearchTimeoutSeconds,
+			MaxSyncEvents:        cfg.ResourceLimits.MaxSyncEvents,
 		},
 		Auth: AuthView{
 			RelayURL:           cfg.Auth.RelayURL,

@@ -313,23 +313,62 @@ func selectEventIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) 
 }
 
 func (r *Repository) QueryEvents(ctx context.Context, filter nostr.Filter) ([]*domainevent.Event, error) {
-	events, err := r.queryEvents(ctx, domainevent.Query{Filter: filter}, false)
+	events, err := r.queryEvents(ctx, domainevent.Query{Filter: filter})
 	if err != nil {
 		return nil, err
 	}
 	return wrapEvents(events), nil
 }
 
-func (r *Repository) QueryEventsSorted(ctx context.Context, filter nostr.Filter) ([]*domainevent.Event, error) {
-	events, err := r.queryEvents(ctx, domainevent.Query{Filter: filter}, true)
+// QuerySyncItems answers a NIP-77 reconciliation: the id and created_at of
+// every stored event the filter matches, oldest first. Reconciliation
+// needs nothing else, so content, sig and tags_json are never read and no
+// tags are reconstructed — on a large relay, loading whole events here was
+// a multi-gigabyte allocation per sync (nostrfi/relay#70). The conditions
+// are the ones a REQ applies, from the same builder, so a sync and a REQ
+// agree about which events a filter matches.
+func (r *Repository) QuerySyncItems(ctx context.Context, filter nostr.Filter) ([]domainevent.SyncItem, error) {
+	statement, args := syncQuery(filter)
+	rows, err := r.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, err
 	}
-	return wrapEvents(events), nil
+	defer rows.Close()
+
+	var items []domainevent.SyncItem
+	for rows.Next() {
+		var item domainevent.SyncItem
+		if err := rows.Scan(&item.ID, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	// As in queryEvents: a cancellation mid-iteration must surface rather
+	// than hand back a truncated set as if it were the whole one — a peer
+	// reconciling against a partial vector would be told it holds events
+	// this relay lacks.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// syncQuery builds QuerySyncItems' statement. The select list is the whole
+// point of the method, so it is built separately for a test to pin.
+func syncQuery(filter nostr.Filter) (string, []any) {
+	conditions, args, _ := eventConditions(domainevent.Query{Filter: filter}, true)
+	// Negentropy reconciliation compares ordered vectors, so this ordering
+	// is a wire requirement.
+	statement := "SELECT e.id, e.created_at FROM events e WHERE " + strings.Join(conditions, " AND ") +
+		" ORDER BY e.created_at ASC, e.id ASC"
+	if filter.Limit > 0 {
+		statement += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+	return statement, args
 }
 
 func (r *Repository) QueryEventsMatching(ctx context.Context, query domainevent.Query) ([]*domainevent.Event, error) {
-	events, err := r.queryEvents(ctx, query, false)
+	events, err := r.queryEvents(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -348,11 +387,71 @@ func wrapEvents(events []*nostr.Event) []*domainevent.Event {
 	return wrapped
 }
 
-func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, sortedForSync bool) ([]*nostr.Event, error) {
+func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query) ([]*nostr.Event, error) {
 	filter := query.Filter
+	conditions, args, searchTerm := eventConditions(query, false)
 
-	var conditions []string
-	var args []any
+	statement := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json FROM events e" +
+		" WHERE " + strings.Join(conditions, " AND ")
+	if searchTerm != "" {
+		// NIP-50: "Results SHOULD be returned in descending order by
+		// quality of search result... not by the usual .created_at", and
+		// the limit applies after that sort — which it does, since the
+		// LIMIT below is applied to this ordering.
+		//
+		// Quality here is deliberately modest, because an ILIKE scan
+		// produces no relevance score to sort by: the earliest occurrence
+		// first, then the shortest content, then the newest. A term in the
+		// opening words of a short note is more likely to be its subject
+		// than the same term buried in a four-thousand-character wall.
+		// README.md states this in full; it is not BM25 and does not
+		// pretend to be.
+		statement += " ORDER BY strpos(lower(e.content), lower(?)) ASC, length(e.content) ASC, e.created_at DESC, e.id ASC"
+		args = append(args, searchTerm)
+	} else {
+		statement += " ORDER BY e.created_at DESC, e.id ASC"
+	}
+	if filter.Limit > 0 {
+		statement += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+
+	rows, err := r.db.QueryContext(ctx, statement, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []*nostr.Event
+	for rows.Next() {
+		var ev nostr.Event
+		var tagsJSON sql.NullString
+		err := rows.Scan(&ev.ID, &ev.PubKey, &ev.CreatedAt, &ev.Kind, &ev.Content, &ev.Sig, &tagsJSON)
+		if err != nil {
+			return nil, err
+		}
+		ev.Tags = r.reconstructTags(ctx, ev.ID, tagsJSON)
+		events = append(events, &ev)
+	}
+	// rows.Err carries a context cancellation or deadline that fired while
+	// rows were being iterated — after QueryContext itself succeeded.
+	// Swallowing it returned a silently truncated result set with a nil
+	// error, which upstream answers with EOSE as if the query completed;
+	// the search work budget (workspace #59) depends on the deadline
+	// surfacing so the client gets CLOSED instead of a partial answer
+	// presented as a full one.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// eventConditions builds the WHERE conditions a filter implies, shared by
+// queryEvents and syncQuery so a REQ and a sync cannot drift apart on
+// which events a filter matches. It always includes the expiration and ban
+// exclusions, so the list is never empty. searchTerm is the NIP-50 term
+// the caller must order by, empty for a sync read or a filter without one.
+func eventConditions(query domainevent.Query, forSync bool) (conditions []string, args []any, searchTerm string) {
+	filter := query.Filter
 
 	if len(filter.IDs) > 0 {
 		cond, condArgs := prefixMatchCondition("e.id", filter.IDs)
@@ -433,14 +532,13 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, s
 	// different order. The term arrives already stripped of the NIP's
 	// key:value extensions; this layer matches what it is given.
 	//
-	// Not applied to a sync read. NEG-OPEN hands its filter straight from
-	// the wire to QueryEventsSorted (interfaces/ws/negentropy.go), so a
-	// search term would arrive there unparsed and unbounded — none of the
-	// REQ path's guardrails having run. NIP-77 defines no search semantics
-	// anyway, and quietly narrowing a reconciliation by a substring would
-	// leave two peers disagreeing about what the other holds.
-	searchTerm := ""
-	if !sortedForSync {
+	// Not applied to a sync read. NEG-OPEN hands its filter from the wire
+	// to QuerySyncItems without the REQ path's search parsing, so a term
+	// would arrive there unparsed and unbounded. NIP-77 defines no search
+	// semantics anyway, and quietly narrowing a reconciliation by a
+	// substring would leave two peers disagreeing about what the other
+	// holds.
+	if !forSync {
 		searchTerm = query.Filter.Search
 	}
 	if searchTerm != "" {
@@ -448,71 +546,10 @@ func (r *Repository) queryEvents(ctx context.Context, query domainevent.Query, s
 		args = append(args, "%"+escapeLikePattern(searchTerm)+"%")
 	}
 
-	statement := "SELECT e.id, e.pubkey, e.created_at, e.kind, e.content, e.sig, e.tags_json FROM events e"
-	now := nostr.Now()
 	conditions = append(conditions, "(e.expiration IS NULL OR e.expiration > ?)")
-	args = append(args, now)
+	args = append(args, nostr.Now())
 	conditions = append(conditions, "e.id NOT IN (SELECT event_id FROM banned_events)")
-
-	if len(conditions) > 0 {
-		statement += " WHERE " + strings.Join(conditions, " AND ")
-	}
-	switch {
-	case sortedForSync:
-		// Negentropy reconciliation compares ordered vectors, so this
-		// ordering is a wire requirement. Search is excluded from this
-		// path entirely (above), so the two never contend.
-		statement += " ORDER BY e.created_at ASC, e.id ASC"
-	case searchTerm != "":
-		// NIP-50: "Results SHOULD be returned in descending order by
-		// quality of search result... not by the usual .created_at", and
-		// the limit applies after that sort — which it does, since the
-		// LIMIT below is applied to this ordering.
-		//
-		// Quality here is deliberately modest, because an ILIKE scan
-		// produces no relevance score to sort by: the earliest occurrence
-		// first, then the shortest content, then the newest. A term in the
-		// opening words of a short note is more likely to be its subject
-		// than the same term buried in a four-thousand-character wall.
-		// README.md states this in full; it is not BM25 and does not
-		// pretend to be.
-		statement += " ORDER BY strpos(lower(e.content), lower(?)) ASC, length(e.content) ASC, e.created_at DESC, e.id ASC"
-		args = append(args, searchTerm)
-	default:
-		statement += " ORDER BY e.created_at DESC, e.id ASC"
-	}
-	if filter.Limit > 0 {
-		statement += fmt.Sprintf(" LIMIT %d", filter.Limit)
-	}
-
-	rows, err := r.db.QueryContext(ctx, statement, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var events []*nostr.Event
-	for rows.Next() {
-		var ev nostr.Event
-		var tagsJSON sql.NullString
-		err := rows.Scan(&ev.ID, &ev.PubKey, &ev.CreatedAt, &ev.Kind, &ev.Content, &ev.Sig, &tagsJSON)
-		if err != nil {
-			return nil, err
-		}
-		ev.Tags = r.reconstructTags(ctx, ev.ID, tagsJSON)
-		events = append(events, &ev)
-	}
-	// rows.Err carries a context cancellation or deadline that fired while
-	// rows were being iterated — after QueryContext itself succeeded.
-	// Swallowing it returned a silently truncated result set with a nil
-	// error, which upstream answers with EOSE as if the query completed;
-	// the search work budget (workspace #59) depends on the deadline
-	// surfacing so the client gets CLOSED instead of a partial answer
-	// presented as a full one.
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return events, nil
+	return conditions, args, searchTerm
 }
 
 // reconstructTags returns the event's tags with full fidelity when

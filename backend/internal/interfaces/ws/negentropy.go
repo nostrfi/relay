@@ -20,8 +20,21 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 		return
 	}
 
+	// max_sync_events bounds the reconciliation set. A query asking for
+	// more — no limit, or one above the cap — reads one row past the cap,
+	// so an oversized set is detected without being loaded, and refused
+	// rather than truncated: sync order is oldest first, so a truncated
+	// vector would tell the peer this relay lacks every newer event, with
+	// no error to say so. NIP-77 names "blocked" for exactly this refusal.
+	maxItems := h.resourceLimits.MaxSyncEvents
+	query := filter
+	capped := maxItems > 0 && (filter.Limit <= 0 || filter.Limit > maxItems)
+	if capped {
+		query.Limit = maxItems + 1
+	}
+
 	start := time.Now()
-	events, err := h.eventService.QueryEventsSorted(c.ctx, filter)
+	syncItems, err := h.eventService.QuerySyncItems(c.ctx, query)
 	metrics.QueryDuration.WithLabelValues("negentropy").Observe(time.Since(start).Seconds())
 	if err != nil {
 		// As in handleReq: a disconnect mid-query is the connection ending,
@@ -35,13 +48,21 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 		return
 	}
 
+	if capped && len(syncItems) > maxItems {
+		// A NEG-OPEN replaces any session under the same id, so a refused
+		// one must not leave the previous session answering NEG-MSGs.
+		c.negSessions.Delete(subID)
+		h.sendNegErr(c, subID, prefixBlocked+": this query is too big")
+		return
+	}
+
 	items := negentropy.NewVector()
-	for _, ev := range events {
-		idBytes, err := hex.DecodeString(ev.ID)
+	for _, item := range syncItems {
+		idBytes, err := hex.DecodeString(item.ID)
 		if err != nil {
 			continue
 		}
-		items.Insert(uint64(ev.CreatedAt), idBytes)
+		items.Insert(uint64(item.CreatedAt), idBytes)
 	}
 	items.Seal()
 

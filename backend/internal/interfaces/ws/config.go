@@ -51,6 +51,11 @@ type ResourceLimits struct {
 	// (workspace #59; measured in capacity-baseline.md's search
 	// scenarios). Zero disables the budget.
 	SearchTimeoutSeconds int `mapstructure:"search_timeout_seconds"`
+	// MaxSyncEvents caps the events one NIP-77 reconciliation may cover. A
+	// NEG-OPEN whose filter matches more is refused with NEG-ERR "blocked"
+	// rather than truncated, since a truncated set silently mis-syncs
+	// (nostrfi/relay#70). Zero disables the cap.
+	MaxSyncEvents int `mapstructure:"max_sync_events"`
 }
 
 // AuthConfig binds NIP-42 authentication to this specific relay instance.
@@ -192,6 +197,13 @@ const defaultMetricsListenAddr = "127.0.0.1:2112"
 // Unmarshal, zero-because-absent and zero-on-purpose are the same value.
 const defaultSearchTimeoutSeconds = 5
 
+// defaultMaxSyncEvents is the NIP-77 reconciliation cap applied when a
+// configuration does not mention resource_limits.max_sync_events, for the
+// same reason as defaultSearchTimeoutSeconds: an explicit zero must still
+// disable it. A million (id, created_at) items is roughly 40 MB of
+// negentropy vector per session.
+const defaultMaxSyncEvents = 1_000_000
+
 // configSearchPaths lists where a config.yaml is looked for, in order.
 //
 // The relay used to look only in the working directory, which is right for
@@ -264,6 +276,7 @@ func LoadConfig() (*Config, error) {
 	// See defaultSearchTimeoutSeconds: a config that never mentions the key
 	// gets the shipped budget; an explicit zero still disables it.
 	viper.SetDefault("resource_limits.search_timeout_seconds", defaultSearchTimeoutSeconds)
+	viper.SetDefault("resource_limits.max_sync_events", defaultMaxSyncEvents)
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

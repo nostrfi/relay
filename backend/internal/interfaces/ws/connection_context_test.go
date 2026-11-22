@@ -76,7 +76,7 @@ func (s *stubEventService) QueryEvents(ctx context.Context, f nostr.Filter) ([]*
 	return nil, nil
 }
 
-func (s *stubEventService) QueryEventsSorted(ctx context.Context, f nostr.Filter) ([]*event.Event, error) {
+func (s *stubEventService) QuerySyncItems(ctx context.Context, f nostr.Filter) ([]event.SyncItem, error) {
 	return nil, nil
 }
 

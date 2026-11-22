@@ -3397,6 +3397,35 @@ resource_limits:
 	})
 }
 
+// TestConfigMaxSyncEventsDefault pins the NIP-77 reconciliation cap the
+// same way TestConfigSearchTimeoutDefault pins the search budget: an
+// absent key gets the shipped cap, an explicit zero still disables it
+// (nostrfi/relay#70).
+func TestConfigMaxSyncEventsDefault(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   int
+	}{
+		{"an absent key gets the shipped default", "resource_limits:\n  max_connections: 100\n", 1_000_000},
+		{"an explicit zero still disables the cap", "resource_limits:\n  max_sync_events: 0\n", 0},
+		{"an explicit value wins", "resource_limits:\n  max_sync_events: 5000\n", 5000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(tt.config), 0644))
+			viper.Reset()
+			viper.SetConfigName("config")
+			viper.SetConfigType("yaml")
+			viper.AddConfigPath(tmpDir)
+			cfg, err := ws.LoadConfig()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.ResourceLimits.MaxSyncEvents)
+		})
+	}
+}
+
 func TestConfigServerStorageDefaults(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
 	if err != nil {
@@ -3915,6 +3944,122 @@ func TestNegentropyNoPayloadInLogs(t *testing.T) {
 	logged := buf.String()
 	assert.NotContains(t, logged, "6100000000", "the raw Negentropy hex payload must never be logged")
 	assert.Contains(t, logged, subID, "the subscription ID may still be logged")
+}
+
+// TestNegentropySyncCap covers resource_limits.max_sync_events: a NEG-OPEN
+// whose filter matches more events than the cap is refused with NEG-ERR
+// "blocked" and opens no session, rather than reconciling a truncated set
+// that would mis-sync silently (nostrfi/relay#70).
+func TestNegentropySyncCap(t *testing.T) {
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{}, ws.ResourceLimits{MaxSyncEvents: 3})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+
+	sk := nostr.GeneratePrivateKey()
+	pk, _ := nostr.GetPublicKey(sk)
+	for i := range 4 {
+		ev := nostr.Event{PubKey: pk, CreatedAt: nostr.Now() - nostr.Timestamp(i), Kind: 1, Content: fmt.Sprintf("cap %d", i)}
+		require.NoError(t, ev.Sign(sk))
+		msg, _ := json.Marshal([]any{"EVENT", ev})
+		require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+		c.readOK(t)
+	}
+
+	// negOpen sends a NEG-OPEN from an empty client set and returns the
+	// relay's NEG-MSG or NEG-ERR reply.
+	negOpen := func(t *testing.T, subID string, filter nostr.Filter) []any {
+		t.Helper()
+		items := negentropy.NewVector()
+		items.Seal()
+		clientNeg, err := negentropy.NewNegentropy(items, 0)
+		require.NoError(t, err)
+		initial, err := clientNeg.Initiate()
+		require.NoError(t, err)
+		msg, _ := json.Marshal([]any{"NEG-OPEN", subID, filter, hex.EncodeToString(initial)})
+		require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+		for {
+			reply := c.readMessageAny(t)
+			if (reply[0] == "NEG-MSG" || reply[0] == "NEG-ERR") && reply[1] == subID {
+				return reply
+			}
+		}
+	}
+
+	tests := []struct {
+		name    string
+		filter  nostr.Filter
+		blocked bool
+	}{
+		{"no limit over the cap is refused", nostr.Filter{Authors: []string{pk}}, true},
+		{"a limit above the cap is refused", nostr.Filter{Authors: []string{pk}, Limit: 10}, true},
+		{"a limit within the cap reconciles", nostr.Filter{Authors: []string{pk}, Limit: 3}, false},
+		{"a filter matching within the cap reconciles", nostr.Filter{Authors: []string{pk}, Kinds: []int{7}}, false},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			subID := fmt.Sprintf("neg_cap_%d", i)
+			if tt.blocked {
+				// Open a session under this id first, so the refusal has
+				// one to replace.
+				require.Equal(t, "NEG-MSG", negOpen(t, subID, nostr.Filter{Authors: []string{pk}, Limit: 1})[0])
+			}
+			reply := negOpen(t, subID, tt.filter)
+			if !tt.blocked {
+				assert.Equal(t, "NEG-MSG", reply[0], "got %v", reply)
+				return
+			}
+			require.Equal(t, "NEG-ERR", reply[0], "got %v", reply)
+			assert.Equal(t, "blocked: this query is too big", reply[2])
+
+			// No session is left under the id, neither a new one nor the
+			// one the refused NEG-OPEN replaced.
+			follow, _ := json.Marshal([]any{"NEG-MSG", subID, "61"})
+			require.NoError(t, c.WriteMessage(websocket.TextMessage, follow))
+			errReply := c.readMessageType(t, "NEG-ERR")
+			assert.Equal(t, "closed: session not found", errReply[2])
+		})
+	}
+}
+
+// TestNegentropyShortMessages covers NEG-OPEN and NEG-MSG frames missing
+// their trailing fields. handleMessage only guarantees two elements, and
+// it runs on a goroutine with no recover, so reading past the end of the
+// frame used to panic and take the whole relay down (nostrfi/relay#70).
+func TestNegentropyShortMessages(t *testing.T) {
+	server, _, cleanup := startTestRelay(t)
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+
+	tests := []struct {
+		name  string
+		frame []any
+	}{
+		{"NEG-OPEN with no filter", []any{"NEG-OPEN", "neg_short"}},
+		{"NEG-OPEN with no initial message", []any{"NEG-OPEN", "neg_short", nostr.Filter{}}},
+		{"NEG-MSG with no message", []any{"NEG-MSG", "neg_short"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg, _ := json.Marshal(tt.frame)
+			require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+
+			reply := c.readMessageType(t, "NEG-ERR")
+			require.Len(t, reply, 3)
+			assert.Equal(t, "neg_short", reply[1])
+			assert.True(t, strings.HasPrefix(reply[2].(string), "invalid:"), "got %q", reply[2])
+		})
+	}
+
+	// The relay is still up and this connection still served.
+	assert.Empty(t, c.reqEventIDs(t, "after_short_neg", nostr.Filter{Kinds: []int{1}}))
 }
 
 // nip98AuthHeader signs a NIP-98 kind-27235 event authorizing a POST to url

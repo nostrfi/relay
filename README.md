@@ -188,6 +188,12 @@ Initiate a sync using the `NEG-OPEN` message:
 ["NEG-OPEN", "sync_id", {"authors": ["<pubkey>"]}, "<hex_encoded_negentropy_msg>"]
 ```
 
+A sync reads only each matching event's id and `created_at`, oldest first, and ignores any `search`
+in the filter. A filter matching more than `resource_limits.max_sync_events` events (default
+1,000,000) is refused with `["NEG-ERR", "sync_id", "blocked: this query is too big"]` rather than
+reconciled over a truncated set, which would tell the client the relay lacks every newer event.
+Narrow the filter with `since`/`until` and sync in windows.
+
 #### NIP-50: Search
 
 ```json
@@ -361,9 +367,12 @@ resource_limits:                 # operational controls outside the NIP-11 spec
   messages_per_second: 20        # per-connection token-bucket rate for all messages
   events_per_second: 5           # per-connection token-bucket rate for EVENT publishes
   search_timeout_seconds: 5      # per-query work budget for NIP-50 searches; 0 disables
+  max_sync_events: 1000000       # most events one NIP-77 sync may cover; 0 disables
 ```
 
 `search_timeout_seconds` bounds the one query no index can answer: a NIP-50 search is an unindexed scan whose quality ordering is computed across every candidate row before `LIMIT` selects among them, so `max_limit` caps what a search returns, not what it reads. A search past the budget is cancelled and answered with `CLOSED` `error: search timed out`, and the subscription is dropped — the client can retry with a narrower term. Ordinary `REQ` filters carry no deadline. The default was calibrated from measurement (see the capacity baseline's search scenarios in the workspace repository): search cost grows roughly linearly with table size, and a broad search reaches the 5-second budget only in the low hundreds of thousands of rows.
+
+`max_sync_events` bounds a NIP-77 `NEG-OPEN`, which builds its whole reconciliation set in memory: about 40 bytes per event, so the default allows roughly 40 MB per sync session. A sync over the cap is refused with `NEG-ERR` `blocked: this query is too big`; it is never truncated. An absent key gets the default; an explicit `0` removes the cap.
 
 Rejections use a stable, machine-readable prefix (`invalid:`, `restricted:`, `rate-limited:`, `auth-required:`, `pow:`, `error:`) and never include raw internal error text. `REQ`s rejected for filter count, subscription count, or subscription-id length receive a `CLOSED` message; `EVENT`s rejected for any reason receive `OK false <reason>`.
 
