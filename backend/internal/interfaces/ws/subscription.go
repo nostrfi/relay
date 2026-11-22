@@ -90,7 +90,12 @@ func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter
 					}
 				}
 
-				h.sendEvent(c, subID, ev.Event)
+				eventJSON, err := encodeEvent(ev.Event)
+				if err != nil {
+					slog.Error("event encode failed", "event_id", ev.ID, "error", err)
+					continue
+				}
+				h.sendEventJSON(c, subID, eventJSON)
 				seenIDs[ev.ID] = true
 			}
 		}
@@ -199,6 +204,13 @@ func (h *RelayHandler) broadcast(ev *nostr.Event) {
 		return lowered
 	}
 
+	// Encoded at most once per event, on the first match, for the same
+	// reason: encoding per subscription meant re-marshalling identical
+	// bytes for every one of them (nostrfi/relay#72). A broadcast no
+	// subscription matches encodes nothing.
+	var eventJSON []byte
+	var encoded, encodeFailed bool
+
 	h.clients.Range(func(key, value any) bool {
 		client := key.(*Client)
 		client.subscriptions.Range(func(sKey, sValue any) bool {
@@ -220,12 +232,21 @@ func (h *RelayHandler) broadcast(ev *nostr.Event) {
 						}
 					}
 
-					h.sendEvent(client, subID, ev)
+					if !encoded {
+						encoded = true
+						var err error
+						if eventJSON, err = encodeEvent(ev); err != nil {
+							slog.Error("event encode failed", "event_id", ev.ID, "error", err)
+							encodeFailed = true
+							return false
+						}
+					}
+					h.sendEventJSON(client, subID, eventJSON)
 					break
 				}
 			}
 			return true
 		})
-		return true
+		return !encodeFailed
 	})
 }
