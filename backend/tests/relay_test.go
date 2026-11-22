@@ -3426,6 +3426,34 @@ func TestConfigMaxSyncEventsDefault(t *testing.T) {
 	}
 }
 
+// TestConfigMaxSyncSessionsDefault pins the per-connection NIP-77 session
+// cap: an absent key gets the shipped cap, an explicit zero still
+// disables it (nostrfi/relay#71).
+func TestConfigMaxSyncSessionsDefault(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   int
+	}{
+		{"an absent key gets the shipped default", "resource_limits:\n  max_connections: 100\n", 10},
+		{"an explicit zero still disables the cap", "resource_limits:\n  max_sync_sessions: 0\n", 0},
+		{"an explicit value wins", "resource_limits:\n  max_sync_sessions: 3\n", 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "config.yaml"), []byte(tt.config), 0644))
+			viper.Reset()
+			viper.SetConfigName("config")
+			viper.SetConfigType("yaml")
+			viper.AddConfigPath(tmpDir)
+			cfg, err := ws.LoadConfig()
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cfg.ResourceLimits.MaxSyncSessions)
+		})
+	}
+}
+
 func TestConfigServerStorageDefaults(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "relay-config-test-*")
 	if err != nil {
@@ -3946,6 +3974,134 @@ func TestNegentropyNoPayloadInLogs(t *testing.T) {
 	assert.Contains(t, logged, subID, "the subscription ID may still be logged")
 }
 
+// emptyNegInitial returns the hex initial message of a client syncing from
+// an empty set.
+func emptyNegInitial(t *testing.T) string {
+	t.Helper()
+	items := negentropy.NewVector()
+	items.Seal()
+	clientNeg, err := negentropy.NewNegentropy(items, 0)
+	require.NoError(t, err)
+	initial, err := clientNeg.Initiate()
+	require.NoError(t, err)
+	return hex.EncodeToString(initial)
+}
+
+// negOpen sends a NEG-OPEN and returns the relay's NEG-MSG or NEG-ERR
+// reply for that id.
+func (c *testClient) negOpen(t *testing.T, subID string, filter nostr.Filter, initialHex string) []any {
+	t.Helper()
+	msg, _ := json.Marshal([]any{"NEG-OPEN", subID, filter, initialHex})
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+	for {
+		reply := c.readMessageAny(t)
+		if (reply[0] == "NEG-MSG" || reply[0] == "NEG-ERR") && reply[1] == subID {
+			return reply
+		}
+	}
+}
+
+// negMsgClosed sends a NEG-MSG to subID and asserts the relay holds no
+// session under it.
+func (c *testClient) negMsgClosed(t *testing.T, subID string) {
+	t.Helper()
+	msg, _ := json.Marshal([]any{"NEG-MSG", subID, "61"})
+	require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+	reply := c.readMessageType(t, "NEG-ERR")
+	assert.Equal(t, subID, reply[1])
+	assert.Equal(t, "closed: session not found", reply[2])
+}
+
+// TestNegentropySessionCap covers resource_limits.max_sync_sessions: a
+// connection may hold that many NIP-77 sessions open, a further NEG-OPEN
+// is refused with NEG-ERR "blocked" and opens nothing, and every way a
+// session ends frees its slot (nostrfi/relay#71).
+func TestNegentropySessionCap(t *testing.T) {
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{}, ws.ResourceLimits{MaxSyncSessions: 2})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	initial := emptyNegInitial(t)
+
+	require.Equal(t, "NEG-MSG", c.negOpen(t, "s1", nostr.Filter{}, initial)[0])
+	require.Equal(t, "NEG-MSG", c.negOpen(t, "s2", nostr.Filter{}, initial)[0])
+
+	t.Run("a NEG-OPEN past the cap is refused and opens nothing", func(t *testing.T) {
+		reply := c.negOpen(t, "s3", nostr.Filter{}, initial)
+		require.Equal(t, "NEG-ERR", reply[0], "got %v", reply)
+		assert.Equal(t, "blocked: too many open sync sessions, max 2", reply[2])
+		c.negMsgClosed(t, "s3")
+	})
+
+	t.Run("reusing an open id needs no new slot", func(t *testing.T) {
+		reply := c.negOpen(t, "s1", nostr.Filter{Kinds: []int{1}}, initial)
+		assert.Equal(t, "NEG-MSG", reply[0], "got %v", reply)
+	})
+
+	t.Run("NEG-CLOSE frees a slot", func(t *testing.T) {
+		msg, _ := json.Marshal([]any{"NEG-CLOSE", "s2"})
+		require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
+		reply := c.negOpen(t, "s4", nostr.Filter{}, initial)
+		assert.Equal(t, "NEG-MSG", reply[0], "got %v", reply)
+	})
+
+	t.Run("a failed reconcile frees its slot", func(t *testing.T) {
+		// NIP-77 treats a session as closed once NEG-ERR is sent, so the
+		// client never NEG-CLOSEs it; the relay must drop it itself.
+		// Version byte 0x00 is outside the protocol range and fails
+		// Reconcile after the session is stored.
+		reply := c.negOpen(t, "s4", nostr.Filter{}, "00")
+		require.Equal(t, "NEG-ERR", reply[0], "got %v", reply)
+		assert.True(t, strings.HasPrefix(reply[2].(string), "error:"), "got %q", reply[2])
+		c.negMsgClosed(t, "s4")
+
+		reply = c.negOpen(t, "s5", nostr.Filter{}, initial)
+		assert.Equal(t, "NEG-MSG", reply[0], "the failed session's slot was not freed: %v", reply)
+	})
+
+	t.Run("a failed NEG-MSG reconcile frees its slot", func(t *testing.T) {
+		bad, _ := json.Marshal([]any{"NEG-MSG", "s5", "00"})
+		require.NoError(t, c.WriteMessage(websocket.TextMessage, bad))
+		reply := c.readMessageType(t, "NEG-ERR")
+		assert.True(t, strings.HasPrefix(reply[2].(string), "error:"), "got %q", reply[2])
+		c.negMsgClosed(t, "s5")
+
+		reply = c.negOpen(t, "s6", nostr.Filter{}, initial)
+		assert.Equal(t, "NEG-MSG", reply[0], "the failed session's slot was not freed: %v", reply)
+	})
+
+	t.Run("a new connection starts with every slot free", func(t *testing.T) {
+		other := connectTestRelay(t, server)
+		defer other.Close()
+		other.SetReadDeadline(time.Now().Add(5 * time.Second))
+		require.Equal(t, "NEG-MSG", other.negOpen(t, "s1", nostr.Filter{}, initial)[0])
+		require.Equal(t, "NEG-MSG", other.negOpen(t, "s2", nostr.Filter{}, initial)[0])
+	})
+}
+
+// TestNegentropySubidLength applies REQ's limitation.max_subid_length to
+// NEG-OPEN (nostrfi/relay#71).
+func TestNegentropySubidLength(t *testing.T) {
+	server, _, cleanup := startTestRelayWithLimits(t, ws.RelayInfo{Limitation: &ws.RelayLimitation{MaxSubidLength: 8}}, ws.ResourceLimits{})
+	defer cleanup()
+
+	c := connectTestRelay(t, server)
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	initial := emptyNegInitial(t)
+
+	reply := c.negOpen(t, "123456789", nostr.Filter{}, initial)
+	require.Equal(t, "NEG-ERR", reply[0], "got %v", reply)
+	assert.Equal(t, "invalid: subscription id longer than 8 characters", reply[2])
+	c.negMsgClosed(t, "123456789")
+
+	assert.Equal(t, "NEG-MSG", c.negOpen(t, "12345678", nostr.Filter{}, initial)[0])
+}
+
 // TestNegentropySyncCap covers resource_limits.max_sync_events: a NEG-OPEN
 // whose filter matches more events than the cap is refused with NEG-ERR
 // "blocked" and opens no session, rather than reconciling a truncated set
@@ -3969,24 +4125,9 @@ func TestNegentropySyncCap(t *testing.T) {
 		c.readOK(t)
 	}
 
-	// negOpen sends a NEG-OPEN from an empty client set and returns the
-	// relay's NEG-MSG or NEG-ERR reply.
 	negOpen := func(t *testing.T, subID string, filter nostr.Filter) []any {
 		t.Helper()
-		items := negentropy.NewVector()
-		items.Seal()
-		clientNeg, err := negentropy.NewNegentropy(items, 0)
-		require.NoError(t, err)
-		initial, err := clientNeg.Initiate()
-		require.NoError(t, err)
-		msg, _ := json.Marshal([]any{"NEG-OPEN", subID, filter, hex.EncodeToString(initial)})
-		require.NoError(t, c.WriteMessage(websocket.TextMessage, msg))
-		for {
-			reply := c.readMessageAny(t)
-			if (reply[0] == "NEG-MSG" || reply[0] == "NEG-ERR") && reply[1] == subID {
-				return reply
-			}
-		}
+		return c.negOpen(t, subID, filter, emptyNegInitial(t))
 	}
 
 	tests := []struct {
@@ -4017,10 +4158,7 @@ func TestNegentropySyncCap(t *testing.T) {
 
 			// No session is left under the id, neither a new one nor the
 			// one the refused NEG-OPEN replaced.
-			follow, _ := json.Marshal([]any{"NEG-MSG", subID, "61"})
-			require.NoError(t, c.WriteMessage(websocket.TextMessage, follow))
-			errReply := c.readMessageType(t, "NEG-ERR")
-			assert.Equal(t, "closed: session not found", errReply[2])
+			c.negMsgClosed(t, subID)
 		})
 	}
 }

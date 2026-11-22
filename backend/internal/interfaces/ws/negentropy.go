@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -18,6 +19,18 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 	if err != nil {
 		h.sendNegErr(c, subID, prefixInvalid+": could not decode hex message")
 		return
+	}
+
+	// max_sync_sessions bounds what one connection can pin: every session
+	// holds its whole vector until it ends. The check runs before the query
+	// so a refused NEG-OPEN costs no database work. Reusing an open id needs
+	// no new slot — NIP-77 closes the existing session first — so it is
+	// allowed at the cap, as REQ allows a subscription id it already holds.
+	if maxSessions := h.resourceLimits.MaxSyncSessions; maxSessions > 0 {
+		if _, existed := c.negSessions.Load(subID); !existed && countNegSessions(c) >= maxSessions {
+			h.sendNegErr(c, subID, fmt.Sprintf("%s: too many open sync sessions, max %d", prefixBlocked, maxSessions))
+			return
+		}
 	}
 
 	// max_sync_events bounds the reconciliation set. A query asking for
@@ -82,6 +95,10 @@ func (h *RelayHandler) handleNegOpen(c *Client, subID string, filter nostr.Filte
 
 	response, err := storage.Reconcile(initialMsg)
 	if err != nil {
+		// NIP-77: after a NEG-ERR the subscription is considered closed, so
+		// the client will never NEG-CLOSE it. Drop it here or it holds a
+		// max_sync_sessions slot until disconnect.
+		c.negSessions.Delete(subID)
 		slog.Error("negentropy reconcile failed", "sub_id", subID, "error", err)
 		h.sendNegErr(c, subID, prefixError+": reconciliation failed")
 		return
@@ -106,6 +123,8 @@ func (h *RelayHandler) handleNegMsg(c *Client, subID string, msgHex string) {
 
 	response, err := session.storage.Reconcile(msg)
 	if err != nil {
+		// As in handleNegOpen: the NEG-ERR closes the session for the client.
+		c.negSessions.Delete(subID)
 		slog.Error("negentropy reconcile failed", "sub_id", subID, "error", err)
 		h.sendNegErr(c, subID, prefixError+": reconciliation failed")
 		return

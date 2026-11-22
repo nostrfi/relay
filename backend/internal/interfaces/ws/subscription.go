@@ -23,6 +23,18 @@ func countSubscriptions(c *Client) int {
 	return n
 }
 
+// countNegSessions counts the NIP-77 sessions a connection holds open. As
+// with countSubscriptions, one worker per connection runs handleMessage in
+// order, so a count followed by a Store cannot race another NEG-OPEN.
+func countNegSessions(c *Client) int {
+	n := 0
+	c.negSessions.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
 func (h *RelayHandler) handleReq(c *Client, subID string, filters []nostr.Filter) {
 	c.subscriptions.Store(subID, subscription.New(subID, filters))
 

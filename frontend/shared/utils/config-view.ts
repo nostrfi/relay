@@ -47,7 +47,7 @@ export function formatLimit(value: number | undefined, unit: string): string {
 export function hasNoResourceLimits(config: RelayConfig | null): boolean {
   const limits = config?.resource_limits
   // Deliberately scoped to the three admission/rate controls the warning
-  // names: the search timeout and the sync cap default on server-side even
+  // names: the search timeout and the two sync caps default on server-side even
   // when the whole resource_limits section is omitted, and neither is a
   // connection cap nor rate limiting — counting them here would suppress
   // the warning for exactly the configuration it exists for.
@@ -66,7 +66,8 @@ export function configSections(config: RelayConfig): ConfigSection[] {
         { label: 'Messages per second', value: formatLimit(config.resource_limits.messages_per_second, 'per second'), tabular: true },
         { label: 'Events per second', value: formatLimit(config.resource_limits.events_per_second, 'per second'), tabular: true },
         { label: 'Search timeout', value: formatLimit(config.resource_limits.search_timeout_seconds, 'seconds'), tabular: true },
-        { label: 'Max sync events', value: formatLimit(config.resource_limits.max_sync_events, 'events'), tabular: true }
+        { label: 'Max sync events', value: formatLimit(config.resource_limits.max_sync_events, 'events'), tabular: true },
+        { label: 'Max sync sessions', value: formatLimit(config.resource_limits.max_sync_sessions, 'per connection'), tabular: true }
       ]
     },
     {

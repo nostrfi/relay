@@ -451,6 +451,12 @@ func (h *RelayHandler) handleMessage(c *Client, msg []byte) {
 			h.sendNegErr(c, "", prefixInvalid+": invalid subscription ID")
 			return
 		}
+		// The same id-length rule REQ applies. No stored session can have
+		// an id over the limit, so there is nothing to close here.
+		if limitation := h.relayInfo.Limitation; limitation != nil && limitation.MaxSubidLength > 0 && len(subID) > limitation.MaxSubidLength {
+			h.sendNegErr(c, subID, fmt.Sprintf("%s: subscription id longer than %d characters", prefixInvalid, limitation.MaxSubidLength))
+			return
+		}
 		// handleMessage guarantees two elements, not four, and it runs on
 		// a goroutine with no recover: indexing past the frame would panic
 		// and take the relay down (nostrfi/relay#70).
