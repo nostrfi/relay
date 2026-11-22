@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0](https://github.com/nostrfi/relay/compare/v0.3.1...v0.4.0) (2026-11-22)
+
+
+### Bug Fixes
+
+* **nip77:** cap negentropy sessions per connection ([#77](https://github.com/nostrfi/relay/issues/77)) ([bd85970](https://github.com/nostrfi/relay/commit/bd859703c3d75c3dab4fdd7b1aec65e9ee7b0f3c))
+
+
+### Performance Improvements
+
+* **nip77:** sync reads only id and created_at, capped by max_sync_events ([#75](https://github.com/nostrfi/relay/issues/75)) ([d1ed76c](https://github.com/nostrfi/relay/commit/d1ed76c4dc8ccd88368eeae43010d6219a6a945e))
+* **storage:** bound DuckDB in two pools; add storage.memory_limit ([#80](https://github.com/nostrfi/relay/issues/80)) ([bf73231](https://github.com/nostrfi/relay/commit/bf73231aa476c8e0464b8bfffcabca3f08177be0))
+* **ws:** allocation hygiene, and a full-entropy NIP-42 challenge ([#79](https://github.com/nostrfi/relay/issues/79)) ([4c30981](https://github.com/nostrfi/relay/commit/4c309813a178befcb3a6402c1792499f044d2320))
+* **ws:** encode a broadcast event once, not once per subscription ([#78](https://github.com/nostrfi/relay/issues/78)) ([b68600a](https://github.com/nostrfi/relay/commit/b68600ada7193d7939865adb86add7d59799b97a))
+
+
+### Miscellaneous Chores
+
+* release 0.4.0 ([#81](https://github.com/nostrfi/relay/issues/81)) ([7ed4a83](https://github.com/nostrfi/relay/commit/7ed4a836860231da276a2cc0f0744a67830a0d45))
+
 ## [0.3.1](https://github.com/nostrfi/relay/compare/v0.3.0...v0.3.1) (2026-11-20)
 
 
